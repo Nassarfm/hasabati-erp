@@ -1,0 +1,2666 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>حساباتي ERP — النظام المتكامل</title>
+<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:#f0f4f9; --surface:#fff; --surface2:#f0f6ff;
+  --border:#dce8f5; --accent:#0284c7; --accent-dark:#0369a1;
+  --accent-light:#e0f2fe; --success:#059669; --success-light:#d1fae5;
+  --danger:#dc2626; --danger-light:#fee2e2;
+  --warning:#d97706; --warning-light:#fef3c7;
+  --text:#0f172a; --text2:#475569; --text3:#94a3b8;
+}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:'Tajawal',sans-serif;background:var(--bg);color:var(--text);display:flex;height:100vh;overflow:hidden;font-size:14px;}
+
+/* SIDEBAR */
+.sidebar{width:230px;background:linear-gradient(180deg,#0369a1,#0284c7 60%,#0ea5e9);display:flex;flex-direction:column;flex-shrink:0;overflow-y:auto;}
+.logo{padding:18px 14px;border-bottom:1px solid rgba(255,255,255,.15);display:flex;align-items:center;gap:10px;}
+.logo-icon{width:34px;height:34px;background:#fff;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:900;color:#0284c7;box-shadow:0 3px 10px rgba(0,0,0,.15);}
+.logo-text{font-size:15px;font-weight:700;color:#fff;}
+.logo-sub{font-size:10px;color:rgba(255,255,255,.6);}
+.nav-sec{padding:10px 0;}
+.nav-lbl{font-size:9px;font-weight:700;color:rgba(255,255,255,.45);padding:3px 14px 7px;letter-spacing:1px;text-transform:uppercase;}
+.nav-item{display:flex;align-items:center;gap:9px;padding:8px 14px;cursor:pointer;transition:all .2s;color:rgba(255,255,255,.75);border-right:3px solid transparent;font-size:13px;}
+.nav-item:hover{background:rgba(255,255,255,.12);color:#fff;}
+.nav-item.active{background:rgba(255,255,255,.18);color:#fff;border-right-color:#fff;font-weight:600;}
+.nav-badge{margin-right:auto;background:rgba(255,255,255,.25);color:#fff;font-size:10px;padding:2px 6px;border-radius:10px;font-weight:700;}
+.nav-badge.red{background:#ef4444;}
+.sidebar-footer{margin-top:auto;padding:14px;border-top:1px solid rgba(255,255,255,.15);}
+.user-card{display:flex;align-items:center;gap:9px;padding:9px;background:rgba(255,255,255,.15);border-radius:9px;cursor:pointer;}
+.avatar{width:30px;height:30px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;color:#0284c7;}
+.user-name{font-size:12px;font-weight:600;color:#fff;}
+.user-role{font-size:10px;color:rgba(255,255,255,.6);}
+
+/* MAIN */
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden;}
+.topbar{height:54px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 18px;gap:10px;flex-shrink:0;box-shadow:0 1px 4px rgba(0,0,0,.05);}
+.page-title{font-size:15px;font-weight:700;flex:1;}
+.page-sub{font-size:11px;color:var(--text2);}
+.topbar-actions{display:flex;gap:7px;align-items:center;}
+.search-box{display:flex;align-items:center;gap:7px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:6px 11px;width:200px;}
+.search-box input{background:none;border:none;outline:none;color:var(--text);font-family:'Tajawal',sans-serif;font-size:12px;width:100%;}
+.search-box input::placeholder{color:var(--text3);}
+.content{flex:1;overflow-y:auto;padding:18px;}
+.page{display:none;animation:fadeIn .3s ease;}
+.page.active{display:block;}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+/* BUTTONS */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:9px;border:none;cursor:pointer;font-family:'Tajawal',sans-serif;font-size:13px;font-weight:600;transition:all .2s;}
+.btn-primary{background:var(--accent);color:#fff;box-shadow:0 2px 10px rgba(2,132,199,.3);}
+.btn-primary:hover{background:var(--accent-dark);transform:translateY(-1px);}
+.btn-ghost{background:var(--surface);color:var(--text2);border:1px solid var(--border);}
+.btn-ghost:hover{color:var(--text);}
+.btn-success{background:var(--success);color:#fff;box-shadow:0 2px 10px rgba(5,150,105,.3);}
+.btn-success:hover{background:#047857;transform:translateY(-1px);}
+.btn-danger{background:var(--danger);color:#fff;}
+.btn-danger:hover{background:#b91c1c;}
+.btn-white{background:#fff;color:var(--accent);font-weight:700;box-shadow:0 2px 8px rgba(0,0,0,.1);}
+
+/* CARDS */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:14px;box-shadow:0 1px 5px rgba(0,0,0,.05);}
+.card-hd{display:flex;align-items:center;gap:10px;padding:16px 18px;border-bottom:1px solid var(--border);background:linear-gradient(135deg,#f8fbff,#fff);}
+.card-hd-icon{width:36px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0;}
+.card-hd-icon.blue{background:var(--accent-light);}
+.card-hd-icon.green{background:var(--success-light);}
+.card-hd-icon.amber{background:var(--warning-light);}
+.card-hd-title{font-size:14px;font-weight:700;}
+.card-hd-sub{font-size:11px;color:var(--text2);margin-top:1px;}
+.card-body{padding:18px;}
+
+/* KPI */
+.kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;}
+.kpi{background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:16px;position:relative;overflow:hidden;transition:transform .2s,box-shadow .2s;box-shadow:0 1px 5px rgba(0,0,0,.05);}
+.kpi:hover{transform:translateY(-2px);box-shadow:0 5px 18px rgba(0,0,0,.09);}
+.kpi::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;}
+.kpi.blue::before{background:var(--accent);}
+.kpi.green::before{background:var(--success);}
+.kpi.amber::before{background:var(--warning);}
+.kpi.red::before{background:var(--danger);}
+.kpi.red::before{background:var(--danger);}
+.kpi-lbl{font-size:11px;color:var(--text2);margin-bottom:6px;}
+.kpi-val{font-size:24px;font-weight:900;margin-bottom:4px;}
+.kpi-val.blue{color:var(--accent);}
+.kpi-val.green{color:var(--success);}
+.kpi-val.amber{color:var(--warning);}
+.kpi-val.red{color:var(--danger);}
+.kpi-ch{font-size:10px;}
+.kpi-ch.up{color:var(--success);}
+.kpi-ch.dn{color:var(--danger);}
+.kpi-ico{position:absolute;top:14px;left:14px;font-size:26px;opacity:.12;}
+
+/* TABLE */
+.tbl{width:100%;border-collapse:collapse;}
+.tbl th{text-align:right;font-size:11px;font-weight:700;color:var(--text3);padding:8px 11px;border-bottom:1px solid var(--border);text-transform:uppercase;letter-spacing:.4px;}
+.tbl td{padding:10px 11px;border-bottom:1px solid var(--border);font-size:13px;color:var(--text2);}
+.tbl tr:last-child td{border-bottom:none;}
+.tbl tr:hover td{background:var(--surface2);color:var(--text);}
+.tbl td a{color:var(--accent);cursor:pointer;font-weight:600;}
+.tbl td a:hover{text-decoration:underline;}
+
+/* BADGE */
+.badge{display:inline-flex;align-items:center;padding:3px 8px;border-radius:20px;font-size:11px;font-weight:600;}
+.badge.success{background:var(--success-light);color:var(--success);}
+.badge.warning{background:var(--warning-light);color:var(--warning);}
+.badge.danger{background:var(--danger-light);color:var(--danger);}
+.badge.info{background:var(--accent-light);color:var(--accent);}
+
+/* GRID */
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;}
+.g3{display:grid;grid-template-columns:2fr 1fr;gap:14px;margin-bottom:14px;}
+
+/* WELCOME BANNER */
+.banner{background:linear-gradient(135deg,#0284c7,#0ea5e9);border-radius:13px;padding:18px 22px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 4px 18px rgba(2,132,199,.25);}
+.banner-title{font-size:17px;font-weight:900;color:#fff;margin-bottom:3px;}
+.banner-sub{font-size:12px;color:rgba(255,255,255,.8);}
+
+/* CHART */
+.chart-bars{display:flex;align-items:flex-end;gap:7px;height:110px;padding-top:8px;}
+.cb-wrap{flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;}
+.cb{width:100%;border-radius:4px 4px 0 0;min-height:4px;}
+.cb-lbl{font-size:9px;color:var(--text3);}
+
+/* ACTIVITY */
+.act-item{display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-bottom:1px solid var(--border);}
+.act-item:last-child{border-bottom:none;}
+.act-dot{width:7px;height:7px;border-radius:50%;margin-top:5px;flex-shrink:0;}
+.act-txt{font-size:12px;line-height:1.5;}
+.act-time{font-size:10px;color:var(--text3);margin-top:1px;}
+
+/* PROGRESS */
+.prog{height:5px;background:var(--border);border-radius:3px;overflow:hidden;}
+.prog-fill{height:100%;border-radius:3px;}
+.stat-row{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--border);}
+.stat-row:last-child{border-bottom:none;}
+
+/* ======= MODAL ======= */
+.modal-overlay{position:fixed;inset:0;background:rgba(15,23,42,.45);backdrop-filter:blur(4px);z-index:100;display:none;align-items:flex-start;justify-content:center;padding:30px 16px;overflow-y:auto;}
+.modal-overlay.open{display:flex;}
+.modal{background:var(--surface);border-radius:18px;width:100%;max-width:900px;box-shadow:0 20px 60px rgba(0,0,0,.2);animation:modalIn .3s cubic-bezier(.34,1.56,.64,1);}
+@keyframes modalIn{from{opacity:0;transform:scale(.94) translateY(20px)}to{opacity:1;transform:scale(1) translateY(0)}}
+.modal-hd{display:flex;align-items:center;justify-content:space-between;padding:18px 22px;border-bottom:1px solid var(--border);background:linear-gradient(135deg,#f0f6ff,#fff);border-radius:18px 18px 0 0;}
+.modal-title{font-size:16px;font-weight:900;display:flex;align-items:center;gap:8px;}
+.modal-close{width:32px;height:32px;border-radius:8px;border:1px solid var(--border);background:var(--surface);cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;color:var(--text2);transition:all .2s;}
+.modal-close:hover{background:var(--danger-light);color:var(--danger);border-color:var(--danger);}
+.modal-body{padding:22px;}
+.modal-footer{padding:16px 22px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px;background:#fafcff;border-radius:0 0 18px 18px;}
+
+/* FORM ELEMENTS */
+.fg{display:flex;flex-direction:column;gap:5px;margin-bottom:14px;}
+.fl{font-size:11px;font-weight:700;color:var(--text2);display:flex;align-items:center;gap:3px;}
+.fl .req{color:var(--danger);}
+.fi,.fs,.ft{width:100%;background:var(--surface2);border:1.5px solid var(--border);border-radius:9px;padding:9px 13px;color:var(--text);font-family:'Tajawal',sans-serif;font-size:13px;outline:none;transition:all .2s;}
+.fi:focus,.fs:focus,.ft:focus{border-color:var(--accent);background:#fff;box-shadow:0 0 0 3px rgba(2,132,199,.1);}
+.fi.err{border-color:var(--danger);}
+.fi.ok{border-color:var(--success);}
+.fi::placeholder{color:var(--text3);}
+.ft{resize:vertical;min-height:70px;}
+.fs{appearance:none;cursor:pointer;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='11' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:left 11px center;padding-left:30px;}
+.fs option{background:#fff;}
+.err-msg{font-size:10px;color:var(--danger);display:none;}
+.err-msg.show{display:block;}
+.fgrid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+.fgrid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;}
+.span2{grid-column:span 2;}
+.span3{grid-column:span 3;}
+.divider{display:flex;align-items:center;gap:10px;margin:16px 0;}
+.divider-line{flex:1;height:1px;background:var(--border);}
+.divider-txt{font-size:10px;font-weight:700;color:var(--text3);white-space:nowrap;}
+
+/* RADIO CARDS */
+.rc-group{display:flex;gap:8px;}
+.rc{flex:1;border:1.5px solid var(--border);border-radius:9px;padding:9px 12px;cursor:pointer;transition:all .2s;display:flex;align-items:center;gap:7px;background:var(--surface2);}
+.rc:hover,.rc.sel{border-color:var(--accent);background:var(--accent-light);}
+.rc input{accent-color:var(--accent);}
+.rc-lbl{font-size:12px;font-weight:600;cursor:pointer;}
+
+/* TOGGLE */
+.tgl-wrap{display:flex;align-items:center;justify-content:space-between;padding:11px 13px;background:var(--surface2);border:1.5px solid var(--border);border-radius:9px;cursor:pointer;transition:all .2s;margin-bottom:8px;}
+.tgl-wrap:hover{border-color:var(--accent);}
+.tgl-info{display:flex;flex-direction:column;gap:1px;}
+.tgl-title{font-size:12px;font-weight:600;}
+.tgl-sub{font-size:10px;color:var(--text2);}
+.tgl{position:relative;width:40px;height:22px;flex-shrink:0;}
+.tgl input{opacity:0;width:0;height:0;}
+.tgl-sl{position:absolute;inset:0;background:var(--border);border-radius:22px;transition:.3s;cursor:pointer;}
+.tgl-sl:before{content:'';position:absolute;width:16px;height:16px;border-radius:50%;background:#fff;bottom:3px;right:3px;transition:.3s;box-shadow:0 1px 3px rgba(0,0,0,.2);}
+.tgl input:checked+.tgl-sl{background:var(--accent);}
+.tgl input:checked+.tgl-sl:before{transform:translateX(-18px);}
+
+/* INVOICE LINE ITEMS */
+.items-table{width:100%;border-collapse:collapse;margin-bottom:12px;}
+.items-table th{text-align:right;font-size:11px;font-weight:700;color:var(--text3);padding:7px 10px;background:var(--surface2);border:1px solid var(--border);}
+.items-table td{padding:6px 8px;border:1px solid var(--border);vertical-align:middle;}
+.items-table td input,.items-table td select{width:100%;background:transparent;border:none;outline:none;font-family:'Tajawal',sans-serif;font-size:13px;color:var(--text);padding:3px 4px;}
+.items-table td input:focus,.items-table td select:focus{background:var(--accent-light);border-radius:4px;}
+.items-table tbody tr:hover td{background:#f8fbff;}
+.del-row{background:none;border:none;cursor:pointer;color:var(--text3);font-size:16px;padding:2px 6px;border-radius:5px;transition:all .2s;}
+.del-row:hover{background:var(--danger-light);color:var(--danger);}
+.add-row-btn{display:flex;align-items:center;gap:6px;padding:8px 14px;border:1.5px dashed var(--border);border-radius:8px;background:none;cursor:pointer;font-family:'Tajawal',sans-serif;font-size:12px;font-weight:600;color:var(--accent);transition:all .2s;width:100%;}
+.add-row-btn:hover{border-color:var(--accent);background:var(--accent-light);}
+
+/* INVOICE TOTALS */
+.totals-box{background:var(--surface2);border:1px solid var(--border);border-radius:11px;padding:14px 16px;}
+.total-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px;}
+.total-row:last-child{border-bottom:none;font-size:15px;font-weight:900;}
+.total-row.grand{color:var(--accent);}
+.total-lbl{color:var(--text2);}
+
+/* TOAST */
+.toast{position:fixed;top:18px;left:50%;transform:translateX(-50%) translateY(-80px);background:var(--success);color:#fff;padding:12px 22px;border-radius:11px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:9px;box-shadow:0 8px 28px rgba(0,0,0,.14);transition:transform .4s cubic-bezier(.34,1.56,.64,1);z-index:999;}
+.toast.show{transform:translateX(-50%) translateY(0);}
+
+/* AVATAR CIRCLE */
+.av-circle{width:70px;height:70px;border-radius:50%;background:linear-gradient(135deg,var(--accent),#0ea5e9);display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:900;color:#fff;box-shadow:0 4px 14px rgba(2,132,199,.3);}
+
+/* ===== LOGIN SCREEN ===== */
+#login-screen{position:fixed;inset:0;z-index:9999;background:linear-gradient(135deg,#0369a1 0%,#0284c7 40%,#0ea5e9 100%);display:flex;align-items:center;justify-content:center;font-family:'Tajawal',sans-serif;}
+#login-screen.hidden{display:none;}
+.login-box{background:#fff;border-radius:24px;padding:40px 36px;width:420px;box-shadow:0 25px 80px rgba(0,0,0,.25);position:relative;overflow:hidden;}
+.login-box::before{content:'';position:absolute;top:0;left:0;right:0;height:4px;background:linear-gradient(90deg,#0284c7,#0ea5e9,#38bdf8);}
+.login-logo{display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:28px;}
+.login-logo-icon{width:52px;height:52px;background:linear-gradient(135deg,#0369a1,#0284c7);border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:900;color:#fff;box-shadow:0 6px 20px rgba(2,132,199,.4);}
+.login-title{font-size:22px;font-weight:900;color:var(--text);}
+.login-sub{font-size:12px;color:var(--text3);}
+.login-welcome{text-align:center;font-size:15px;font-weight:700;color:var(--text);margin-bottom:6px;}
+.login-hint{text-align:center;font-size:12px;color:var(--text3);margin-bottom:22px;}
+.login-field{margin-bottom:14px;}
+.login-label{font-size:12px;font-weight:700;color:var(--text2);margin-bottom:6px;display:block;}
+.login-input{width:100%;padding:11px 14px;border:1.5px solid var(--border);border-radius:10px;font-family:'Tajawal',sans-serif;font-size:14px;color:var(--text);outline:none;transition:border-color .2s,box-shadow .2s;}
+.login-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(2,132,199,.12);}
+.login-input.err{border-color:var(--danger);}
+.login-err{font-size:11px;color:var(--danger);margin-top:5px;display:none;}
+.login-err.show{display:block;}
+.login-btn{width:100%;padding:13px;background:linear-gradient(135deg,#0369a1,#0284c7);color:#fff;border:none;border-radius:11px;font-family:'Tajawal',sans-serif;font-size:15px;font-weight:700;cursor:pointer;transition:all .2s;margin-top:6px;box-shadow:0 4px 14px rgba(2,132,199,.35);}
+.login-btn:hover{background:linear-gradient(135deg,#025d8c,#0273aa);transform:translateY(-1px);box-shadow:0 6px 20px rgba(2,132,199,.4);}
+.login-btn:active{transform:translateY(0);}
+.login-users{margin-top:20px;border-top:1px solid var(--border);padding-top:16px;}
+.login-users-title{font-size:11px;font-weight:700;color:var(--text3);margin-bottom:10px;text-align:center;letter-spacing:1px;}
+.login-quick{display:flex;flex-direction:column;gap:7px;}
+.login-quick-btn{display:flex;align-items:center;gap:10px;padding:9px 13px;border:1.5px solid var(--border);border-radius:10px;cursor:pointer;transition:all .2s;background:#fff;}
+.login-quick-btn:hover{border-color:var(--accent);background:var(--accent-light);}
+.login-quick-avatar{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:900;flex-shrink:0;}
+.login-quick-name{font-size:13px;font-weight:600;color:var(--text);}
+.login-quick-role{font-size:11px;color:var(--text3);}
+.role-badge{padding:2px 8px;border-radius:5px;font-size:10px;font-weight:700;margin-right:auto;}
+.role-admin{background:#fef3c7;color:#92400e;}
+.role-accountant{background:#e0f2fe;color:#0369a1;}
+.role-sales{background:#d1fae5;color:#065f46;}
+.role-warehouse{background:#ede9fe;color:#5b21b6;}
+.role-viewer{background:#f1f5f9;color:#475569;}
+/* تأثير نبضة عند الدخول */
+@keyframes loginPulse{0%{transform:scale(1)}50%{transform:scale(1.02)}100%{transform:scale(1)}}
+.login-box.success{animation:loginPulse .4s ease;}
+/* قفل الصلاحيات */
+.locked-overlay{position:absolute;inset:0;background:rgba(255,255,255,.85);border-radius:14px;display:flex;align-items:center;justify-content:center;z-index:10;backdrop-filter:blur(2px);}
+.locked-msg{text-align:center;color:var(--text2);}
+.locked-icon{font-size:32px;display:block;margin-bottom:8px;}
+/* مؤشر المستخدم في الشريط العلوي */
+.current-user-badge{display:flex;align-items:center;gap:7px;padding:5px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:9px;cursor:pointer;font-size:12px;font-weight:600;}
+.current-user-badge:hover{background:var(--accent-light);}
+
+::-webkit-scrollbar{width:4px;height:4px;}
+::-webkit-scrollbar-thumb{background:#c8ddf0;border-radius:3px;}
+.sidebar::-webkit-scrollbar-thumb{background:rgba(255,255,255,.25);}
+
+/* PRINT */
+@media print{
+  .sidebar,.topbar,.modal-footer,.no-print{display:none!important;}
+  .main{overflow:visible;}
+  .content{overflow:visible;padding:0;}
+  body{height:auto;}
+}
+</style>
+</head>
+<body>
+
+<!-- ===== شاشة تسجيل الدخول ===== -->
+<div id="login-screen">
+  <div class="login-box" id="login-box">
+    <div class="login-logo">
+      <div class="login-logo-icon">ح</div>
+      <div>
+        <div class="login-title">حساباتي ERP</div>
+        <div class="login-sub">نظام المحاسبة المتكامل — نسخة 2.0</div>
+      </div>
+    </div>
+    <div class="login-welcome">مرحباً بك 👋</div>
+    <div class="login-hint">سجّل دخولك للوصول إلى النظام</div>
+
+    <div class="login-field">
+      <label class="login-label">اسم المستخدم</label>
+      <input class="login-input" id="li-user" placeholder="أدخل اسم المستخدم" autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('li-pass').focus()">
+      <div class="login-err" id="li-user-err">⚠️ اسم المستخدم غير صحيح</div>
+    </div>
+    <div class="login-field">
+      <label class="login-label">كلمة المرور</label>
+      <div style="position:relative">
+        <input class="login-input" id="li-pass" type="password" placeholder="أدخل كلمة المرور" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()" style="padding-left:40px">
+        <span onclick="togglePass()" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:16px;color:var(--text3)" id="pass-eye">👁️</span>
+      </div>
+      <div class="login-err" id="li-pass-err">⚠️ كلمة المرور غير صحيحة</div>
+    </div>
+    <div class="login-err" id="li-general-err" style="text-align:center;font-size:13px;margin-bottom:8px"></div>
+    <button class="login-btn" onclick="doLogin()">🔐 تسجيل الدخول</button>
+
+    <div class="login-users">
+      <div class="login-users-title">— دخول سريع للتجربة —</div>
+      <div class="login-quick">
+        <div class="login-quick-btn" onclick="quickLogin('admin')">
+          <div class="login-quick-avatar" style="background:#fef3c7">👑</div>
+          <div><div class="login-quick-name">أحمد المدير</div><div class="login-quick-role">admin / admin123</div></div>
+          <span class="role-badge role-admin">مدير عام</span>
+        </div>
+        <div class="login-quick-btn" onclick="quickLogin('accountant')">
+          <div class="login-quick-avatar" style="background:#e0f2fe">📒</div>
+          <div><div class="login-quick-name">سارة المحاسبة</div><div class="login-quick-role">accountant / acc123</div></div>
+          <span class="role-badge role-accountant">محاسب</span>
+        </div>
+        <div class="login-quick-btn" onclick="quickLogin('sales')">
+          <div class="login-quick-avatar" style="background:#d1fae5">💼</div>
+          <div><div class="login-quick-name">محمد المبيعات</div><div class="login-quick-role">sales / sales123</div></div>
+          <span class="role-badge role-sales">مبيعات</span>
+        </div>
+        <div class="login-quick-btn" onclick="quickLogin('warehouse')">
+          <div class="login-quick-avatar" style="background:#ede9fe">📦</div>
+          <div><div class="login-quick-name">خالد المستودع</div><div class="login-quick-role">warehouse / wh123</div></div>
+          <span class="role-badge role-warehouse">مستودع</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast">✅ تمت العملية بنجاح!</div>
+
+<!-- SIDEBAR -->
+<div class="sidebar">
+  <div class="logo">
+    <div class="logo-icon">ح</div>
+    <div><div class="logo-text">حساباتي ERP</div><div class="logo-sub">نسخة 2.0 — تجريبية</div></div>
+  </div>
+  <div class="nav-sec">
+    <div class="nav-lbl">الرئيسية</div>
+    <div class="nav-item active" onclick="showPage('dashboard',this,'لوحة التحكم','نظرة عامة على الأداء المالي')">
+      <span>📊</span> لوحة التحكم
+    </div>
+  </div>
+  <div class="nav-sec">
+    <div class="nav-lbl">المالية</div>
+    <div class="nav-item" onclick="showPage('accounting',this,'المحاسبة','دليل الحسابات والقيود اليومية')">
+      <span>📒</span> المحاسبة
+    </div>
+    <div class="nav-item" onclick="showPage('invoices',this,'الفواتير','إدارة فواتير البيع والشراء')">
+      <span>🧾</span> الفواتير <span class="nav-badge red">3</span>
+    </div>
+    <div class="nav-item" onclick="showPage('reports',this,'التقارير المالية','تقارير ZATCA والميزانية والأرباح')">
+      <span>📈</span> التقارير
+    </div>
+  </div>
+  <div class="nav-sec">
+    <div class="nav-lbl">المبيعات</div>
+    <div class="nav-item" onclick="showPage('sales',this,'المبيعات','أوامر البيع ومتابعة العملاء')">
+      <span>💼</span> المبيعات
+    </div>
+    <div class="nav-item" onclick="showPage('customers',this,'العملاء','قاعدة بيانات العملاء')">
+      <span>👥</span> العملاء
+    </div>
+    <div class="nav-item" onclick="showPage('purchases',this,'المشتريات','أوامر الشراء والموردون')">
+      <span>🛒</span> المشتريات
+    </div>
+  </div>
+  <div class="nav-sec">
+    <div class="nav-lbl">العمليات</div>
+    <div class="nav-item" onclick="showPage('inventory',this,'المخزون','إدارة الأصناف والمستودعات')">
+      <span>📦</span> المخزون <span class="nav-badge">!</span>
+    </div>
+    <div class="nav-item" onclick="showPage('hr',this,'الموارد البشرية','الموظفون والرواتب')">
+      <span>👤</span> الموارد البشرية
+    </div>
+    <div class="nav-item" onclick="showPage('assets',this,'الأصول الثابتة','سجل الأصول والاستهلاك')">
+      <span>🏢</span> الأصول الثابتة
+    </div>
+  </div>
+  <div class="nav-sec">
+    <div class="nav-lbl">النظام</div>
+    <div class="nav-item" onclick="showPage('settings',this,'الإعدادات','إعدادات الشركة والنظام')">
+      <span>⚙️</span> الإعدادات
+    </div>
+  </div>
+  <div class="sidebar-footer">
+    <div class="user-card" onclick="doLogout()">
+      <div class="avatar" id="sidebar-avatar">؟</div>
+      <div>
+        <div class="user-name" id="sidebar-username">—</div>
+        <div class="user-role" id="sidebar-role">—</div>
+      </div>
+      <span style="margin-right:auto;font-size:11px;opacity:.6" title="تسجيل خروج">🚪</span>
+    </div>
+  </div>
+</div>
+
+<!-- MAIN -->
+<div class="main">
+  <div class="topbar">
+    <div>
+      <div class="page-title" id="ttl">لوحة التحكم</div>
+      <div class="page-sub" id="sub">نظرة عامة على الأداء المالي</div>
+    </div>
+    <div class="topbar-actions">
+      <div class="search-box"><span>🔍</span><input type="text" placeholder="بحث سريع..."></div>
+      <span id="save-indicator" style="font-size:11px;color:var(--text3);white-space:nowrap;transition:all .3s;padding:0 4px">⏳ جاري التحميل...</span>
+      <button class="btn btn-ghost" title="حفظ الآن" onclick="manualSave()" style="font-size:13px;padding:7px 10px">💾</button>
+      <button class="btn btn-ghost" title="حذف البيانات" onclick="clearAllData()" style="font-size:13px;padding:7px 10px;color:var(--danger)">🗑️</button>
+      <button class="btn btn-ghost">🔔</button>
+      <button class="btn btn-primary" id="top-btn" onclick="handleTopBtn()">+ إضافة</button>
+    </div>
+  </div>
+
+  <div class="content">
+
+    <!-- ===== DASHBOARD ===== -->
+    <div class="page active" id="page-dashboard">
+      <div class="banner">
+        <div><div class="banner-title">مرحباً، أحمد 👋</div><div class="banner-sub">الخميس 5 مارس 2026 — ملخص أداء شركتك اليوم</div></div>
+        <button class="btn btn-white">📥 تحميل التقرير</button>
+      </div>
+      <div class="kpi-grid">
+        <div class="kpi blue"><div class="kpi-ico">💰</div><div class="kpi-lbl">إجمالي الإيرادات</div><div class="kpi-val blue">١٫٢م</div><div class="kpi-ch up">▲ 12.4% نمو</div></div>
+        <div class="kpi green"><div class="kpi-ico">📈</div><div class="kpi-lbl">صافي الربح</div><div class="kpi-val green">٣٤٢ك</div><div class="kpi-ch up">▲ 8.1% نمو</div></div>
+        <div class="kpi amber"><div class="kpi-ico">🧾</div><div class="kpi-lbl">فواتير معلقة</div><div class="kpi-val amber">١٨</div><div class="kpi-ch dn">▼ 3 متأخرة</div></div>
+        <div class="kpi blue"><div class="kpi-ico">👥</div><div class="kpi-lbl">إجمالي الموظفين</div><div class="kpi-val blue">١٤٧</div><div class="kpi-ch up">▲ 5 جدد</div></div>
+      </div>
+      <div class="g3">
+        <div class="card"><div class="card-hd"><div class="card-hd-icon blue">📊</div><div><div class="card-hd-title">الإيرادات الشهرية</div></div></div><div class="card-body"><div class="chart-bars" id="chart"></div></div></div>
+        <div class="card"><div class="card-hd"><div class="card-hd-icon green">🏆</div><div><div class="card-hd-title">أداء الأقسام</div></div></div>
+          <div class="card-body">
+            <div class="stat-row"><span style="font-size:12px;color:var(--text2)">المبيعات</span><div style="flex:1;margin:0 10px"><div class="prog"><div class="prog-fill" style="width:82%;background:var(--success)"></div></div></div><b style="color:var(--success);font-size:12px">82%</b></div>
+            <div class="stat-row"><span style="font-size:12px;color:var(--text2)">التحصيل</span><div style="flex:1;margin:0 10px"><div class="prog"><div class="prog-fill" style="width:67%;background:var(--accent)"></div></div></div><b style="color:var(--accent);font-size:12px">67%</b></div>
+            <div class="stat-row"><span style="font-size:12px;color:var(--text2)">المخزون</span><div style="flex:1;margin:0 10px"><div class="prog"><div class="prog-fill" style="width:91%;background:#6366f1"></div></div></div><b style="color:#6366f1;font-size:12px">91%</b></div>
+            <div class="stat-row"><span style="font-size:12px;color:var(--text2)">الموارد البشرية</span><div style="flex:1;margin:0 10px"><div class="prog"><div class="prog-fill" style="width:75%;background:var(--warning)"></div></div></div><b style="color:var(--warning);font-size:12px">75%</b></div>
+          </div>
+        </div>
+      </div>
+      <div class="g2">
+        <div class="card"><div class="card-hd"><div class="card-hd-icon blue">🕐</div><div><div class="card-hd-title">آخر النشاطات</div></div></div>
+          <div class="card-body">
+            <div class="act-item"><div class="act-dot" style="background:var(--success)"></div><div><div class="act-txt">تم إصدار فاتورة #INV-2841 لشركة الأمل</div><div class="act-time">منذ 10 دقائق</div></div></div>
+            <div class="act-item"><div class="act-dot" style="background:var(--accent)"></div><div><div class="act-txt">استلام دفعة 45,000 ريال من محمد العمر</div><div class="act-time">منذ 45 دقيقة</div></div></div>
+            <div class="act-item"><div class="act-dot" style="background:var(--warning)"></div><div><div class="act-txt">تنبيه: مخزون المنتج X أقل من الحد الأدنى</div><div class="act-time">منذ ساعتين</div></div></div>
+            <div class="act-item"><div class="act-dot" style="background:var(--danger)"></div><div><div class="act-txt">فاتورة #INV-2830 متأخرة عن موعد الدفع</div><div class="act-time">منذ 3 ساعات</div></div></div>
+          </div>
+        </div>
+        <div class="card"><div class="card-hd"><div class="card-hd-icon amber">⚡</div><div><div class="card-hd-title">إجراءات سريعة</div></div></div>
+          <div class="card-body" style="display:flex;flex-direction:column;gap:9px">
+            <button class="btn btn-primary" style="width:100%;justify-content:center" onclick="openModal('invoice')">🧾 فاتورة جديدة</button>
+            <button class="btn btn-success" style="width:100%;justify-content:center" onclick="openModal('customer')">👤 إضافة عميل</button>
+            <button class="btn btn-ghost" style="width:100%;justify-content:center" onclick="showPage('inventory',null,'المخزون','')">📦 تحديث المخزون</button>
+            <button class="btn btn-ghost" style="width:100%;justify-content:center" onclick="showPage('reports',null,'التقارير المالية','')">📊 عرض التقارير</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== INVOICES ===== -->
+    <div class="page" id="page-invoices">
+      <div class="kpi-grid">
+        <div class="kpi blue"><div class="kpi-lbl">إجمالي الفواتير</div><div class="kpi-val blue">٨٤</div><div class="kpi-ch up">▲ هذا الشهر</div></div>
+        <div class="kpi green"><div class="kpi-lbl">مدفوعة</div><div class="kpi-val green">٦١</div><div class="kpi-ch up">▲ 72%</div></div>
+        <div class="kpi amber"><div class="kpi-lbl">معلقة</div><div class="kpi-val amber">١٨</div><div class="kpi-ch">بانتظار الدفع</div></div>
+        <div class="kpi red"><div class="kpi-lbl">متأخرة</div><div class="kpi-val red">٥</div><div class="kpi-ch dn">تحتاج متابعة</div></div>
+      </div>
+      <div class="card">
+        <div class="card-hd" style="justify-content:space-between">
+          <div style="display:flex;align-items:center;gap:10px"><div class="card-hd-icon blue">🧾</div><div><div class="card-hd-title">قائمة الفواتير</div></div></div>
+          <button class="btn btn-primary" onclick="openModal('invoice')">+ فاتورة جديدة</button>
+        </div>
+        <div class="card-body" style="padding:0">
+          <table class="tbl" id="inv-table">
+            <thead><tr><th>رقم الفاتورة</th><th>العميل</th><th>التاريخ</th><th>المبلغ</th><th>الضريبة</th><th>الإجمالي</th><th>الحالة</th><th>إجراء</th></tr></thead>
+            <tbody id="inv-body">
+              <tr><td><a>#INV-2841</a></td><td>شركة الأمل</td><td>2026/03/05</td><td>42,000</td><td>6,300</td><td>48,300</td><td><span class="badge warning">معلقة</span></td><td><button class="btn btn-ghost" style="padding:4px 10px;font-size:11px" onclick="openModal('invoice')">✏️ تعديل</button></td></tr>
+              <tr><td><a>#INV-2840</a></td><td>مؤسسة النور</td><td>2026/03/04</td><td>18,500</td><td>2,775</td><td>21,275</td><td><span class="badge success">مدفوعة</span></td><td><button class="btn btn-ghost" style="padding:4px 10px;font-size:11px">👁️ عرض</button></td></tr>
+              <tr><td><a>#INV-2839</a></td><td>شركة السلام</td><td>2026/03/03</td><td>95,000</td><td>14,250</td><td>109,250</td><td><span class="badge danger">متأخرة</span></td><td><button class="btn btn-ghost" style="padding:4px 10px;font-size:11px">👁️ عرض</button></td></tr>
+              <tr><td><a>#INV-2838</a></td><td>مجموعة الخليج</td><td>2026/03/02</td><td>33,200</td><td>4,980</td><td>38,180</td><td><span class="badge success">مدفوعة</span></td><td><button class="btn btn-ghost" style="padding:4px 10px;font-size:11px">👁️ عرض</button></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== CUSTOMERS ===== -->
+    <div class="page" id="page-customers">
+      <div class="kpi-grid">
+        <div class="kpi blue"><div class="kpi-lbl">إجمالي العملاء</div><div class="kpi-val blue" id="cust-count">٢٣٨</div><div class="kpi-ch up">▲ 12 جديد</div></div>
+        <div class="kpi green"><div class="kpi-lbl">عملاء نشطون</div><div class="kpi-val green">١٨٤</div><div class="kpi-ch up">▲ 77%</div></div>
+        <div class="kpi amber"><div class="kpi-lbl">ذمم مدينة</div><div class="kpi-val amber">٣٨٠ك</div><div class="kpi-ch">ريال مستحق</div></div>
+        <div class="kpi blue"><div class="kpi-lbl">رضا العملاء</div><div class="kpi-val blue">٩٢%</div><div class="kpi-ch up">▲ ممتاز</div></div>
+      </div>
+      <div class="card">
+        <div class="card-hd" style="justify-content:space-between">
+          <div style="display:flex;align-items:center;gap:10px"><div class="card-hd-icon blue">👥</div><div><div class="card-hd-title">قائمة العملاء</div></div></div>
+          <button class="btn btn-primary" onclick="openModal('customer')">+ عميل جديد</button>
+        </div>
+        <div class="card-body" style="padding:0">
+          <table class="tbl">
+            <thead><tr><th>كود</th><th>الاسم</th><th>القطاع</th><th>الهاتف</th><th>المدينة</th><th>الرصيد</th><th>التصنيف</th><th>الحالة</th></tr></thead>
+            <tbody id="cust-body">
+              <tr><td style="color:var(--accent)">#CUS-238</td><td>شركة الأمل للتجارة</td><td>تجارة عامة</td><td>0501234567</td><td>الرياض</td><td style="color:var(--danger)">48,300</td><td><span class="badge warning">مميز</span></td><td><span class="badge success">نشط</span></td></tr>
+              <tr><td style="color:var(--accent)">#CUS-237</td><td>مجموعة الخليج</td><td>مقاولات</td><td>0557654321</td><td>جدة</td><td style="color:var(--success)">0</td><td><span class="badge info">VIP</span></td><td><span class="badge success">نشط</span></td></tr>
+              <tr><td style="color:var(--accent)">#CUS-236</td><td>شركة السلام</td><td>تقنية</td><td>0509876543</td><td>الدمام</td><td style="color:var(--danger)">109,250</td><td><span class="badge">عادي</span></td><td><span class="badge danger">موقوف</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- باقي الصفحات -->
+    <div class="page" id="page-sales"><div class="kpi-grid"><div class="kpi green"><div class="kpi-lbl">مبيعات الشهر</div><div class="kpi-val green">٤٢٠ك</div></div><div class="kpi blue"><div class="kpi-lbl">عدد الطلبات</div><div class="kpi-val blue">١٣٤</div></div><div class="kpi amber"><div class="kpi-lbl">متوسط الصفقة</div><div class="kpi-val amber">٣١٣٣</div></div><div class="kpi blue"><div class="kpi-lbl">معدل التحويل</div><div class="kpi-val blue">٦٨%</div></div></div><div class="card"><div class="card-hd" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><div class="card-hd-icon green">💼</div><div><div class="card-hd-title">أوامر البيع</div></div></div><button class="btn btn-primary">+ أمر بيع جديد</button></div><div class="card-body" style="padding:0"><table class="tbl"><thead><tr><th>رقم الأمر</th><th>العميل</th><th>المبلغ</th><th>تاريخ التسليم</th><th>الحالة</th></tr></thead><tbody><tr><td style="color:var(--accent)">#SO-1042</td><td>شركة التقنية</td><td>82,000</td><td>2026/03/10</td><td><span class="badge info">جديد</span></td></tr><tr><td style="color:var(--accent)">#SO-1041</td><td>مجموعة الرياض</td><td>45,500</td><td>2026/03/08</td><td><span class="badge warning">معلق</span></td></tr></tbody></table></div></div></div>
+    <div class="page" id="page-accounting">
+      <div class="kpi-grid">
+        <div class="kpi blue"><div class="kpi-ico">🏦</div><div class="kpi-lbl">إجمالي الإيرادات</div><div class="kpi-val blue" id="acc-revenue">1,200,000</div><div class="kpi-ch up">▲ ريال</div></div>
+        <div class="kpi green"><div class="kpi-ico">💳</div><div class="kpi-lbl">ذمم مدينة</div><div class="kpi-val green" id="acc-receivable">380,000</div><div class="kpi-ch up">▲ ريال</div></div>
+        <div class="kpi amber"><div class="kpi-ico">🧾</div><div class="kpi-lbl">VAT مستحقة</div><div class="kpi-val amber" id="acc-vat">57,000</div><div class="kpi-ch">▲ للحكومة</div></div>
+        <div class="kpi blue"><div class="kpi-ico">📒</div><div class="kpi-lbl">عدد القيود</div><div class="kpi-val blue" id="acc-entries-count">4</div><div class="kpi-ch up">▲ قيد</div></div>
+      </div>
+      <div class="g2" style="margin-bottom:14px">
+        <div class="card">
+          <div class="card-hd"><div class="card-hd-icon blue">📋</div><div><div class="card-hd-title">دليل الحسابات</div><div class="card-hd-sub">يتحدث تلقائياً مع كل فاتورة</div></div></div>
+          <div class="card-body" style="padding:0">
+            <table class="tbl">
+              <thead><tr><th>رقم</th><th>اسم الحساب</th><th>النوع</th><th>طبيعة</th><th style="text-align:left">الرصيد (ريال)</th></tr></thead>
+              <tbody>
+                <tr><td style="font-weight:700;color:var(--accent)">1100</td><td>ذمم مدينة — عملاء</td><td><span class="badge info">أصل</span></td><td style="font-size:11px">مدين</td><td id="bal-1100" style="text-align:left;font-weight:700;color:var(--accent)">380,000</td></tr>
+                <tr><td style="font-weight:700;color:var(--accent)">1200</td><td>البنك الأهلي</td><td><span class="badge info">أصل</span></td><td style="font-size:11px">مدين</td><td id="bal-1200" style="text-align:left;font-weight:700;color:var(--success)">842,000</td></tr>
+                <tr><td style="font-weight:700;color:var(--accent)">1001</td><td>الصندوق</td><td><span class="badge info">أصل</span></td><td style="font-size:11px">مدين</td><td id="bal-1001" style="text-align:left;font-weight:700;color:var(--success)">125,000</td></tr>
+                <tr><td style="font-weight:700;color:var(--warning)">2100</td><td>VAT مستحقة للحكومة</td><td><span class="badge warning">التزام</span></td><td style="font-size:11px">دائن</td><td id="bal-2100" style="text-align:left;font-weight:700;color:var(--warning)">57,000</td></tr>
+                <tr><td style="font-weight:700;color:var(--warning)">2200</td><td>ذمم دائنة — موردون</td><td><span class="badge warning">التزام</span></td><td style="font-size:11px">دائن</td><td id="bal-2200" style="text-align:left;font-weight:700;color:var(--warning)">98,000</td></tr>
+                <tr><td style="font-weight:700;color:var(--success)">4001</td><td>إيرادات المبيعات</td><td><span class="badge success">إيراد</span></td><td style="font-size:11px">دائن</td><td id="bal-4001" style="text-align:left;font-weight:700;color:var(--success)">1,200,000</td></tr>
+                <tr><td style="font-weight:700;color:var(--danger)">5001</td><td>تكلفة البضاعة المباعة</td><td><span class="badge danger">مصروف</span></td><td style="font-size:11px">مدين</td><td id="bal-5001" style="text-align:left;font-weight:700;color:var(--danger)">680,000</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-hd"><div class="card-hd-icon green">⚖️</div><div><div class="card-hd-title">ميزان المراجعة</div><div class="card-hd-sub">يتحدث لحظياً مع كل فاتورة</div></div></div>
+          <div class="card-body" style="padding:14px 16px">
+            <div style="display:flex;justify-content:space-between;font-size:11px;font-weight:700;color:var(--text3);margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border)">
+              <span style="flex:1">الحساب</span><span style="width:90px;text-align:left">مدين</span><span style="width:90px;text-align:left">دائن</span>
+            </div>
+            <div id="trial-balance-body"></div>
+            <div style="border-top:2px solid var(--accent);margin-top:8px;padding-top:8px;display:flex;justify-content:space-between;font-size:13px;font-weight:900;color:var(--accent)">
+              <span style="flex:1">الإجمالي</span>
+              <span id="tb-debit-total" style="width:90px">0</span>
+              <span id="tb-credit-total" style="width:90px">0</span>
+            </div>
+            <div id="tb-balance-status" style="text-align:center;margin-top:8px;font-size:12px;font-weight:700;padding:7px;border-radius:8px"></div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-hd" style="justify-content:space-between">
+          <div style="display:flex;align-items:center;gap:10px">
+            <div class="card-hd-icon blue">📒</div>
+            <div><div class="card-hd-title">سجل القيود المحاسبية — اليومية</div><div class="card-hd-sub">تُنشأ تلقائياً عند إصدار كل فاتورة</div></div>
+          </div>
+          <button class="btn btn-ghost" style="font-size:12px" onclick="openModal('manual-entry')">+ قيد يدوي</button>
+        </div>
+        <div class="card-body" style="padding:0;overflow-x:auto">
+          <table class="tbl">
+            <thead><tr><th>رقم القيد</th><th>التاريخ</th><th>البيان</th><th>المرجع</th><th style="text-align:center">مدين ﷼</th><th style="text-align:center">دائن ﷼</th><th>الحالة</th></tr></thead>
+            <tbody id="journal-body">
+              <tr style="background:#f8fbff"><td colspan="7" style="padding:6px 12px;font-size:11px;font-weight:700;color:var(--text3)">— قيود سابقة —</td></tr>
+              <tr>
+                <td style="color:var(--accent);font-weight:700">JE-001</td><td>2026/03/01</td>
+                <td>إيراد مبيعات — شركة الأمل</td>
+                <td><a style="color:var(--accent);cursor:pointer" onclick="openInvoicePrint('INV-2838')">#INV-2838 🖨️</a></td>
+                <td style="text-align:center;font-weight:700;color:var(--accent)">38,180</td><td style="text-align:center;color:var(--text3)">—</td>
+                <td><span class="badge success">مرحَّل</span></td>
+              </tr>
+              <tr><td colspan="2"></td><td style="font-size:11px;color:var(--text2);padding-right:20px">↳ ذمم مدينة ح/1100</td><td></td><td style="text-align:center;color:var(--text3)">—</td><td style="text-align:center;color:var(--success);font-weight:700">33,200</td><td></td></tr>
+              <tr><td colspan="2"></td><td style="font-size:11px;color:var(--text2);padding-right:20px">↳ ضريبة VAT ح/2100</td><td></td><td style="text-align:center;color:var(--text3)">—</td><td style="text-align:center;color:var(--warning);font-weight:700">4,980</td><td></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="page" id="page-inventory">
+      <div class="kpi-grid">
+        <div class="kpi blue"><div class="kpi-ico">📦</div><div class="kpi-lbl">إجمالي الأصناف</div><div class="kpi-val blue" id="inv-total-count">5</div><div class="kpi-ch up">▲ صنف مخزون</div></div>
+        <div class="kpi green"><div class="kpi-ico">💰</div><div class="kpi-lbl">قيمة المخزون</div><div class="kpi-val green" id="inv-total-val">0</div><div class="kpi-ch up">▲ ريال</div></div>
+        <div class="kpi amber"><div class="kpi-ico">⚠️</div><div class="kpi-lbl">تحت الحد الأدنى</div><div class="kpi-val amber" id="inv-low-count">0</div><div class="kpi-ch dn">▼ تحتاج طلب</div></div>
+        <div class="kpi red"><div class="kpi-ico">🚫</div><div class="kpi-lbl">نفذ من المخزون</div><div class="kpi-val red" id="inv-zero-count">0</div><div class="kpi-ch dn">▼ يحتاج تعبئة</div></div>
+      </div>
+      <div id="inv-alerts" style="margin-bottom:12px"></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+        <div style="display:flex;gap:6px">
+          <button class="btn" id="filter-all" onclick="filterInv('all')" style="font-size:12px;padding:6px 12px;background:var(--accent);color:#fff;border-radius:8px">الكل</button>
+          <button class="btn btn-ghost" id="filter-ok" onclick="filterInv('ok')" style="font-size:12px;padding:6px 12px">✅ متوفر</button>
+          <button class="btn btn-ghost" id="filter-low" onclick="filterInv('low')" style="font-size:12px;padding:6px 12px">⚠️ منخفض</button>
+          <button class="btn btn-ghost" id="filter-zero" onclick="filterInv('zero')" style="font-size:12px;padding:6px 12px">🚫 نفذ</button>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost" onclick="openModal('inv-movement')" style="font-size:12px">📋 سجل الحركة</button>
+          <button class="btn btn-primary" onclick="openModal('inv-add')" style="font-size:12px">+ إضافة صنف</button>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-body" style="padding:0;overflow-x:auto">
+          <table class="tbl">
+            <thead><tr><th>كود</th><th>اسم الصنف</th><th>الفئة</th><th style="text-align:center">الكمية</th><th style="text-align:center">الحد الأدنى</th><th style="text-align:center">سعر التكلفة</th><th style="text-align:center">سعر البيع</th><th>الموقع</th><th style="text-align:center">الحالة</th><th style="text-align:center">إجراءات</th></tr></thead>
+            <tbody id="inv-body"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="g2">
+        <div class="card">
+          <div class="card-hd"><div class="card-hd-icon blue">🔄</div><div><div class="card-hd-title">آخر حركات المخزون</div></div></div>
+          <div class="card-body" style="padding:0">
+            <table class="tbl">
+              <thead><tr><th>التاريخ</th><th>الصنف</th><th>النوع</th><th style="text-align:center">الكمية</th><th>المرجع</th></tr></thead>
+              <tbody id="movement-body">
+                <tr><td>05/03</td><td>منتج أ</td><td><span class="badge success">وارد</span></td><td style="text-align:center;color:var(--success)">+50</td><td><a style="color:var(--accent);cursor:pointer" onclick="openInvoicePrint('INV-2841')">#INV-2841 🖨️</a></td></tr>
+                <tr><td>05/03</td><td>منتج ب</td><td><span class="badge danger">صادر</span></td><td style="text-align:center;color:var(--danger)">-12</td><td><a style="color:var(--accent);cursor:pointer" onclick="openInvoicePrint('INV-2840')">#INV-2840 🖨️</a></td></tr>
+                <tr><td>04/03</td><td>منتج ج</td><td><span class="badge danger">صادر</span></td><td style="text-align:center;color:var(--danger)">-20</td><td><a style="color:var(--accent);cursor:pointer" onclick="openInvoicePrint('INV-2839')">#INV-2839 🖨️</a></td></tr>
+                <tr><td>04/03</td><td>منتج د</td><td><span class="badge success">وارد</span></td><td style="text-align:center;color:var(--success)">+100</td><td>أمر شراء #PO-541</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-hd"><div class="card-hd-icon amber">📊</div><div><div class="card-hd-title">توزيع المخزون بالفئات</div></div></div>
+          <div class="card-body">
+            <div class="stat-row"><span style="font-size:12px;color:var(--text2)">📱 إلكترونيات</span><div style="flex:1;margin:0 10px"><div class="prog"><div class="prog-fill" style="width:45%;background:var(--accent)"></div></div></div><b style="font-size:12px;color:var(--accent)">45%</b></div>
+            <div class="stat-row"><span style="font-size:12px;color:var(--text2)">🔧 أدوات</span><div style="flex:1;margin:0 10px"><div class="prog"><div class="prog-fill" style="width:28%;background:var(--success)"></div></div></div><b style="font-size:12px;color:var(--success)">28%</b></div>
+            <div class="stat-row"><span style="font-size:12px;color:var(--text2)">🧴 مواد</span><div style="flex:1;margin:0 10px"><div class="prog"><div class="prog-fill" style="width:17%;background:var(--warning)"></div></div></div><b style="font-size:12px;color:var(--warning)">17%</b></div>
+            <div class="stat-row"><span style="font-size:12px;color:var(--text2)">📦 أخرى</span><div style="flex:1;margin:0 10px"><div class="prog"><div class="prog-fill" style="width:10%;background:var(--text3)"></div></div></div><b style="font-size:12px;color:var(--text3)">10%</b></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="page" id="page-hr"><div class="kpi-grid"><div class="kpi blue"><div class="kpi-lbl">الموظفون</div><div class="kpi-val blue">١٤٧</div></div><div class="kpi green"><div class="kpi-lbl">كتلة الرواتب</div><div class="kpi-val green">٩٨٠ك</div></div><div class="kpi amber"><div class="kpi-lbl">طلبات الإجازة</div><div class="kpi-val amber">٨</div></div><div class="kpi blue"><div class="kpi-lbl">نسبة السعودة</div><div class="kpi-val blue">٦٢%</div></div></div><div class="card"><div class="card-hd" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><div class="card-hd-icon blue">👤</div><div><div class="card-hd-title">الموظفون</div></div></div><button class="btn btn-primary">+ موظف جديد</button></div><div class="card-body" style="padding:0"><table class="tbl"><thead><tr><th>رقم</th><th>الاسم</th><th>القسم</th><th>الراتب</th><th>الحالة</th></tr></thead><tbody><tr><td>EMP-001</td><td>أحمد المحمد</td><td>الإدارة</td><td>25,000</td><td><span class="badge success">نشط</span></td></tr><tr><td>EMP-002</td><td>سارة الغامدي</td><td>المالية</td><td>12,000</td><td><span class="badge info">جديد</span></td></tr></tbody></table></div></div></div>
+    <div class="page" id="page-assets"><div class="kpi-grid"><div class="kpi blue"><div class="kpi-lbl">إجمالي الأصول</div><div class="kpi-val blue">٢٫١م</div></div><div class="kpi amber"><div class="kpi-lbl">الاستهلاك السنوي</div><div class="kpi-val amber">١٨٠ك</div></div><div class="kpi green"><div class="kpi-lbl">أصول نشطة</div><div class="kpi-val green">٨٤</div></div><div class="kpi blue"><div class="kpi-lbl">تحتاج صيانة</div><div class="kpi-val blue">٦</div></div></div><div class="card"><div class="card-hd"><div class="card-hd-icon blue">🏢</div><div><div class="card-hd-title">سجل الأصول الثابتة</div></div></div><div class="card-body" style="padding:0"><table class="tbl"><thead><tr><th>كود</th><th>الوصف</th><th>التكلفة</th><th>القيمة الدفترية</th><th>الحالة</th></tr></thead><tbody><tr><td>AST-001</td><td>سيارة تويوتا 2024</td><td>120,000</td><td>96,000</td><td><span class="badge success">نشط</span></td></tr><tr><td>AST-002</td><td>خط إنتاج A</td><td>850,000</td><td>680,000</td><td><span class="badge success">نشط</span></td></tr></tbody></table></div></div></div>
+    <div class="page" id="page-purchases"><div class="kpi-grid"><div class="kpi blue"><div class="kpi-lbl">مشتريات الشهر</div><div class="kpi-val blue">٢١٠ك</div></div><div class="kpi green"><div class="kpi-lbl">أوامر الشراء</div><div class="kpi-val green">٤٢</div></div><div class="kpi amber"><div class="kpi-lbl">ذمم دائنة</div><div class="kpi-val amber">٩٨ك</div></div><div class="kpi blue"><div class="kpi-lbl">الموردون</div><div class="kpi-val blue">٦٤</div></div></div><div class="card"><div class="card-hd" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><div class="card-hd-icon blue">🛒</div><div><div class="card-hd-title">أوامر الشراء</div></div></div><button class="btn btn-primary">+ أمر شراء</button></div><div class="card-body" style="padding:0"><table class="tbl"><thead><tr><th>رقم الأمر</th><th>المورد</th><th>المبلغ</th><th>الحالة</th></tr></thead><tbody><tr><td style="color:var(--accent)">#PO-542</td><td>مورد الأجهزة</td><td>85,000</td><td><span class="badge info">مرسل</span></td></tr></tbody></table></div></div></div>
+    <div class="page" id="page-reports">
+
+      <!-- تحديد الفترة الضريبية -->
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-body" style="padding:14px 18px">
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="font-size:13px;font-weight:700;color:var(--text2)">📅 الفترة الضريبية:</span>
+              <select class="fs" id="zatca-period" onchange="renderZatca()" style="width:180px">
+                <option value="Q1-2026">الربع الأول 2026 (يناير–مارس)</option>
+                <option value="Q4-2025">الربع الرابع 2025 (أكتوبر–ديسمبر)</option>
+                <option value="Q3-2025">الربع الثالث 2025 (يوليو–سبتمبر)</option>
+                <option value="Q2-2025">الربع الثاني 2025 (أبريل–يونيو)</option>
+              </select>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="font-size:13px;font-weight:700;color:var(--text2)">🏢 الشركة:</span>
+              <span style="font-size:13px;font-weight:600">شركة حساباتي للتجارة</span>
+              <span style="font-size:11px;color:var(--text3)">| رقم ضريبي: 310012345600003</span>
+            </div>
+            <div style="margin-right:auto;display:flex;gap:8px">
+              <button class="btn btn-ghost" onclick="printZatca()" style="font-size:12px">🖨️ طباعة</button>
+              <button class="btn btn-ghost" onclick="exportZatcaXML()" style="font-size:12px">📤 تصدير XML</button>
+              <button class="btn btn-primary" onclick="submitZatca()" style="font-size:12px">🇸🇦 رفع على بوابة ZATCA</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- KPIs ضريبية -->
+      <div class="kpi-grid" style="margin-bottom:14px">
+        <div class="kpi green"><div class="kpi-ico">💰</div><div class="kpi-lbl">إجمالي المبيعات الخاضعة</div><div class="kpi-val green" id="z-taxable-sales">1,200,000</div><div class="kpi-ch">ريال</div></div>
+        <div class="kpi blue"><div class="kpi-ico">🧾</div><div class="kpi-lbl">ضريبة المخرجات (15%)</div><div class="kpi-val blue" id="z-output-vat">180,000</div><div class="kpi-ch">ريال</div></div>
+        <div class="kpi amber"><div class="kpi-ico">🛒</div><div class="kpi-lbl">ضريبة المدخلات (مشتريات)</div><div class="kpi-val amber" id="z-input-vat">12,600</div><div class="kpi-ch">قابل للخصم</div></div>
+        <div class="kpi red"><div class="kpi-ico">🏛️</div><div class="kpi-lbl">صافي الضريبة المستحقة</div><div class="kpi-val red" id="z-net-vat">167,400</div><div class="kpi-ch dn">▼ للسداد</div></div>
+      </div>
+
+      <!-- التقرير الرئيسي -->
+      <div class="g2" style="margin-bottom:14px">
+
+        <!-- نموذج VAT-01 -->
+        <div class="card">
+          <div class="card-hd">
+            <div class="card-hd-icon blue" style="background:#fef3c7">🇸🇦</div>
+            <div><div class="card-hd-title">نموذج الإقرار الضريبي — VAT-01</div><div class="card-hd-sub">هيئة الزكاة والضريبة والجمارك</div></div>
+            <span class="badge" id="z-status-badge" style="margin-right:auto;background:#fef3c7;color:#92400e">⏳ لم يُرفع</span>
+          </div>
+          <div class="card-body" style="padding:16px 18px">
+
+            <div style="background:var(--surface2);border-radius:10px;padding:14px;margin-bottom:14px;border:1px solid var(--border)">
+              <div style="font-size:11px;font-weight:700;color:var(--text3);margin-bottom:10px;letter-spacing:1px">بيانات الشركة</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
+                <div><span style="color:var(--text3)">اسم المنشأة: </span><b>شركة حساباتي للتجارة</b></div>
+                <div><span style="color:var(--text3)">الرقم الضريبي: </span><b style="color:var(--accent)">310012345600003</b></div>
+                <div><span style="color:var(--text3)">رقم السجل التجاري: </span><b>1010123456</b></div>
+                <div><span style="color:var(--text3)">فترة الإقرار: </span><b id="z-period-label">الربع الأول 2026</b></div>
+              </div>
+            </div>
+
+            <table style="width:100%;border-collapse:collapse">
+              <thead><tr style="background:linear-gradient(135deg,#0369a1,#0284c7);color:#fff">
+                <th style="padding:9px 12px;font-size:11px;text-align:right">البند</th>
+                <th style="padding:9px 12px;font-size:11px;text-align:center">الوعاء الضريبي (ريال)</th>
+                <th style="padding:9px 12px;font-size:11px;text-align:center">الضريبة (ريال)</th>
+              </tr></thead>
+              <tbody>
+                <tr style="background:#f0f9ff">
+                  <td colspan="3" style="padding:7px 12px;font-size:11px;font-weight:700;color:var(--accent)">أولاً: ضريبة المخرجات</td>
+                </tr>
+                <tr>
+                  <td style="padding:8px 12px;font-size:12px">1. المبيعات المحلية الخاضعة (15%)</td>
+                  <td style="text-align:center;font-weight:700" id="z-local-base">1,200,000</td>
+                  <td style="text-align:center;font-weight:700;color:var(--accent)" id="z-local-vat">180,000</td>
+                </tr>
+                <tr style="background:var(--surface2)">
+                  <td style="padding:8px 12px;font-size:12px">2. المبيعات صفرية النسبة (0%)</td>
+                  <td style="text-align:center" id="z-zero-base">0</td>
+                  <td style="text-align:center;color:var(--text3)">0</td>
+                </tr>
+                <tr>
+                  <td style="padding:8px 12px;font-size:12px">3. المبيعات المعفاة</td>
+                  <td style="text-align:center" id="z-exempt-base">0</td>
+                  <td style="text-align:center;color:var(--text3)">—</td>
+                </tr>
+                <tr style="background:#fef9c3">
+                  <td style="padding:8px 12px;font-size:12px;font-weight:700">إجمالي ضريبة المخرجات</td>
+                  <td style="text-align:center;font-weight:900" id="z-output-total-base">1,200,000</td>
+                  <td style="text-align:center;font-weight:900;color:var(--accent)" id="z-output-total-vat">180,000</td>
+                </tr>
+                <tr style="background:#f0f9ff">
+                  <td colspan="3" style="padding:7px 12px;font-size:11px;font-weight:700;color:var(--success)">ثانياً: ضريبة المدخلات (المشتريات)</td>
+                </tr>
+                <tr>
+                  <td style="padding:8px 12px;font-size:12px">4. مشتريات محلية خاضعة (15%)</td>
+                  <td style="text-align:center;font-weight:700" id="z-purchase-base">84,000</td>
+                  <td style="text-align:center;font-weight:700;color:var(--success)" id="z-purchase-vat">12,600</td>
+                </tr>
+                <tr style="background:var(--surface2)">
+                  <td style="padding:8px 12px;font-size:12px">5. مستوردات خاضعة للضريبة</td>
+                  <td style="text-align:center">0</td>
+                  <td style="text-align:center;color:var(--text3)">0</td>
+                </tr>
+                <tr style="background:#f0fdf4">
+                  <td style="padding:8px 12px;font-size:12px;font-weight:700">إجمالي ضريبة المدخلات المخصومة</td>
+                  <td style="text-align:center;font-weight:900" id="z-input-total-base">84,000</td>
+                  <td style="text-align:center;font-weight:900;color:var(--success)" id="z-input-total-vat">12,600</td>
+                </tr>
+                <tr style="background:linear-gradient(135deg,#0369a1,#0284c7);color:#fff">
+                  <td style="padding:11px 12px;font-size:13px;font-weight:900">صافي الضريبة المستحقة للسداد</td>
+                  <td style="text-align:center">—</td>
+                  <td style="text-align:center;font-size:15px;font-weight:900" id="z-net-due">167,400</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <div style="margin-top:14px;padding:12px 14px;background:var(--warning-light);border:1px solid #fcd34d;border-radius:10px;font-size:12px;color:var(--warning);font-weight:600">
+              ⚠️ موعد السداد: <b>آخر يوم من الشهر التالي لنهاية الربع</b> — 30 أبريل 2026
+            </div>
+          </div>
+        </div>
+
+        <!-- تفاصيل الفواتير -->
+        <div class="card">
+          <div class="card-hd"><div class="card-hd-icon green">🧾</div><div><div class="card-hd-title">تفاصيل فواتير الفترة</div><div class="card-hd-sub">مطابق لمعيار ZATCA Phase 2</div></div></div>
+          <div class="card-body" style="padding:0">
+            <table class="tbl" id="zatca-inv-table">
+              <thead><tr>
+                <th>رقم الفاتورة</th><th>التاريخ</th><th>العميل</th>
+                <th style="text-align:center">الوعاء</th>
+                <th style="text-align:center">VAT</th>
+                <th style="text-align:center">الإجمالي</th>
+                <th>النوع</th>
+              </tr></thead>
+              <tbody id="zatca-inv-body">
+                <tr><td style="color:var(--accent);font-weight:700">#INV-2841</td><td>05/03/2026</td><td>شركة الأمل</td><td style="text-align:center">45,000</td><td style="text-align:center;color:var(--warning)">6,750</td><td style="text-align:center;font-weight:700">51,750</td><td><span class="badge info" style="font-size:10px">ضريبية</span></td></tr>
+                <tr><td style="color:var(--accent);font-weight:700">#INV-2840</td><td>04/03/2026</td><td>مجموعة الخليج</td><td style="text-align:center">82,000</td><td style="text-align:center;color:var(--warning)">12,300</td><td style="text-align:center;font-weight:700">94,300</td><td><span class="badge info" style="font-size:10px">ضريبية</span></td></tr>
+                <tr><td style="color:var(--accent);font-weight:700">#INV-2839</td><td>03/03/2026</td><td>شركة الفجر</td><td style="text-align:center">28,500</td><td style="text-align:center;color:var(--warning)">4,275</td><td style="text-align:center;font-weight:700">32,775</td><td><span class="badge success" style="font-size:10px">مبسطة</span></td></tr>
+                <tr><td style="color:var(--accent);font-weight:700">#INV-2838</td><td>01/03/2026</td><td>مؤسسة النور</td><td style="text-align:center">33,200</td><td style="text-align:center;color:var(--warning)">4,980</td><td style="text-align:center;font-weight:700">38,180</td><td><span class="badge info" style="font-size:10px">ضريبية</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div style="padding:10px 16px;border-top:1px solid var(--border);display:flex;justify-content:space-between;font-size:12px;font-weight:700">
+            <span style="color:var(--text2)">إجمالي الفواتير: <b style="color:var(--text)">4 فاتورة</b></span>
+            <span style="color:var(--text2)">وعاء ضريبي: <b style="color:var(--accent)" id="z-inv-base-sum">188,700</b> ريال</span>
+            <span style="color:var(--text2)">إجمالي VAT: <b style="color:var(--warning)" id="z-inv-vat-sum">28,305</b> ريال</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- شريط حالة الرفع -->
+      <div class="card" id="zatca-status-card">
+        <div class="card-body" style="padding:16px 20px">
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+            <div style="font-size:22px">🔄</div>
+            <div style="flex:1">
+              <div style="font-size:13px;font-weight:700;margin-bottom:4px" id="z-status-text">لم يتم رفع الإقرار بعد لهذه الفترة</div>
+              <div style="display:flex;gap:6px;margin-top:6px" id="z-steps">
+                <span style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700;background:var(--surface2);color:var(--text3)">1. إعداد البيانات</span>
+                <span style="color:var(--text3)">→</span>
+                <span style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700;background:var(--surface2);color:var(--text3)">2. التحقق</span>
+                <span style="color:var(--text3)">→</span>
+                <span style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700;background:var(--surface2);color:var(--text3)">3. الرفع</span>
+                <span style="color:var(--text3)">→</span>
+                <span style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700;background:var(--surface2);color:var(--text3)">4. القبول</span>
+              </div>
+            </div>
+            <button class="btn btn-primary" onclick="submitZatca()" style="font-size:13px">🚀 رفع الإقرار الآن</button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+    <div class="page" id="page-settings"><div class="card" style="max-width:580px"><div class="card-hd"><div class="card-hd-icon blue">⚙️</div><div><div class="card-hd-title">إعدادات الشركة</div></div></div><div class="card-body"><div class="fgrid2"><div class="fg span2"><div class="fl">اسم الشركة</div><input class="fi" value="شركة حساباتي للتجارة"></div><div class="fg"><div class="fl">الرقم الضريبي</div><input class="fi" value="310012345600003"></div><div class="fg"><div class="fl">العملة</div><select class="fs"><option>ريال سعودي (SAR)</option></select></div></div><div style="margin-top:14px"><button class="btn btn-primary" onclick="showToast('تم حفظ الإعدادات بنجاح ✅')">💾 حفظ الإعدادات</button></div></div></div></div>
+
+  </div><!-- end content -->
+</div><!-- end main -->
+
+<!-- ============================
+     MODAL: إضافة عميل جديد
+============================= -->
+<div class="modal-overlay" id="modal-customer">
+  <div class="modal">
+    <div class="modal-hd">
+      <div class="modal-title">👤 إضافة عميل جديد</div>
+      <button class="modal-close" onclick="closeModal('customer')">✕</button>
+    </div>
+    <div class="modal-body" style="max-height:70vh;overflow-y:auto">
+
+      <!-- نوع العميل -->
+      <div class="fg" style="margin-bottom:16px">
+        <div class="fl">نوع العميل <span class="req">*</span></div>
+        <div class="rc-group">
+          <label class="rc sel" id="crc-company" onclick="selCType('company')"><input type="radio" name="ctype" checked><span>🏢</span><span class="rc-lbl">شركة</span></label>
+          <label class="rc" id="crc-person" onclick="selCType('person')"><input type="radio" name="ctype"><span>👤</span><span class="rc-lbl">فرد</span></label>
+          <label class="rc" id="crc-gov" onclick="selCType('gov')"><input type="radio" name="ctype"><span>🏛️</span><span class="rc-lbl">حكومية</span></label>
+        </div>
+      </div>
+
+      <div class="fgrid2">
+        <div class="fg span2">
+          <div class="fl">اسم العميل <span class="req">*</span></div>
+          <input class="fi" id="c-name" placeholder="مثال: شركة الأمل للتجارة" oninput="updateCPreview()">
+          <div class="err-msg" id="cerr-name">⚠️ الاسم مطلوب</div>
+        </div>
+        <div class="fg">
+          <div class="fl">رقم السجل التجاري <span class="req">*</span></div>
+          <input class="fi" id="c-cr" placeholder="1010XXXXXX" maxlength="10" oninput="this.value=this.value.replace(/\D/g,'')">
+        </div>
+        <div class="fg">
+          <div class="fl">الرقم الضريبي <span style="color:var(--text3);font-weight:400;font-size:10px">— اختياري</span></div>
+          <input class="fi" id="c-vat" placeholder="310XXXXXXXXXXX3" maxlength="15">
+        </div>
+        <div class="fg">
+          <div class="fl">القطاع <span class="req">*</span></div>
+          <select class="fs" id="c-sector" onchange="updateCPreview()">
+            <option value="">— اختر القطاع —</option>
+            <option>تجارة عامة</option><option>مقاولات وإنشاءات</option>
+            <option>تقنية المعلومات</option><option>الرعاية الصحية</option>
+            <option>التعليم والتدريب</option><option>الصناعة والتصنيع</option>
+            <option>النقل والخدمات اللوجستية</option><option>الاستشارات</option>
+            <option>العقارات</option><option>أخرى</option>
+          </select>
+        </div>
+        <div class="fg">
+          <div class="fl">المدينة <span class="req">*</span></div>
+          <select class="fs" id="c-city">
+            <option value="">— اختر المدينة —</option>
+            <option>الرياض</option><option>جدة</option><option>مكة المكرمة</option>
+            <option>المدينة المنورة</option><option>الدمام</option><option>الخبر</option>
+            <option>أبها</option><option>تبوك</option><option>القصيم</option>
+          </select>
+        </div>
+        <div class="fg">
+          <div class="fl">رقم الهاتف <span class="req">*</span></div>
+          <input class="fi" id="c-phone" placeholder="05XXXXXXXX" maxlength="10" oninput="this.value=this.value.replace(/\D/g,'')">
+          <div class="err-msg" id="cerr-phone">⚠️ رقم الهاتف غير صحيح</div>
+        </div>
+        <div class="fg">
+          <div class="fl">البريد الإلكتروني <span class="req">*</span></div>
+          <input class="fi" id="c-email" type="email" placeholder="info@company.com">
+        </div>
+      </div>
+
+      <div class="divider"><div class="divider-line"></div><div class="divider-txt">البيانات المالية</div><div class="divider-line"></div></div>
+
+      <div class="fgrid2">
+        <div class="fg">
+          <div class="fl">شروط الدفع</div>
+          <select class="fs" id="c-terms">
+            <option>فوري (نقد)</option><option>30 يوم</option>
+            <option>45 يوم</option><option>60 يوم</option><option>90 يوم</option>
+          </select>
+        </div>
+        <div class="fg">
+          <div class="fl">حد الائتمان (ريال)</div>
+          <input class="fi" id="c-credit" type="number" placeholder="0" min="0" step="1000">
+        </div>
+        <div class="fg">
+          <div class="fl">تصنيف العميل</div>
+          <select class="fs" id="c-class">
+            <option>عادي</option><option>مميز ⭐</option><option>VIP 👑</option>
+          </select>
+        </div>
+        <div class="fg">
+          <div class="fl">البنك</div>
+          <select class="fs">
+            <option value="">— اختياري —</option>
+            <option>البنك الأهلي السعودي</option><option>بنك الراجحي</option>
+            <option>بنك الرياض</option><option>البنك السعودي للاستثمار</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="tgl-wrap"><div class="tgl-info"><div class="tgl-title">تفعيل الفاتورة الإلكترونية (ZATCA)</div><div class="tgl-sub">ربط تلقائي مع بوابة هيئة الزكاة</div></div><label class="tgl"><input type="checkbox" checked><span class="tgl-sl"></span></label></div>
+      <div class="tgl-wrap"><div class="tgl-info"><div class="tgl-title">إرسال كشف حساب شهري</div><div class="tgl-sub">إرسال تلقائي في بداية كل شهر</div></div><label class="tgl"><input type="checkbox" checked><span class="tgl-sl"></span></label></div>
+
+      <div class="fg" style="margin-top:14px">
+        <div class="fl">ملاحظات داخلية</div>
+        <textarea class="ft" placeholder="أي ملاحظات مهمة عن العميل..."></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('customer')">إلغاء</button>
+      <button class="btn btn-ghost" onclick="showToast('تم الحفظ كمسودة 📌')">حفظ كمسودة</button>
+      <button class="btn btn-success" onclick="saveCustomer()">✅ حفظ العميل</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================
+     MODAL: فاتورة مبيعات (مربوطة بالمخزون)
+============================= -->
+<div class="modal-overlay" id="modal-invoice">
+  <div class="modal" style="max-width:960px">
+    <div class="modal-hd">
+      <div class="modal-title">🧾 إنشاء فاتورة مبيعات — مربوطة بالمخزون</div>
+      <button class="modal-close" onclick="closeModal('invoice')">✕</button>
+    </div>
+    <div class="modal-body" style="max-height:75vh;overflow-y:auto">
+
+      <!-- Header info -->
+      <div class="fgrid3" style="margin-bottom:14px">
+        <div class="fg">
+          <div class="fl">رقم الفاتورة</div>
+          <input class="fi" id="inv-num" readonly style="background:#f0f6ff;font-weight:700;color:var(--accent)">
+        </div>
+        <div class="fg">
+          <div class="fl">تاريخ الفاتورة <span class="req">*</span></div>
+          <input class="fi" id="inv-date" type="date">
+        </div>
+        <div class="fg">
+          <div class="fl">تاريخ الاستحقاق</div>
+          <input class="fi" id="inv-due" type="date">
+        </div>
+        <div class="fg span2">
+          <div class="fl">العميل <span class="req">*</span></div>
+          <select class="fs" id="inv-customer">
+            <option value="">— اختر العميل —</option>
+            <option>شركة الأمل للتجارة</option>
+            <option>مؤسسة النور</option>
+            <option>مجموعة الخليج</option>
+            <option>شركة السلام</option>
+            <option>شركة الفجر</option>
+          </select>
+          <div class="err-msg" id="ierr-cust">⚠️ اختر العميل أولاً</div>
+        </div>
+        <div class="fg">
+          <div class="fl">نوع الفاتورة</div>
+          <select class="fs" id="inv-type">
+            <option>فاتورة ضريبية</option>
+            <option>فاتورة مبسطة</option>
+            <option>إشعار دائن</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="divider"><div class="divider-line"></div><div class="divider-txt">📦 اختر الأصناف من المخزون</div><div class="divider-line"></div></div>
+
+      <!-- Inventory picker -->
+      <div id="inv-picker" style="background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <div style="font-size:12px;font-weight:700;color:var(--text2)">اختر من المخزون المتاح — اضغط ➕ لإضافة للفاتورة</div>
+          <input id="inv-search" class="fi" placeholder="🔍 ابحث عن صنف..." style="width:220px;padding:6px 12px;font-size:12px" oninput="filterPickerItems()">
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-height:180px;overflow-y:auto" id="picker-grid"></div>
+      </div>
+
+      <!-- Invoice items table -->
+      <div style="margin-bottom:6px;font-size:11px;font-weight:700;color:var(--text2)">بنود الفاتورة — يتم خصم الكمية من المخزون عند الإصدار</div>
+      <table class="items-table" id="items-tbl" style="margin-bottom:8px">
+        <thead>
+          <tr>
+            <th style="width:5%">#</th>
+            <th style="width:20%">الصنف</th>
+            <th style="width:22%">الوصف</th>
+            <th style="width:9%">متاح</th>
+            <th style="width:9%">الكمية</th>
+            <th style="width:12%">سعر الوحدة</th>
+            <th style="width:8%">خصم%</th>
+            <th style="width:10%">المبلغ</th>
+            <th style="width:8%">VAT%</th>
+            <th style="width:5%">حذف</th>
+          </tr>
+        </thead>
+        <tbody id="items-body"></tbody>
+      </table>
+      <button class="add-row-btn" onclick="addItemManual()">+ إضافة بند يدوي (خدمة / غير مخزني)</button>
+
+      <!-- Stock warning -->
+      <div id="stock-warnings" style="margin-top:10px"></div>
+
+      <div class="divider"><div class="divider-line"></div><div class="divider-txt">الإجماليات</div><div class="divider-line"></div></div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div class="fg">
+          <div class="fl">ملاحظات للعميل</div>
+          <textarea class="ft" placeholder="شروط الدفع، تعليمات التسليم..." style="min-height:80px"></textarea>
+        </div>
+        <div class="totals-box">
+          <div class="total-row"><span class="total-lbl">المجموع قبل الضريبة</span><span id="sub-total">0.00 ريال</span></div>
+          <div class="total-row"><span class="total-lbl">إجمالي الخصومات</span><span id="disc-total" style="color:var(--danger)">0.00 ريال</span></div>
+          <div class="total-row"><span class="total-lbl">ضريبة القيمة المضافة (15%)</span><span id="vat-total" style="color:var(--warning)">0.00 ريال</span></div>
+          <div class="total-row grand"><span>الإجمالي النهائي</span><span id="grand-total">0.00 ريال</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('invoice')">إلغاء</button>
+      <button class="btn btn-ghost" onclick="showToast('تم الحفظ كمسودة 📌')">📌 حفظ كمسودة</button>
+      <button class="btn btn-success" onclick="saveInvoice()">✅ إصدار وخصم المخزون</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================
+     MODAL: إضافة صنف مخزون
+============================= -->
+<div class="modal-overlay" id="modal-inv-add">
+  <div class="modal" style="max-width:600px">
+    <div class="modal-hd">
+      <div class="modal-title">📦 إضافة صنف جديد للمخزون</div>
+      <button class="modal-close" onclick="closeModal('inv-add')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fgrid2">
+        <div class="fg span2">
+          <div class="fl">اسم الصنف <span class="req">*</span></div>
+          <input class="fi" id="p-name" placeholder="مثال: لابتوب Dell XPS 15">
+        </div>
+        <div class="fg">
+          <div class="fl">كود الصنف</div>
+          <input class="fi" id="p-code" placeholder="PRD-XXX" readonly style="background:#f0f6ff;color:var(--accent);font-weight:700">
+        </div>
+        <div class="fg">
+          <div class="fl">الفئة <span class="req">*</span></div>
+          <select class="fs" id="p-cat">
+            <option value="">— اختر الفئة —</option>
+            <option>📱 إلكترونيات</option>
+            <option>🔧 أدوات ومعدات</option>
+            <option>🧴 مواد استهلاكية</option>
+            <option>📦 مواد خام</option>
+            <option>🏗️ مواد بناء</option>
+            <option>أخرى</option>
+          </select>
+        </div>
+        <div class="fg">
+          <div class="fl">الكمية الافتتاحية <span class="req">*</span></div>
+          <input class="fi" id="p-qty" type="number" min="0" value="0" oninput="calcInvPrice()">
+        </div>
+        <div class="fg">
+          <div class="fl">الحد الأدنى <span class="req">*</span></div>
+          <input class="fi" id="p-min" type="number" min="0" value="10">
+        </div>
+        <div class="fg">
+          <div class="fl">سعر التكلفة (ريال) <span class="req">*</span></div>
+          <input class="fi" id="p-cost" type="number" min="0" value="0" oninput="calcInvPrice()">
+        </div>
+        <div class="fg">
+          <div class="fl">سعر البيع (ريال) <span class="req">*</span></div>
+          <input class="fi" id="p-price" type="number" min="0" value="0">
+        </div>
+        <div class="fg">
+          <div class="fl">الموقع في المستودع</div>
+          <select class="fs" id="p-loc">
+            <option>مستودع A</option><option>مستودع B</option>
+            <option>مستودع C</option><option>مستودع رئيسي</option>
+          </select>
+        </div>
+        <div class="fg">
+          <div class="fl">وحدة القياس</div>
+          <select class="fs" id="p-unit">
+            <option>قطعة</option><option>كيلوجرام</option>
+            <option>لتر</option><option>متر</option><option>صندوق</option>
+          </select>
+        </div>
+      </div>
+      <div style="margin-top:12px;padding:12px;background:var(--accent-light);border-radius:10px;font-size:12px;color:var(--accent);font-weight:600" id="p-calc">
+        📊 القيمة الإجمالية: 0 ريال
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('inv-add')">إلغاء</button>
+      <button class="btn btn-primary" onclick="saveInvItem()">✅ إضافة الصنف</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================
+     MODAL: سجل حركة المخزون
+============================= -->
+<div class="modal-overlay" id="modal-inv-movement">
+  <div class="modal" style="max-width:700px">
+    <div class="modal-hd">
+      <div class="modal-title">📋 تسجيل حركة مخزون</div>
+      <button class="modal-close" onclick="closeModal('inv-movement')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fgrid2">
+        <div class="fg">
+          <div class="fl">نوع الحركة <span class="req">*</span></div>
+          <select class="fs" id="mv-type">
+            <option value="in">📥 وارد (استلام بضاعة)</option>
+            <option value="out">📤 صادر (بيع / صرف)</option>
+            <option value="transfer">🔄 تحويل بين مستودعات</option>
+            <option value="adjust">✏️ تسوية جرد</option>
+          </select>
+        </div>
+        <div class="fg">
+          <div class="fl">الصنف <span class="req">*</span></div>
+          <select class="fs" id="mv-item">
+            <option value="">— اختر الصنف —</option>
+          </select>
+        </div>
+        <div class="fg">
+          <div class="fl">الكمية <span class="req">*</span></div>
+          <input class="fi" id="mv-qty" type="number" min="1" value="1">
+        </div>
+        <div class="fg">
+          <div class="fl">رقم المرجع (فاتورة / أمر)</div>
+          <input class="fi" id="mv-ref" placeholder="INV-XXXX أو PO-XXX">
+        </div>
+        <div class="fg span2">
+          <div class="fl">ملاحظات</div>
+          <input class="fi" id="mv-note" placeholder="سبب الحركة أو تفاصيل إضافية">
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('inv-movement')">إلغاء</button>
+      <button class="btn btn-primary" onclick="saveMovement()">✅ تسجيل الحركة</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================
+     MODAL: طباعة الفاتورة
+============================= -->
+<div class="modal-overlay" id="modal-inv-invoice">
+  <div class="modal" style="max-width:900px">
+    <div class="modal-hd">
+      <div class="modal-title">🧾 معاينة وطباعة الفاتورة</div>
+      <button class="modal-close" onclick="closeModal('inv-invoice')">✕</button>
+    </div>
+    <div class="modal-body" style="padding:0">
+      <iframe id="invoice-frame" style="width:100%;height:75vh;border:none;border-radius:0 0 18px 18px"></iframe>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('inv-invoice')">إغلاق</button>
+      <button class="btn btn-ghost" onclick="document.getElementById('invoice-frame').contentWindow.window.print()">🖨️ طباعة</button>
+      <button class="btn btn-success" onclick="document.getElementById('invoice-frame').contentWindow.window.print()">📄 تصدير PDF</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================
+     MODAL: قيد يدوي
+============================= -->
+<div class="modal-overlay" id="modal-manual-entry">
+  <div class="modal" style="max-width:620px">
+    <div class="modal-hd">
+      <div class="modal-title">📒 إدخال قيد محاسبي يدوي</div>
+      <button class="modal-close" onclick="closeModal('manual-entry')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fgrid2">
+        <div class="fg"><div class="fl">التاريخ <span class="req">*</span></div><input class="fi" id="me-date" type="date"></div>
+        <div class="fg"><div class="fl">رقم المرجع</div><input class="fi" id="me-ref" placeholder="INV-XXXX أو PO-XXX"></div>
+        <div class="fg span2"><div class="fl">البيان <span class="req">*</span></div><input class="fi" id="me-desc" placeholder="وصف القيد المحاسبي"></div>
+      </div>
+      <div class="divider"><div class="divider-line"></div><div class="divider-txt">أسطر القيد</div><div class="divider-line"></div></div>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:10px">
+        <thead><tr style="background:var(--surface2)">
+          <th style="padding:7px 10px;font-size:11px;font-weight:700;color:var(--text3);text-align:right">الحساب</th>
+          <th style="padding:7px 10px;font-size:11px;text-align:center;width:130px">مدين</th>
+          <th style="padding:7px 10px;font-size:11px;text-align:center;width:130px">دائن</th>
+          <th style="width:36px"></th>
+        </tr></thead>
+        <tbody id="me-lines"></tbody>
+      </table>
+      <button class="add-row-btn" onclick="addMELine()">+ إضافة سطر</button>
+      <div style="display:flex;justify-content:space-between;margin-top:10px;padding:10px 14px;background:var(--surface2);border-radius:9px;font-size:13px;font-weight:700">
+        <span>مجموع المدين: <span id="me-debit-sum" style="color:var(--accent)">0</span></span>
+        <span>مجموع الدائن: <span id="me-credit-sum" style="color:var(--success)">0</span></span>
+        <span id="me-balance-msg" style="color:var(--text3)">—</span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('manual-entry')">إلغاء</button>
+      <button class="btn btn-success" onclick="saveManualEntry()">✅ ترحيل القيد</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ========== بيانات المخزون ==========
+let invItems = [
+  { code:'PRD-001', name:'لابتوب Dell XPS 15',       cat:'📱 إلكترونيات',       qty:245, min:50,  cost:3200,  price:4500,  loc:'مستودع A', unit:'قطعة' },
+  { code:'PRD-002', name:'طابعة HP LaserJet Pro',    cat:'📱 إلكترونيات',       qty:18,  min:30,  cost:850,   price:1200,  loc:'مستودع B', unit:'قطعة' },
+  { code:'PRD-003', name:'كابل HDMI 2متر',           cat:'🔧 أدوات ومعدات',     qty:0,   min:20,  cost:25,    price:55,    loc:'مستودع A', unit:'قطعة' },
+  { code:'PRD-004', name:'ورق A4 (رزمة 500 ورقة)',   cat:'🧴 مواد استهلاكية',   qty:510, min:100, cost:18,    price:32,    loc:'مستودع C', unit:'صندوق' },
+  { code:'PRD-005', name:'حبر طابعة أسود',           cat:'🧴 مواد استهلاكية',   qty:42,  min:40,  cost:95,    price:160,   loc:'مستودع A', unit:'قطعة' },
+];
+let invCounter = 6;
+
+function getInvStatus(item) {
+  if (item.qty === 0) return { label:'نفذ', cls:'danger', key:'zero' };
+  if (item.qty < item.min) return { label:'منخفض', cls:'warning', key:'low' };
+  return { label:'متوفر', cls:'success', key:'ok' };
+}
+
+function renderInv(filter='all') {
+  const tbody = document.getElementById('inv-body');
+  tbody.innerHTML = '';
+  let low=0, zero=0, totalVal=0;
+
+  invItems.forEach(item => {
+    const st = getInvStatus(item);
+    if (st.key==='low') low++;
+    if (st.key==='zero') zero++;
+    totalVal += item.qty * item.cost;
+
+    if (filter !== 'all' && st.key !== filter) return;
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td style="color:var(--accent);font-weight:600">${item.code}</td>
+      <td style="font-weight:600;color:var(--text)">${item.name}</td>
+      <td style="font-size:12px">${item.cat}</td>
+      <td style="text-align:center;font-weight:700;color:${item.qty===0?'var(--danger)':item.qty<item.min?'var(--warning)':'var(--success)'}">${item.qty.toLocaleString('ar-SA')}</td>
+      <td style="text-align:center;color:var(--text2)">${item.min}</td>
+      <td style="text-align:center">${item.cost.toLocaleString('ar-SA')}</td>
+      <td style="text-align:center;color:var(--success);font-weight:600">${item.price.toLocaleString('ar-SA')}</td>
+      <td style="font-size:12px;color:var(--text2)">${item.loc}</td>
+      <td style="text-align:center"><span class="badge ${st.cls}">${st.label}</span></td>
+      <td style="text-align:center">
+        <div style="display:flex;gap:4px;justify-content:center">
+          <button class="btn btn-ghost" style="padding:3px 8px;font-size:11px" onclick="quickMove('${item.code}')">📋</button>
+          <button class="btn btn-primary" style="padding:3px 8px;font-size:11px" onclick="createInvoiceFromItem('${item.code}')">🧾</button>
+        </div>
+      </td>`;
+    tbody.appendChild(tr);
+  });
+
+  // Update KPIs
+  document.getElementById('inv-total-count').textContent = invItems.length;
+  document.getElementById('inv-total-val').textContent = (totalVal/1000).toFixed(0) + 'ك';
+  document.getElementById('inv-low-count').textContent = low;
+  document.getElementById('inv-zero-count').textContent = zero;
+
+  // Alerts
+  renderAlerts(low, zero);
+
+  // Populate movement select
+  const sel = document.getElementById('mv-item');
+  if (sel) {
+    sel.innerHTML = '<option value="">— اختر الصنف —</option>';
+    invItems.forEach(i => sel.innerHTML += `<option value="${i.code}">${i.code} — ${i.name}</option>`);
+  }
+}
+
+function renderAlerts(low, zero) {
+  const el = document.getElementById('inv-alerts');
+  let html = '';
+  if (zero > 0) html += `<div style="background:var(--danger-light);border:1px solid #fca5a5;border-radius:10px;padding:10px 14px;font-size:12px;color:var(--danger);font-weight:600;margin-bottom:6px">🚫 تنبيه: ${zero} صنف نفذ من المخزون — يجب تعبئته فوراً</div>`;
+  if (low > 0) html += `<div style="background:var(--warning-light);border:1px solid #fcd34d;border-radius:10px;padding:10px 14px;font-size:12px;color:var(--warning);font-weight:600">⚠️ تنبيه: ${low} صنف وصل للحد الأدنى — يُنصح بإصدار أمر شراء</div>`;
+  el.innerHTML = html;
+}
+
+function filterInv(f) {
+  ['all','ok','low','zero'].forEach(x => {
+    const btn = document.getElementById('filter-'+x);
+    if (btn) btn.style.background = x===f ? 'var(--accent)' : '';
+    if (btn) btn.style.color = x===f ? '#fff' : '';
+  });
+  renderInv(f);
+}
+
+// إضافة صنف جديد
+let pCounter = 6;
+function openModal(type) {
+  if (type === 'inv-add') {
+    document.getElementById('p-code').value = 'PRD-00' + pCounter;
+  }
+  if (type === 'invoice') initInvoice();
+  document.getElementById('modal-'+type).classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function calcInvPrice() {
+  const qty = parseFloat(document.getElementById('p-qty').value)||0;
+  const cost = parseFloat(document.getElementById('p-cost').value)||0;
+  document.getElementById('p-calc').textContent = '📊 القيمة الإجمالية: ' + (qty*cost).toLocaleString('ar-SA') + ' ريال';
+}
+
+function saveInvItem() {
+  const name = document.getElementById('p-name').value.trim();
+  const cat  = document.getElementById('p-cat').value;
+  const qty  = parseInt(document.getElementById('p-qty').value)||0;
+  const min  = parseInt(document.getElementById('p-min').value)||0;
+  const cost = parseFloat(document.getElementById('p-cost').value)||0;
+  const price= parseFloat(document.getElementById('p-price').value)||0;
+  const loc  = document.getElementById('p-loc').value;
+  const unit = document.getElementById('p-unit').value;
+
+  if (!name || !cat) { showToast('⚠️ يرجى ملء الاسم والفئة'); return; }
+
+  const code = 'PRD-00' + pCounter++;
+  invItems.push({ code, name, cat, qty, min, cost, price, loc, unit });
+  renderInv('all');
+  closeModal('inv-add');
+  showToast(`✅ تم إضافة الصنف "${name}" برقم ${code}`);
+  setTimeout(() => saveAllData(), 300);
+
+  // Reset
+  ['p-name','p-qty','p-cost','p-price'].forEach(id => document.getElementById(id).value = id==='p-qty'?'0':'');
+  document.getElementById('p-cat').value = '';
+  document.getElementById('p-code').value = 'PRD-00' + pCounter;
+  document.getElementById('p-calc').textContent = '📊 القيمة الإجمالية: 0 ريال';
+}
+
+// تسجيل حركة مخزون
+function saveMovement() {
+  const type = document.getElementById('mv-type').value;
+  const code = document.getElementById('mv-item').value;
+  const qty  = parseInt(document.getElementById('mv-qty').value)||0;
+  const ref  = document.getElementById('mv-ref').value;
+
+  if (!code || qty <= 0) { showToast('⚠️ اختر الصنف وأدخل الكمية'); return; }
+
+  const item = invItems.find(i => i.code === code);
+  if (!item) return;
+
+  if (type === 'in') item.qty += qty;
+  else if (type === 'out') {
+    if (item.qty < qty) { showToast('❌ الكمية المطلوبة أكبر من المتاح!'); return; }
+    item.qty -= qty;
+  } else if (type === 'adjust') item.qty = qty;
+
+  // Add to movement log
+  const typeLabel = type==='in' ? '<span class="badge success">وارد</span>' : type==='out' ? '<span class="badge danger">صادر</span>' : '<span class="badge info">تسوية</span>';
+  const sign = type==='in' ? '+' : type==='out' ? '-' : '=';
+  const color = type==='in' ? 'var(--success)' : type==='out' ? 'var(--danger)' : 'var(--accent)';
+  const refHtml = ref && ref.startsWith('INV') ?
+    `<a style="color:var(--accent);cursor:pointer" onclick="openInvoicePrint('${ref}')">#${ref} 🖨️</a>` :
+    (ref || '—');
+
+  const row = `<tr>
+    <td>${new Date().toLocaleDateString('ar-SA').slice(0,5)}</td>
+    <td>${item.name}</td>
+    <td>${typeLabel}</td>
+    <td style="text-align:center;color:${color};font-weight:700">${sign}${qty}</td>
+    <td>${refHtml}</td>
+  </tr>`;
+  document.getElementById('movement-body').insertAdjacentHTML('afterbegin', row);
+
+  renderInv('all');
+  closeModal('inv-movement');
+  showToast(`✅ تم تسجيل حركة ${item.name}: ${sign}${qty} قطعة`);
+  setTimeout(() => saveAllData(), 300);
+}
+
+// زر سريع لتسجيل حركة من جدول المخزون
+function quickMove(code) {
+  openModal('inv-movement');
+  setTimeout(() => { document.getElementById('mv-item').value = code; }, 100);
+}
+
+// إنشاء فاتورة من صنف مخزون
+function createInvoiceFromItem(code) {
+  const item = invItems.find(i => i.code === code);
+  if (!item) return;
+  openModal('invoice');
+  setTimeout(() => addItemFromInv(code), 300);
+}
+
+// ====== فتح الفاتورة للطباعة ======
+function openInvoicePrint(invNum) {
+  openModal('inv-invoice');
+  const frame = document.getElementById('invoice-frame');
+  // Build a self-contained invoice in the iframe
+  const invHtml = buildPrintInvoice(invNum);
+  frame.srcdoc = invHtml;
+}
+
+function buildPrintInvoice(num) {
+  const h = String.fromCharCode(60); // '<'
+  const H = String.fromCharCode(62); // '>'
+  const css = `*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Tajawal',sans-serif;background:#fff;color:#0f172a;font-size:13px;padding:30px}.hd{background:linear-gradient(135deg,#0369a1,#0284c7);color:#fff;padding:28px 30px;border-radius:12px 12px 0 0;display:flex;justify-content:space-between;align-items:flex-start}.logo-box{width:42px;height:42px;background:#fff;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:900;color:#0284c7}.co-name{font-size:18px;font-weight:900;margin-bottom:4px}.co-det{font-size:11px;opacity:.8;line-height:1.8}.inv-num{font-size:26px;font-weight:900;text-align:left}.inv-type{font-size:10px;opacity:.7;letter-spacing:2px;margin-bottom:4px;text-align:left}.parties{display:grid;grid-template-columns:1fr 1fr;gap:20px;padding:20px 30px;border-bottom:2px solid #dce8f5}.party-lbl{font-size:10px;font-weight:700;color:#0284c7;letter-spacing:1.5px;margin-bottom:8px}.party-name{font-size:15px;font-weight:900;margin-bottom:4px}.party-det{font-size:11px;color:#475569;line-height:1.8}.vat-badge{display:inline-block;background:#e0f2fe;color:#0284c7;padding:3px 8px;border-radius:5px;font-size:10px;font-weight:700;margin-top:6px}.stats{display:flex;gap:12px;padding:14px 30px;border-bottom:1px solid #dce8f5;background:#f8fbff}.stat{background:#fff;border:1px solid #dce8f5;border-radius:8px;padding:8px 14px;flex:1}.stat-lbl{font-size:9px;color:#94a3b8;margin-bottom:2px}.stat-val{font-size:12px;font-weight:700}table{width:100%;border-collapse:collapse}.tbl-sec{padding:16px 30px 0}.tbl-title{font-size:10px;font-weight:700;color:#0284c7;letter-spacing:1.5px;margin-bottom:10px}table thead tr{background:#0284c7;color:#fff}table thead th{padding:9px 10px;font-size:11px;text-align:right;font-weight:700}table tbody td{padding:9px 10px;font-size:12px;color:#475569;border-bottom:1px solid #f1f5f9}table tbody tr:nth-child(even){background:#f8fbff}.totals{display:flex;justify-content:flex-end;padding:16px 30px}.tot-box{width:260px;border:1px solid #dce8f5;border-radius:10px;overflow:hidden}.tot-row{display:flex;justify-content:space-between;padding:8px 14px;font-size:12px;border-bottom:1px solid #f1f5f9}.tot-row:last-child{background:#0284c7;color:#fff;font-weight:700;font-size:14px;border-bottom:none}.tot-lbl{color:#475569}.qr-sec{display:flex;justify-content:space-between;align-items:center;padding:14px 30px;border-top:2px solid #dce8f5;margin-top:4px}.qr-box{text-align:center}.qr{width:70px;height:70px;border:2px solid #dce8f5;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:28px}.qr-lbl{font-size:9px;color:#94a3b8;margin-top:4px}.bank{font-size:11px;color:#475569;line-height:2}.bank strong{color:#0f172a}.footer{background:linear-gradient(135deg,#0369a1,#0284c7);color:rgba(255,255,255,.8);padding:12px 30px;display:flex;justify-content:space-between;font-size:10px;border-radius:0 0 12px 12px}@media print{body{padding:0}@page{size:A4;margin:10mm}}`;
+
+  return `<!DOCTYPE html>${h}html lang="ar" dir="rtl"${H}${h}head${H}${h}meta charset="UTF-8"${H}${h}link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700;900&display=swap" rel="stylesheet"${H}${h}style${H}${css}${h}/style${H}${h}/head${H}${h}body${H}
+${h}div class="hd"${H}
+  ${h}div${H}${h}div style="display:flex;align-items:center;gap:10px;margin-bottom:12px"${H}${h}div class="logo-box"${H}ح${h}/div${H}${h}div${H}${h}div class="co-name"${H}شركة حساباتي للتجارة${h}/div${H}${h}div style="font-size:10px;opacity:.7"${H}Hasabati Trading Co.${h}/div${H}${h}/div${H}${h}/div${H}
+  ${h}div class="co-det"${H}📍 الرياض، حي العليا، شارع التحلية${h}br${H}📞 +966 11 234 5678 &nbsp;✉️ info@hasabati.com${h}br${H}🧾 الرقم الضريبي: 310012345600003${h}/div${H}${h}/div${H}
+  ${h}div${H}${h}div class="inv-type"${H}TAX INVOICE / فاتورة ضريبية${h}/div${H}${h}div class="inv-num"${H}#${num}${h}/div${H}${h}div style="font-size:11px;opacity:.8;margin-top:6px;text-align:left"${H}✅ صادرة من نظام المخزون${h}/div${H}${h}/div${H}
+${h}/div${H}
+${h}div class="parties"${H}
+  ${h}div${H}${h}div class="party-lbl"${H}🏢 فاتورة من${h}/div${H}${h}div class="party-name"${H}شركة حساباتي للتجارة${h}/div${H}${h}div class="party-det"${H}الرياض، حي العليا${h}br${H}+966 11 234 5678${h}/div${H}${h}div class="vat-badge"${H}🧾 310012345600003${h}/div${H}${h}/div${H}
+  ${h}div${H}${h}div class="party-lbl"${H}👤 فاتورة إلى${h}/div${H}${h}div class="party-name"${H}شركة الأمل للتجارة${h}/div${H}${h}div class="party-det"${H}جدة، حي الروضة${h}br${H}+966 55 987 6543${h}/div${H}${h}div class="vat-badge"${H}🧾 310098765400003${h}/div${H}${h}/div${H}
+${h}/div${H}
+${h}div class="stats"${H}
+  ${h}div class="stat"${H}${h}div class="stat-lbl"${H}تاريخ الإصدار${h}/div${H}${h}div class="stat-val"${H}05 مارس 2026${h}/div${H}${h}/div${H}
+  ${h}div class="stat"${H}${h}div class="stat-lbl"${H}الاستحقاق${h}/div${H}${h}div class="stat-val"${H}04 أبريل 2026${h}/div${H}${h}/div${H}
+  ${h}div class="stat"${H}${h}div class="stat-lbl"${H}شروط الدفع${h}/div${H}${h}div class="stat-val"${H}30 يوم${h}/div${H}${h}/div${H}
+  ${h}div class="stat"${H}${h}div class="stat-lbl"${H}العملة${h}/div${H}${h}div class="stat-val"${H}SAR ريال${h}/div${H}${h}/div${H}
+${h}/div${H}
+${h}div class="tbl-sec"${H}${h}div class="tbl-title"${H}📋 بنود الفاتورة${h}/div${H}
+${h}table${H}${h}thead${H}${h}tr${H}${h}th${H}#${h}/th${H}${h}th${H}الوصف${h}/th${H}${h}th${H}الكمية${h}/th${H}${h}th${H}سعر الوحدة${h}/th${H}${h}th${H}الخصم${h}/th${H}${h}th${H}المبلغ${h}/th${H}${h}th${H}VAT%${h}/th${H}${h}th${H}الإجمالي${h}/th${H}${h}/tr${H}${h}/thead${H}
+${h}tbody${H}
+${h}tr${H}${h}td${H}1${h}/td${H}${h}td${H}لابتوب Dell XPS 15${h}/td${H}${h}td${H}5${h}/td${H}${h}td${H}4,500${h}/td${H}${h}td${H}—${h}/td${H}${h}td${H}22,500${h}/td${H}${h}td${H}15%${h}/td${H}${h}td${H}25,875${h}/td${H}${h}/tr${H}
+${h}tr${H}${h}td${H}2${h}/td${H}${h}td${H}طابعة HP LaserJet Pro${h}/td${H}${h}td${H}2${h}/td${H}${h}td${H}1,200${h}/td${H}${h}td${H}5%${h}/td${H}${h}td${H}2,280${h}/td${H}${h}td${H}15%${h}/td${H}${h}td${H}2,622${h}/td${H}${h}/tr${H}
+${h}tr${H}${h}td${H}3${h}/td${H}${h}td${H}ورق A4 - صندوق${h}/td${H}${h}td${H}10${h}/td${H}${h}td${H}32${h}/td${H}${h}td${H}—${h}/td${H}${h}td${H}320${h}/td${H}${h}td${H}15%${h}/td${H}${h}td${H}368${h}/td${H}${h}/tr${H}
+${h}/tbody${H}${h}/table${H}${h}/div${H}
+${h}div class="totals"${H}${h}div class="tot-box"${H}
+  ${h}div class="tot-row"${H}${h}span class="tot-lbl"${H}المجموع قبل الضريبة${h}/span${H}${h}span${H}25,100.00 ريال${h}/span${H}${h}/div${H}
+  ${h}div class="tot-row"${H}${h}span class="tot-lbl"${H}إجمالي الخصومات${h}/span${H}${h}span style="color:#dc2626"${H}120.00 ريال${h}/span${H}${h}/div${H}
+  ${h}div class="tot-row"${H}${h}span class="tot-lbl"${H}ضريبة القيمة المضافة 15%${h}/span${H}${h}span style="color:#d97706"${H}3,747.00 ريال${h}/span${H}${h}/div${H}
+  ${h}div class="tot-row"${H}${h}span${H}الإجمالي النهائي${h}/span${H}${h}span${H}28,727.00 ريال${h}/span${H}${h}/div${H}
+${h}/div${H}${h}/div${H}
+${h}div class="qr-sec"${H}
+  ${h}div class="qr-box"${H}${h}div class="qr"${H}⬛${h}/div${H}${h}div class="qr-lbl"${H}QR — ZATCA${h}/div${H}${h}/div${H}
+  ${h}div class="bank"${H}${h}strong${H}البنك:${h}/strong${H} البنك الأهلي${h}br${H}${h}strong${H}المستفيد:${h}/strong${H} شركة حساباتي${h}br${H}${h}strong${H}IBAN:${h}/strong${H} SA12 1000 0000 0123 4567 89${h}/div${H}
+  ${h}div style="text-align:center;color:#94a3b8;font-size:11px"${H}ختم الشركة${h}br${H}${h}div style="font-size:32px;opacity:.3"${H}◎${h}/div${H}${h}/div${H}
+${h}/div${H}
+${h}div class="footer"${H}${h}span${H}تم الإصدار إلكترونياً${h}/span${H}${h}span${H}حساباتي ERP${h}/span${H}${h}span${H}صفحة 1 من 1${h}/span${H}${h}/div${H}
+${h}/body${H}${h}/html${H}`;
+}
+
+const pageActions = {
+  dashboard:'+ إضافة', invoices:'+ فاتورة جديدة', customers:'+ عميل جديد',
+  sales:'+ أمر بيع', accounting:'+ قيد جديد', inventory:'+ إضافة صنف',
+  hr:'+ موظف جديد', assets:'+ أصل جديد', purchases:'+ أمر شراء',
+  reports:'📥 تصدير', settings:'💾 حفظ'
+};
+
+function showPage(id, el, title, sub) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('page-'+id).classList.add('active');
+  if (el) el.classList.add('active');
+  if (title) document.getElementById('ttl').textContent = title;
+  if (sub) document.getElementById('sub').textContent = sub;
+  document.getElementById('top-btn').textContent = pageActions[id] || '+ إضافة';
+}
+
+function handleTopBtn() {
+  const ttl = document.getElementById('ttl').textContent;
+  if (ttl === 'الفواتير' || ttl === 'لوحة التحكم') openModal('invoice');
+  else if (ttl === 'العملاء') openModal('customer');
+  else showToast('سيتم فتح نموذج: ' + ttl);
+}
+
+// ===== MODALS =====
+function closeModal(type) {
+  document.getElementById('modal-'+type).classList.remove('open');
+  document.body.style.overflow = '';
+}
+
+// Close on overlay click
+document.querySelectorAll('.modal-overlay').forEach(o => {
+  o.addEventListener('click', e => { if (e.target === o) { o.classList.remove('open'); document.body.style.overflow=''; }});
+});
+
+// Init inventory on load
+renderInv('all');
+
+// ===== CUSTOMER MODAL =====
+function selCType(t) {
+  ['company','person','gov'].forEach(x => document.getElementById('crc-'+x).classList.toggle('sel', x===t));
+}
+
+let custCounter = 239;
+function saveCustomer() {
+  const name = document.getElementById('c-name').value.trim();
+  const phone = document.getElementById('c-phone').value.trim();
+  const city = document.getElementById('c-city').value;
+  const sector = document.getElementById('c-sector').value;
+
+  let valid = true;
+  if (!name) { document.getElementById('c-name').classList.add('err'); document.getElementById('cerr-name').classList.add('show'); valid=false; }
+  else { document.getElementById('c-name').classList.remove('err'); document.getElementById('cerr-name').classList.remove('show'); }
+  if (!phone || !/^05\d{8}$/.test(phone)) { document.getElementById('c-phone').classList.add('err'); document.getElementById('cerr-phone').classList.add('show'); valid=false; }
+  else { document.getElementById('c-phone').classList.remove('err'); document.getElementById('cerr-phone').classList.remove('show'); }
+  if (!valid) return;
+
+  // Add to table
+  const code = 'CUS-' + custCounter++;
+  const cls = document.getElementById('c-class').value;
+  const row = `<tr>
+    <td style="color:var(--accent)">#${code}</td>
+    <td>${name}</td>
+    <td>${sector || '—'}</td>
+    <td>${phone}</td>
+    <td>${city || '—'}</td>
+    <td style="color:var(--success)">0</td>
+    <td><span class="badge info">${cls}</span></td>
+    <td><span class="badge success">نشط</span></td>
+  </tr>`;
+  document.getElementById('cust-body').insertAdjacentHTML('afterbegin', row);
+
+  // Update counter
+  const cur = parseInt(document.getElementById('cust-count').textContent.replace(/\D/g,'')) + 1;
+  document.getElementById('cust-count').textContent = cur.toLocaleString('ar-SA');
+
+  closeModal('customer');
+  showToast(`✅ تم إضافة العميل "${name}" برقم #${code}`);
+  setTimeout(() => saveAllData(), 300);
+  resetCustomerForm();
+}
+
+function resetCustomerForm() {
+  ['c-name','c-cr','c-vat','c-phone','c-email','c-credit'].forEach(id => {
+    const el = document.getElementById(id);
+    if(el){el.value='';el.classList.remove('err','ok');}
+  });
+  ['c-sector','c-city'].forEach(id => { const el=document.getElementById(id); if(el) el.value=''; });
+  document.querySelectorAll('#modal-customer .err-msg').forEach(e => e.classList.remove('show'));
+}
+
+// ===== INVOICE (مربوطة بالمخزون) =====
+let invoiceNum = 2842;
+let itemRows = [];
+// كل صف: { rowId, code, name, availQty, qty, price, disc, vat }
+let invoiceLines = [];
+
+function initInvoice() {
+  document.getElementById('inv-num').value = 'INV-' + invoiceNum;
+  const now = new Date();
+  document.getElementById('inv-date').value = now.toISOString().slice(0,10);
+  const due = new Date(now); due.setDate(due.getDate()+30);
+  document.getElementById('inv-due').value = due.toISOString().slice(0,10);
+  document.getElementById('inv-customer').value = '';
+  document.getElementById('ierr-cust').classList.remove('show');
+  itemRows = [];
+  invoiceLines = [];
+  document.getElementById('items-body').innerHTML = '';
+  document.getElementById('stock-warnings').innerHTML = '';
+  updateInvTotal();
+  renderPickerGrid('');
+}
+
+// رسم بطاقات الأصناف في الـ picker
+function renderPickerGrid(search) {
+  const grid = document.getElementById('picker-grid');
+  if (!grid) return;
+  grid.innerHTML = '';
+  const filtered = invItems.filter(i =>
+    i.name.includes(search) || i.code.includes(search)
+  );
+  if (filtered.length === 0) {
+    grid.innerHTML = '<div style="grid-column:span 3;text-align:center;color:var(--text3);padding:16px;font-size:12px">لا توجد أصناف مطابقة</div>';
+    return;
+  }
+  filtered.forEach(item => {
+    const st = getInvStatus(item);
+    const isZero = item.qty === 0;
+    const card = document.createElement('div');
+    card.style.cssText = `background:#fff;border:1.5px solid ${isZero?'var(--danger-light)':'var(--border)'};border-radius:10px;padding:10px 12px;cursor:${isZero?'not-allowed':'pointer'};transition:all .2s;opacity:${isZero?.5:1}`;
+    card.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:5px">
+        <div style="font-size:11px;font-weight:700;color:var(--accent)">${item.code}</div>
+        <span class="badge ${st.cls}" style="font-size:9px">${st.label}</span>
+      </div>
+      <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:4px;line-height:1.3">${item.name}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div style="font-size:11px;color:var(--text2)">متاح: <b style="color:${isZero?'var(--danger)':'var(--success)'}">${item.qty}</b> ${item.unit}</div>
+        <div style="font-size:12px;font-weight:700;color:var(--accent)">${item.price.toLocaleString('ar-SA')} ﷼</div>
+      </div>
+      ${!isZero ? `<button onclick="addItemFromInv('${item.code}')" style="width:100%;margin-top:8px;background:var(--accent-light);color:var(--accent);border:none;border-radius:7px;padding:5px;font-family:'Tajawal',sans-serif;font-size:12px;font-weight:700;cursor:pointer">➕ إضافة للفاتورة</button>` : `<div style="width:100%;margin-top:8px;background:var(--danger-light);color:var(--danger);border-radius:7px;padding:5px;font-size:11px;text-align:center;font-weight:600">🚫 نفذ من المخزون</div>`}
+    `;
+    if (!isZero) {
+      card.onmouseenter = () => card.style.borderColor = 'var(--accent)';
+      card.onmouseleave = () => card.style.borderColor = 'var(--border)';
+    }
+    grid.appendChild(card);
+  });
+}
+
+function filterPickerItems() {
+  const q = document.getElementById('inv-search').value.trim();
+  renderPickerGrid(q);
+}
+
+// إضافة صنف من المخزون للفاتورة
+function addItemFromInv(code) {
+  const item = invItems.find(i => i.code === code);
+  if (!item || item.qty === 0) return;
+
+  // هل الصنف موجود مسبقاً؟
+  const existing = invoiceLines.find(l => l.code === code);
+  if (existing) {
+    const row = document.getElementById(existing.rowId);
+    if (row) {
+      const qtyInput = row.querySelector('.qty-input');
+      if (qtyInput) {
+        const newQty = parseInt(qtyInput.value||0) + 1;
+        if (newQty > item.qty) { showToast(`⚠️ الكمية المتاحة ${item.qty} فقط!`); return; }
+        qtyInput.value = newQty;
+        existing.qty = newQty;
+        calcRowById(existing.rowId);
+        checkStockWarnings();
+        return;
+      }
+    }
+  }
+
+  addInvRow(item);
+}
+
+function addInvRow(item) {
+  const id = 'row-' + Date.now();
+  const line = { rowId:id, code:item.code, name:item.name, availQty:item.qty, qty:1, price:item.price, disc:0, vat:15 };
+  invoiceLines.push(line);
+  itemRows.push(id);
+
+  const tr = document.createElement('tr');
+  tr.id = id;
+  tr.innerHTML = `
+    <td style="text-align:center;font-size:12px;color:var(--text3)">${itemRows.length}</td>
+    <td>
+      <div style="font-size:11px;font-weight:700;color:var(--accent)">${item.code || '—'}</div>
+      <div style="font-size:12px;font-weight:600;color:var(--text)">${item.name}</div>
+    </td>
+    <td><input style="width:100%;background:transparent;border:none;outline:none;font-family:'Tajawal',sans-serif;font-size:12px;color:var(--text2)" value="${item.name}" placeholder="وصف إضافي"></td>
+    <td style="text-align:center">
+      <span class="avail-lbl" style="font-weight:700;color:${item.qty < 10 ? 'var(--warning)' : 'var(--success)'}">${item.qty}</span>
+    </td>
+    <td>
+      <input type="number" value="1" min="1" max="${item.qty||9999}" class="qty-input"
+        style="width:60px;text-align:center;background:var(--surface2);border:1.5px solid var(--border);border-radius:7px;padding:4px 6px;font-family:'Tajawal',sans-serif;font-size:13px;font-weight:700"
+        oninput="onQtyChange(this,'${id}','${item.code}',${item.qty})">
+    </td>
+    <td>
+      <input type="number" value="${item.price}" min="0"
+        style="width:80px;text-align:center;background:var(--surface2);border:1.5px solid var(--border);border-radius:7px;padding:4px 6px;font-family:'Tajawal',sans-serif;font-size:12px"
+        oninput="calcRowById('${id}')">
+    </td>
+    <td>
+      <input type="number" value="0" min="0" max="100"
+        style="width:50px;text-align:center;background:var(--surface2);border:1.5px solid var(--border);border-radius:7px;padding:4px 6px;font-family:'Tajawal',sans-serif;font-size:12px"
+        oninput="calcRowById('${id}')">
+    </td>
+    <td id="amt-${id}" style="font-weight:700;color:var(--accent);text-align:center;font-size:13px">${item.price.toLocaleString('ar-SA')}</td>
+    <td>
+      <input type="number" value="15" min="0" max="100"
+        style="width:45px;text-align:center;background:var(--surface2);border:1.5px solid var(--border);border-radius:7px;padding:4px 4px;font-family:'Tajawal',sans-serif;font-size:12px"
+        oninput="calcRowById('${id}')">
+    </td>
+    <td style="text-align:center">
+      <button class="del-row" onclick="removeInvRow('${id}')">🗑</button>
+    </td>`;
+  document.getElementById('items-body').appendChild(tr);
+  calcRowById(id);
+  checkStockWarnings();
+  showToast(`➕ تم إضافة "${item.name}" للفاتورة`);
+}
+
+// إضافة بند يدوي (خدمة)
+function addItemManual() {
+  const id = 'row-' + Date.now();
+  invoiceLines.push({ rowId:id, code:null, name:'', availQty:9999, qty:1, price:0, disc:0, vat:15 });
+  itemRows.push(id);
+  const tr = document.createElement('tr');
+  tr.id = id;
+  tr.innerHTML = `
+    <td style="text-align:center;font-size:12px;color:var(--text3)">${itemRows.length}</td>
+    <td colspan="2">
+      <input style="width:100%;background:var(--surface2);border:1.5px solid var(--border);border-radius:7px;padding:5px 8px;font-family:'Tajawal',sans-serif;font-size:13px" placeholder="وصف الخدمة أو المنتج..." oninput="updateInvTotal()">
+    </td>
+    <td style="text-align:center;color:var(--text3);font-size:11px">—</td>
+    <td><input type="number" value="1" min="1" class="qty-input" style="width:60px;text-align:center;background:var(--surface2);border:1.5px solid var(--border);border-radius:7px;padding:4px 6px;font-family:'Tajawal',sans-serif;font-size:13px;font-weight:700" oninput="calcRowById('${id}')"></td>
+    <td><input type="number" value="0" min="0" style="width:80px;text-align:center;background:var(--surface2);border:1.5px solid var(--border);border-radius:7px;padding:4px 6px;font-family:'Tajawal',sans-serif;font-size:12px" oninput="calcRowById('${id}')"></td>
+    <td><input type="number" value="0" min="0" max="100" style="width:50px;text-align:center;background:var(--surface2);border:1.5px solid var(--border);border-radius:7px;padding:4px 6px;font-family:'Tajawal',sans-serif;font-size:12px" oninput="calcRowById('${id}')"></td>
+    <td id="amt-${id}" style="font-weight:700;color:var(--accent);text-align:center">0.00</td>
+    <td><input type="number" value="15" min="0" max="100" style="width:45px;text-align:center;background:var(--surface2);border:1.5px solid var(--border);border-radius:7px;padding:4px 4px;font-family:'Tajawal',sans-serif;font-size:12px" oninput="calcRowById('${id}')"></td>
+    <td style="text-align:center"><button class="del-row" onclick="removeInvRow('${id}')">🗑</button></td>`;
+  document.getElementById('items-body').appendChild(tr);
+}
+
+function onQtyChange(input, rowId, code, availQty) {
+  const qty = parseInt(input.value)||0;
+  if (qty > availQty) {
+    input.style.borderColor = 'var(--danger)';
+    input.value = availQty;
+  } else {
+    input.style.borderColor = 'var(--border)';
+  }
+  const line = invoiceLines.find(l => l.rowId === rowId);
+  if (line) line.qty = parseInt(input.value)||0;
+  calcRowById(rowId);
+  checkStockWarnings();
+}
+
+function calcRowById(rowId) {
+  const tr = document.getElementById(rowId);
+  if (!tr) return;
+  const nums = tr.querySelectorAll('input[type=number]');
+  if (nums.length < 3) return;
+  const qty   = parseFloat(nums[0].value)||0;
+  const price = parseFloat(nums[1].value)||0;
+  const disc  = parseFloat(nums[2].value)||0;
+  const amt   = qty * price * (1 - disc/100);
+  const amtEl = document.getElementById('amt-'+rowId);
+  if (amtEl) amtEl.textContent = amt.toLocaleString('ar-SA',{minimumFractionDigits:2});
+  updateInvTotal();
+}
+
+function removeInvRow(id) {
+  const el = document.getElementById(id);
+  if (el) el.remove();
+  itemRows = itemRows.filter(r => r !== id);
+  invoiceLines = invoiceLines.filter(l => l.rowId !== id);
+  checkStockWarnings();
+  updateInvTotal();
+}
+
+function updateInvTotal() {
+  let sub=0, discAmt=0, vat=0;
+  document.querySelectorAll('#items-body tr').forEach(tr => {
+    const nums = tr.querySelectorAll('input[type=number]');
+    if (nums.length < 3) return;
+    const qty   = parseFloat(nums[0].value)||0;
+    const price = parseFloat(nums[1].value)||0;
+    const disc  = parseFloat(nums[2].value)||0;
+    const vatP  = parseFloat(nums[3]?.value||15);
+    const line  = qty * price;
+    const d     = line * disc / 100;
+    const net   = line - d;
+    sub += line; discAmt += d; vat += net * vatP / 100;
+  });
+  const grand = sub - discAmt + vat;
+  const fmt = n => n.toLocaleString('ar-SA',{minimumFractionDigits:2,maximumFractionDigits:2}) + ' ريال';
+  document.getElementById('sub-total').textContent  = fmt(sub);
+  document.getElementById('disc-total').textContent = fmt(discAmt);
+  document.getElementById('vat-total').textContent  = fmt(vat);
+  document.getElementById('grand-total').textContent = fmt(grand);
+}
+
+// تحقق من تحذيرات المخزون
+function checkStockWarnings() {
+  const box = document.getElementById('stock-warnings');
+  if (!box) return;
+  let warns = [];
+  document.querySelectorAll('#items-body tr').forEach(tr => {
+    const nums = tr.querySelectorAll('input[type=number]');
+    if (nums.length < 1) return;
+    const qty = parseInt(nums[0].value)||0;
+    const namEl = tr.querySelector('div[style*="font-size:12px"]');
+    const code  = tr.querySelector('div[style*="color:var(--accent)"]');
+    if (!code) return;
+    const codeVal = code.textContent.trim();
+    const item = invItems.find(i => i.code === codeVal);
+    if (!item) return;
+    if (qty > item.qty) {
+      warns.push(`❌ <b>${item.name}</b>: طلبت ${qty} والمتاح ${item.qty} فقط`);
+    } else if (item.qty - qty < item.min) {
+      warns.push(`⚠️ <b>${item.name}</b>: بعد الخصم سيكون المخزون (${item.qty - qty}) أقل من الحد الأدنى (${item.min})`);
+    }
+  });
+  if (warns.length > 0) {
+    box.innerHTML = warns.map(w =>
+      `<div style="background:var(--warning-light);border:1px solid #fcd34d;border-radius:8px;padding:8px 12px;font-size:12px;margin-bottom:5px">${w}</div>`
+    ).join('');
+  } else {
+    box.innerHTML = '';
+  }
+}
+
+// إصدار الفاتورة وخصم المخزون
+function saveInvoice() {
+  const cust = document.getElementById('inv-customer').value;
+  if (!cust) { document.getElementById('ierr-cust').classList.add('show'); return; }
+  document.getElementById('ierr-cust').classList.remove('show');
+
+  if (itemRows.length === 0) { showToast('⚠️ أضف بنداً واحداً على الأقل!'); return; }
+
+  // تحقق من الكميات
+  let hasError = false;
+  document.querySelectorAll('#items-body tr').forEach(tr => {
+    const nums = tr.querySelectorAll('input[type=number]');
+    if (nums.length < 1) return;
+    const qty = parseInt(nums[0].value)||0;
+    const codeEl = tr.querySelector('div[style*="color:var(--accent)"]');
+    if (!codeEl) return;
+    const codeVal = codeEl.textContent.trim();
+    const item = invItems.find(i => i.code === codeVal);
+    if (item && qty > item.qty) {
+      showToast(`❌ كمية "${item.name}" تتجاوز المتاح (${item.qty})!`);
+      hasError = true;
+    }
+  });
+  if (hasError) return;
+
+  // ===== خصم المخزون تلقائياً =====
+  const num = 'INV-' + invoiceNum++;
+  const date = document.getElementById('inv-date').value;
+  const grand = document.getElementById('grand-total').textContent;
+  const sub = document.getElementById('sub-total').textContent.replace(' ريال','').replace(/,/g,'');
+  const vatN = document.getElementById('vat-total').textContent.replace(' ريال','').replace(/,/g,'');
+
+  let deductedItems = [];
+
+  document.querySelectorAll('#items-body tr').forEach(tr => {
+    const nums = tr.querySelectorAll('input[type=number]');
+    if (nums.length < 1) return;
+    const qty = parseInt(nums[0].value)||0;
+    const codeEl = tr.querySelector('div[style*="color:var(--accent)"]');
+    if (!codeEl) return;
+    const codeVal = codeEl.textContent.trim();
+    const item = invItems.find(i => i.code === codeVal);
+    if (item && qty > 0) {
+      item.qty -= qty; // ← الخصم الفعلي من المخزون
+      deductedItems.push({ name:item.name, code:codeVal, qty });
+
+      // سجّل في حركات المخزون
+      const typeLabel = '<span class="badge danger">صادر</span>';
+      const refHtml = `<a style="color:var(--accent);cursor:pointer" onclick="openInvoicePrint('${num}')">#${num} 🖨️</a>`;
+      const mvRow = `<tr>
+        <td>${new Date().toLocaleDateString('ar-SA').slice(0,5)}</td>
+        <td>${item.name}</td>
+        <td>${typeLabel}</td>
+        <td style="text-align:center;color:var(--danger);font-weight:700">-${qty}</td>
+        <td>${refHtml}</td>
+      </tr>`;
+      document.getElementById('movement-body').insertAdjacentHTML('afterbegin', mvRow);
+    }
+  });
+
+  // أضف للفواتير
+  const invRow = `<tr>
+    <td><a onclick="openInvoicePrint('${num}')" style="cursor:pointer">#${num}</a></td>
+    <td>${cust}</td><td>${date}</td>
+    <td>${parseFloat(sub||0).toLocaleString('ar-SA')}</td>
+    <td>${parseFloat(vatN||0).toLocaleString('ar-SA')}</td>
+    <td style="font-weight:700;color:var(--accent)">${grand}</td>
+    <td><span class="badge warning">معلقة</span></td>
+    <td>
+      <button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="openInvoicePrint('${num}')">🖨️ طباعة</button>
+    </td>
+  </tr>`;
+  const invBody = document.getElementById('inv-body');
+  if (invBody) invBody.insertAdjacentHTML('afterbegin', invRow);
+
+  // تحديث جدول المخزون
+  renderInv('all');
+
+  // ===== إنشاء القيد المحاسبي تلقائياً =====
+  const netAmt  = parseFloat(sub||0);
+  const vatAmt  = parseFloat(vatN||0);
+  const costAmt = deductedItems.reduce((sum, i) => {
+    const item = invItems.find(x => x.code === i.code);
+    return sum + (item ? item.cost * i.qty : 0);
+  }, 0);
+  createInvoiceJournalEntry(num, cust, netAmt, vatAmt, costAmt);
+
+  // تحديث تقرير ZATCA تلقائياً
+  updateZatcaFromInvoice(netAmt, vatAmt);
+
+  closeModal('invoice');
+
+  // رسالة تفصيلية
+  const itemsSummary = deductedItems.map(i => `${i.name} (${i.qty})`).join('، ');
+  showToast(`✅ فاتورة #${num} صدرت — تم خصم: ${itemsSummary || 'لا أصناف مخزنية'}`);
+
+  // حفظ تلقائي بعد الإصدار
+  setTimeout(() => {
+    saveAllData();
+  }, 400);
+}
+
+// ===== legacy addItem for createInvoiceFromItem =====
+function addItem() { addItemManual(); }
+function calcRow(input) {
+  const tr = input.closest('tr');
+  if (tr) calcRowById(tr.id);
+}
+
+// ===========================
+// محرك المحاسبة التلقائية
+// ===========================
+
+// أرصدة الحسابات الرئيسية
+const accBalances = {
+  '1100': 380000,   // ذمم مدينة
+  '1200': 842000,   // البنك
+  '1001': 125000,   // الصندوق
+  '2100': 57000,    // VAT
+  '2200': 98000,    // ذمم دائنة
+  '4001': 1200000,  // إيرادات
+  '5001': 680000,   // تكلفة مبيعات
+};
+
+const accNames = {
+  '1100':'ذمم مدينة — عملاء','1200':'البنك الأهلي','1001':'الصندوق',
+  '2100':'VAT مستحقة','2200':'ذمم دائنة','4001':'إيرادات المبيعات','5001':'تكلفة البضاعة'
+};
+
+// طبيعة الحساب: debit = يزيد بالمدين، credit = يزيد بالدائن
+const accNature = { '1100':'debit','1200':'debit','1001':'debit','5001':'debit','2100':'credit','2200':'credit','4001':'credit' };
+
+let journalCounter = 2;
+
+// إنشاء قيد محاسبي من فاتورة مبيعات
+function createInvoiceJournalEntry(num, cust, netAmount, vatAmount, costAmount) {
+  const date = new Date().toLocaleDateString('ar-SA').slice(0,8);
+  const total = netAmount + vatAmount;
+
+  // القيود:
+  // مدين: ذمم مدينة (1100) = إجمالي شامل ضريبة
+  // دائن: إيرادات مبيعات (4001) = صافي قبل ضريبة
+  // دائن: ضريبة VAT (2100) = قيمة الضريبة
+  // مدين: تكلفة مبيعات (5001) = تكلفة البضاعة
+  // دائن: مخزون (عملية داخلية - سبق خصمها)
+
+  const jeNum = 'JE-' + String(journalCounter++).padStart(3,'0');
+
+  // تحديث الأرصدة
+  accBalances['1100'] += total;
+  accBalances['4001'] += netAmount;
+  accBalances['2100'] += vatAmount;
+  if (costAmount > 0) {
+    accBalances['5001'] += costAmount;
+  }
+
+  // إضافة القيد للسجل
+  const refHtml = `<a style="color:var(--accent);cursor:pointer" onclick="openInvoicePrint('${num}')">#${num} 🖨️</a>`;
+  const rows = `
+    <tr style="background:#f0f9ff">
+      <td style="color:var(--accent);font-weight:700">${jeNum}</td>
+      <td>${date}</td>
+      <td style="font-weight:600">إيراد مبيعات — ${cust}</td>
+      <td>${refHtml}</td>
+      <td style="text-align:center;font-weight:700;color:var(--accent)">${total.toLocaleString('ar-SA')}</td>
+      <td style="text-align:center;color:var(--text3)">—</td>
+      <td><span class="badge success">مرحَّل</span></td>
+    </tr>
+    <tr>
+      <td colspan="2"></td>
+      <td style="font-size:11px;color:var(--text2);padding-right:20px">↳ ذمم مدينة ح/1100</td>
+      <td></td>
+      <td style="text-align:center;color:var(--text3)">—</td>
+      <td style="text-align:center;color:var(--success);font-weight:700">${netAmount.toLocaleString('ar-SA')}</td>
+      <td></td>
+    </tr>
+    <tr>
+      <td colspan="2"></td>
+      <td style="font-size:11px;color:var(--text2);padding-right:20px">↳ ضريبة القيمة المضافة ح/2100</td>
+      <td></td>
+      <td style="text-align:center;color:var(--text3)">—</td>
+      <td style="text-align:center;color:var(--warning);font-weight:700">${vatAmount.toLocaleString('ar-SA')}</td>
+      <td></td>
+    </tr>`;
+
+  const jbody = document.getElementById('journal-body');
+  if (jbody) jbody.insertAdjacentHTML('afterbegin', rows);
+
+  // تحديث واجهة المحاسبة
+  refreshAccountingUI();
+}
+
+function refreshAccountingUI() {
+  // تحديث أرصدة دليل الحسابات
+  Object.keys(accBalances).forEach(acc => {
+    const el = document.getElementById('bal-'+acc);
+    if (el) el.textContent = accBalances[acc].toLocaleString('ar-SA');
+  });
+
+  // تحديث KPIs
+  const rev = document.getElementById('acc-revenue');
+  if (rev) rev.textContent = accBalances['4001'].toLocaleString('ar-SA');
+  const rec = document.getElementById('acc-receivable');
+  if (rec) rec.textContent = accBalances['1100'].toLocaleString('ar-SA');
+  const vat = document.getElementById('acc-vat');
+  if (vat) vat.textContent = accBalances['2100'].toLocaleString('ar-SA');
+  const cnt = document.getElementById('acc-entries-count');
+  if (cnt) cnt.textContent = journalCounter - 1;
+
+  // تحديث ميزان المراجعة
+  renderTrialBalance();
+}
+
+function renderTrialBalance() {
+  const tbody = document.getElementById('trial-balance-body');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  let totalDebit = 0, totalCredit = 0;
+
+  Object.keys(accBalances).forEach(acc => {
+    const bal = accBalances[acc];
+    const nature = accNature[acc] || 'debit';
+    const isDebit = nature === 'debit';
+    const debit  = isDebit  ? bal : 0;
+    const credit = !isDebit ? bal : 0;
+    totalDebit  += debit;
+    totalCredit += credit;
+
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px';
+    row.innerHTML = `
+      <span style="flex:1;color:var(--text2)">${acc} — ${accNames[acc]||acc}</span>
+      <span style="width:90px;font-weight:${debit?'700':'400'};color:${debit?'var(--accent)':'var(--text3)'}">
+        ${debit ? debit.toLocaleString('ar-SA') : '—'}
+      </span>
+      <span style="width:90px;font-weight:${credit?'700':'400'};color:${credit?'var(--success)':'var(--text3)'}">
+        ${credit ? credit.toLocaleString('ar-SA') : '—'}
+      </span>`;
+    tbody.appendChild(row);
+  });
+
+  const dtEl = document.getElementById('tb-debit-total');
+  const ctEl = document.getElementById('tb-credit-total');
+  const stEl = document.getElementById('tb-balance-status');
+  if (dtEl) dtEl.textContent = totalDebit.toLocaleString('ar-SA');
+  if (ctEl) ctEl.textContent = totalCredit.toLocaleString('ar-SA');
+  if (stEl) {
+    const balanced = Math.abs(totalDebit - totalCredit) < 1;
+    stEl.textContent = balanced ? '✅ الميزان متوازن' : `⚠️ فرق: ${Math.abs(totalDebit-totalCredit).toLocaleString('ar-SA')} ريال`;
+    stEl.style.background = balanced ? 'var(--success-light)' : 'var(--warning-light)';
+    stEl.style.color = balanced ? 'var(--success)' : 'var(--warning)';
+  }
+}
+
+// ===== القيد اليدوي =====
+const meAccounts = [
+  {code:'1100',name:'ذمم مدينة'},{code:'1200',name:'البنك الأهلي'},
+  {code:'1001',name:'الصندوق'},{code:'2100',name:'VAT مستحقة'},
+  {code:'2200',name:'ذمم دائنة'},{code:'4001',name:'إيرادات المبيعات'},
+  {code:'5001',name:'تكلفة البضاعة'}
+];
+
+function addMELine() {
+  const opts = meAccounts.map(a=>`<option value="${a.code}">${a.code} — ${a.name}</option>`).join('');
+  const id = 'mel-' + Date.now();
+  const tr = document.createElement('tr');
+  tr.id = id;
+  tr.innerHTML = `
+    <td style="padding:5px 8px">
+      <select style="width:100%;background:var(--surface2);border:1.5px solid var(--border);border-radius:8px;padding:6px 10px;font-family:'Tajawal',sans-serif;font-size:12px;appearance:none">
+        <option value="">— اختر الحساب —</option>${opts}
+      </select>
+    </td>
+    <td style="padding:5px 6px"><input type="number" min="0" value="0" style="width:100%;text-align:center;background:var(--surface2);border:1.5px solid var(--border);border-radius:8px;padding:6px;font-family:'Tajawal',sans-serif;font-size:13px" oninput="calcMEBalance()"></td>
+    <td style="padding:5px 6px"><input type="number" min="0" value="0" style="width:100%;text-align:center;background:var(--surface2);border:1.5px solid var(--border);border-radius:8px;padding:6px;font-family:'Tajawal',sans-serif;font-size:13px" oninput="calcMEBalance()"></td>
+    <td style="text-align:center"><button onclick="document.getElementById('${id}').remove();calcMEBalance()" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:16px">🗑</button></td>`;
+  document.getElementById('me-lines').appendChild(tr);
+}
+
+function calcMEBalance() {
+  let d=0, c=0;
+  document.querySelectorAll('#me-lines tr').forEach(tr => {
+    const nums = tr.querySelectorAll('input[type=number]');
+    d += parseFloat(nums[0]?.value||0);
+    c += parseFloat(nums[1]?.value||0);
+  });
+  document.getElementById('me-debit-sum').textContent = d.toLocaleString('ar-SA');
+  document.getElementById('me-credit-sum').textContent = c.toLocaleString('ar-SA');
+  const msgEl = document.getElementById('me-balance-msg');
+  const balanced = Math.abs(d-c) < 0.01;
+  msgEl.textContent = d===0&&c===0 ? '—' : balanced ? '✅ متوازن' : `⚠️ فرق: ${Math.abs(d-c).toLocaleString('ar-SA')}`;
+  msgEl.style.color = balanced && d>0 ? 'var(--success)' : 'var(--warning)';
+}
+
+function saveManualEntry() {
+  const desc = document.getElementById('me-desc').value.trim();
+  const date = document.getElementById('me-date').value;
+  const ref  = document.getElementById('me-ref').value.trim();
+  if (!desc || !date) { showToast('⚠️ أدخل التاريخ والبيان'); return; }
+
+  let totalD=0, totalC=0;
+  document.querySelectorAll('#me-lines tr').forEach(tr => {
+    const nums = tr.querySelectorAll('input[type=number]');
+    totalD += parseFloat(nums[0]?.value||0);
+    totalC += parseFloat(nums[1]?.value||0);
+
+    // تحديث الأرصدة
+    const accCode = tr.querySelector('select')?.value;
+    if (accCode && accBalances[accCode] !== undefined) {
+      accBalances[accCode] += parseFloat(nums[0]?.value||0);
+      accBalances[accCode] += parseFloat(nums[1]?.value||0);
+    }
+  });
+
+  if (Math.abs(totalD - totalC) > 0.01) { showToast('❌ القيد غير متوازن! مجموع المدين ≠ مجموع الدائن'); return; }
+  if (totalD === 0) { showToast('⚠️ أضف قيماً للقيد'); return; }
+
+  const jeNum = 'JE-' + String(journalCounter++).padStart(3,'0');
+  const jbody = document.getElementById('journal-body');
+  if (jbody) {
+    const row = `<tr style="background:#f0fff4">
+      <td style="color:var(--accent);font-weight:700">${jeNum}</td>
+      <td>${date}</td>
+      <td style="font-weight:600">${desc}</td>
+      <td style="color:var(--text2);font-size:12px">${ref||'—'}</td>
+      <td style="text-align:center;font-weight:700;color:var(--accent)">${totalD.toLocaleString('ar-SA')}</td>
+      <td style="text-align:center;font-weight:700;color:var(--success)">${totalC.toLocaleString('ar-SA')}</td>
+      <td><span class="badge success">مرحَّل</span></td>
+    </tr>`;
+    jbody.insertAdjacentHTML('afterbegin', row);
+  }
+
+  refreshAccountingUI();
+  closeModal('manual-entry');
+  showToast(`✅ تم ترحيل القيد ${jeNum} بمبلغ ${totalD.toLocaleString('ar-SA')} ريال`);
+  setTimeout(() => saveAllData(), 300);
+
+  // reset
+  document.getElementById('me-lines').innerHTML = '';
+  document.getElementById('me-desc').value = '';
+  document.getElementById('me-ref').value = '';
+  document.getElementById('me-debit-sum').textContent = '0';
+  document.getElementById('me-credit-sum').textContent = '0';
+}
+
+// تهيئة ميزان المراجعة عند التحميل
+window.addEventListener('load', async () => {
+  await loadAllData();
+  refreshAccountingUI();
+  checkSession();
+});
+
+// =============================================
+// 🔥 Firebase — حفظ سحابي حقيقي
+// =============================================
+
+// --- إعداد Firebase ---
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyDtybO1edOfH0w5QWfVVDk5XzKtDf13UrQ",
+  authDomain: "hasabati-erp.firebaseapp.com",
+  projectId: "hasabati-erp",
+  storageBucket: "hasabati-erp.firebasestorage.app",
+  messagingSenderId: "17938434177",
+  appId: "1:17938434177:web:f7461d5124a28f8292a580"
+};
+
+const FIREBASE_URL = `https://firestore.googleapis.com/v1/projects/${FIREBASE_CONFIG.projectId}/databases/(default)/documents`;
+const DOC_PATH = `${FIREBASE_URL}/erp_data/main`;
+
+// --- تحويل البيانات لصيغة Firestore ---
+function toFirestore(obj) {
+  const fields = {};
+  Object.entries(obj).forEach(([k, v]) => {
+    if (typeof v === 'string')       fields[k] = { stringValue: v };
+    else if (typeof v === 'number')  fields[k] = { integerValue: String(Math.round(v)) };
+    else if (typeof v === 'boolean') fields[k] = { booleanValue: v };
+    else if (v === null || v === undefined) fields[k] = { nullValue: null };
+    else if (Array.isArray(v))       fields[k] = { stringValue: JSON.stringify(v) };
+    else if (typeof v === 'object')  fields[k] = { stringValue: JSON.stringify(v) };
+  });
+  return { fields };
+}
+
+// --- تحويل رد Firestore لكائن JS ---
+function fromFirestore(doc) {
+  if (!doc?.fields) return null;
+  const obj = {};
+  Object.entries(doc.fields).forEach(([k, v]) => {
+    if (v.stringValue !== undefined)  obj[k] = v.stringValue;
+    else if (v.integerValue !== undefined) obj[k] = Number(v.integerValue);
+    else if (v.booleanValue !== undefined) obj[k] = v.booleanValue;
+    else obj[k] = null;
+  });
+  return obj;
+}
+
+// --- حفظ كل البيانات على Firebase ---
+async function saveAllData() {
+  const snapshot = {
+    savedAt:         new Date().toISOString(),
+    invItems:        JSON.stringify(invItems),
+    invItemsCounter: invCounter,
+    pCounter,
+    custCounter,
+    invoiceNum,
+    journalCounter,
+    accBalances:     JSON.stringify(accBalances),
+    journalHTML:     document.getElementById('journal-body')?.innerHTML  || '',
+    movementHTML:    document.getElementById('movement-body')?.innerHTML || '',
+    custBodyHTML:    document.getElementById('cust-body')?.innerHTML     || '',
+    invBodyHTML:     document.getElementById('inv-body')?.innerHTML      || '',
+  };
+
+  try {
+    showSaveIndicator('🔄', 'جاري الحفظ...', false);
+    const res = await fetch(DOC_PATH + '?key=' + FIREBASE_CONFIG.apiKey, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(toFirestore(snapshot))
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const now = new Date();
+    const t = now.toLocaleTimeString('ar-SA',{hour:'2-digit',minute:'2-digit'});
+    showSaveIndicator('☁️', `حُفظ على السحابة ${t}`, true);
+    // احتياطي محلي أيضاً
+    localStorage.setItem('hasabati_erp_v1', JSON.stringify(snapshot));
+    return true;
+  } catch(e) {
+    console.error('Firebase save error:', e);
+    // fallback: localStorage
+    try {
+      localStorage.setItem('hasabati_erp_v1', JSON.stringify(snapshot));
+      showSaveIndicator('💾', 'حُفظ محلياً (Firebase غير متاح)', true);
+      return true;
+    } catch { return false; }
+  }
+}
+
+// --- تحميل البيانات من Firebase ---
+async function loadAllData() {
+  showSaveIndicator('🔄', 'جاري التحميل من السحابة...', false);
+  try {
+    const res = await fetch(DOC_PATH + '?key=' + FIREBASE_CONFIG.apiKey);
+    if (res.status === 404) {
+      showSaveIndicator('🆕', 'بيانات جديدة — لا يوجد حفظ سابق', false);
+      tryLoadLocal();
+      return;
+    }
+    if (!res.ok) throw new Error(await res.text());
+    const doc = await res.json();
+    const data = fromFirestore(doc);
+    if (!data) { tryLoadLocal(); return; }
+    applyLoadedData(data);
+    const d = new Date(data.savedAt || Date.now());
+    const t = d.toLocaleTimeString('ar-SA',{hour:'2-digit',minute:'2-digit'});
+    const dt = d.toLocaleDateString('ar-SA');
+    showSaveIndicator('☁️', `مُحمَّل من السحابة — ${dt} ${t}`, false);
+  } catch(e) {
+    console.error('Firebase load error:', e);
+    showSaveIndicator('⚠️', 'Firebase غير متاح — تحميل محلي', false);
+    tryLoadLocal();
+  }
+}
+
+// --- تحميل احتياطي من localStorage ---
+function tryLoadLocal() {
+  try {
+    const raw = localStorage.getItem('hasabati_erp_v1');
+    if (!raw) { showSaveIndicator('🆕', 'بدء جديد', false); return; }
+    applyLoadedData(JSON.parse(raw));
+    showSaveIndicator('💾', 'مُحمَّل من الذاكرة المحلية', false);
+  } catch(e) { console.error('Local load error:', e); }
+}
+
+// --- تطبيق البيانات المحملة ---
+function applyLoadedData(data) {
+  try {
+    if (data.invItems)        invItems       = JSON.parse(data.invItems);
+    if (data.invItemsCounter) invCounter     = Number(data.invItemsCounter);
+    if (data.pCounter)        pCounter       = Number(data.pCounter);
+    if (data.custCounter)     custCounter    = Number(data.custCounter);
+    if (data.invoiceNum)      invoiceNum     = Number(data.invoiceNum);
+    if (data.journalCounter)  journalCounter = Number(data.journalCounter);
+    if (data.accBalances)     Object.assign(accBalances, JSON.parse(data.accBalances));
+
+    const jb = document.getElementById('journal-body');
+    if (jb && data.journalHTML)  jb.innerHTML = data.journalHTML;
+    const mb = document.getElementById('movement-body');
+    if (mb && data.movementHTML) mb.innerHTML = data.movementHTML;
+    const cb = document.getElementById('cust-body');
+    if (cb && data.custBodyHTML) cb.innerHTML = data.custBodyHTML;
+    const ib = document.getElementById('inv-body');
+    if (ib && data.invBodyHTML)  ib.innerHTML = data.invBodyHTML;
+
+    renderInv('all');
+    refreshAccountingUI();
+  } catch(e) { console.error('applyLoadedData error:', e); }
+}
+
+// --- حذف كل البيانات ---
+async function clearAllData() {
+  if (!confirm('⚠️ هل أنت متأكد من حذف جميع البيانات؟\nسيتم حذفها من السحابة والجهاز!')) return;
+  try {
+    await fetch(DOC_PATH + '?key=' + FIREBASE_CONFIG.apiKey, { method: 'DELETE' });
+  } catch(e) {}
+  localStorage.removeItem('hasabati_erp_v1');
+  location.reload();
+}
+
+// --- مؤشر الحفظ ---
+function showSaveIndicator(icon, msg, animate=true) {
+  const el = document.getElementById('save-indicator');
+  if (!el) return;
+  el.textContent = icon + ' ' + msg;
+  el.style.color = icon==='☁️'||icon==='✅' ? 'var(--success)'
+    : icon==='🔄' ? 'var(--accent)'
+    : icon==='⚠️' ? 'var(--warning)' : 'var(--text3)';
+  if (animate) {
+    el.style.transform = 'scale(1.1)';
+    setTimeout(() => el.style.transform = 'scale(1)', 300);
+  }
+}
+
+// --- حفظ تلقائي كل 90 ثانية ---
+setInterval(() => { saveAllData(); }, 90000);
+
+// =============================================
+// 🔐 نظام تسجيل الدخول والصلاحيات
+// =============================================
+
+const USERS = {
+  admin:      { pass:'admin123',  name:'أحمد المدير',    role:'admin',      roleAr:'مدير عام',    avatar:'👑', color:'#92400e', bg:'#fef3c7',
+    perms: ['dashboard','accounting','invoices','reports','sales','customers','purchases','inventory','hr','assets','settings'] },
+  accountant: { pass:'acc123',    name:'سارة المحاسبة',  role:'accountant', roleAr:'محاسب',       avatar:'📒', color:'#0369a1', bg:'#e0f2fe',
+    perms: ['dashboard','accounting','invoices','reports','customers'] },
+  sales:      { pass:'sales123',  name:'محمد المبيعات',  role:'sales',      roleAr:'مبيعات',      avatar:'💼', color:'#065f46', bg:'#d1fae5',
+    perms: ['dashboard','invoices','sales','customers'] },
+  warehouse:  { pass:'wh123',     name:'خالد المستودع',  role:'warehouse',  roleAr:'مستودع',      avatar:'📦', color:'#5b21b6', bg:'#ede9fe',
+    perms: ['dashboard','inventory','purchases'] },
+};
+
+let currentUser = null;
+
+// --- دخول عادي ---
+function doLogin() {
+  const uVal = document.getElementById('li-user').value.trim().toLowerCase();
+  const pVal = document.getElementById('li-pass').value;
+  const uErr = document.getElementById('li-user-err');
+  const pErr = document.getElementById('li-pass-err');
+  const gErr = document.getElementById('li-general-err');
+
+  uErr.classList.remove('show'); pErr.classList.remove('show'); gErr.classList.remove('show');
+  document.getElementById('li-user').classList.remove('err');
+  document.getElementById('li-pass').classList.remove('err');
+
+  const user = USERS[uVal];
+  if (!user) {
+    document.getElementById('li-user').classList.add('err');
+    uErr.classList.add('show'); return;
+  }
+  if (user.pass !== pVal) {
+    document.getElementById('li-pass').classList.add('err');
+    pErr.classList.add('show'); return;
+  }
+  loginSuccess(uVal, user);
+}
+
+// --- دخول سريع ---
+function quickLogin(username) {
+  document.getElementById('li-user').value = username;
+  document.getElementById('li-pass').value = USERS[username].pass;
+  loginSuccess(username, USERS[username]);
+}
+
+// --- نجاح الدخول ---
+function loginSuccess(username, user) {
+  currentUser = { username, ...user };
+
+  // حفظ الجلسة
+  sessionStorage.setItem('erp_session', JSON.stringify({ username, ts: Date.now() }));
+
+  // تأثير بصري
+  const box = document.getElementById('login-box');
+  box.classList.add('success');
+
+  setTimeout(() => {
+    document.getElementById('login-screen').classList.add('hidden');
+    applyPermissions(user);
+    updateUserUI(user);
+    showToast(`👋 أهلاً ${user.name}! تم الدخول كـ ${user.roleAr}`);
+  }, 350);
+}
+
+// --- تطبيق الصلاحيات على القائمة الجانبية ---
+function applyPermissions(user) {
+  const allPages = ['dashboard','accounting','invoices','reports','sales','customers','purchases','inventory','hr','assets','settings'];
+
+  allPages.forEach(page => {
+    // إخفاء/إظهار عناصر القائمة
+    const navItems = document.querySelectorAll(`[onclick*="'${page}'"]`);
+    navItems.forEach(item => {
+      if (user.perms.includes(page)) {
+        item.style.display = '';
+        item.style.opacity = '1';
+        item.style.pointerEvents = '';
+      } else {
+        item.style.opacity = '0.35';
+        item.style.pointerEvents = 'none';
+        item.title = '🔒 ليس لديك صلاحية للوصول';
+      }
+    });
+  });
+
+  // إخفاء أزرار الحذف والإعدادات من غير المدير
+  if (user.role !== 'admin') {
+    const delBtn = document.querySelector('[onclick="clearAllData()"]');
+    if (delBtn) delBtn.style.display = 'none';
+  }
+
+  // إخفاء أزرار الإضافة من المشاهد (لو أضفنا دور viewer لاحقاً)
+  if (user.role === 'viewer') {
+    document.querySelectorAll('.btn-primary, .btn-success').forEach(b => {
+      b.style.display = 'none';
+    });
+  }
+}
+
+// --- تحديث واجهة المستخدم ---
+function updateUserUI(user) {
+  // sidebar
+  document.getElementById('sidebar-avatar').textContent = user.avatar;
+  document.getElementById('sidebar-username').textContent = user.name;
+  document.getElementById('sidebar-role').textContent = user.roleAr;
+}
+
+// --- تسجيل خروج ---
+function doLogout() {
+  if (!confirm(`هل تريد تسجيل الخروج يا ${currentUser?.name}؟`)) return;
+  sessionStorage.removeItem('erp_session');
+  currentUser = null;
+  // إعادة تعيين الحقول
+  document.getElementById('li-user').value = '';
+  document.getElementById('li-pass').value = '';
+  document.getElementById('login-screen').classList.remove('hidden');
+  // إعادة كل القائمة
+  document.querySelectorAll('.nav-item').forEach(i => {
+    i.style.opacity = '1'; i.style.pointerEvents = '';
+  });
+}
+
+// --- إظهار/إخفاء كلمة المرور ---
+function togglePass() {
+  const inp = document.getElementById('li-pass');
+  const eye = document.getElementById('pass-eye');
+  if (inp.type === 'password') { inp.type = 'text'; eye.textContent = '🙈'; }
+  else { inp.type = 'password'; eye.textContent = '👁️'; }
+}
+
+// --- فحص الجلسة عند التحميل ---
+function checkSession() {
+  try {
+    const raw = sessionStorage.getItem('erp_session');
+    if (!raw) return false;
+    const sess = JSON.parse(raw);
+    // الجلسة تنتهي بعد 8 ساعات
+    if (Date.now() - sess.ts > 8 * 60 * 60 * 1000) {
+      sessionStorage.removeItem('erp_session'); return false;
+    }
+    const user = USERS[sess.username];
+    if (!user) return false;
+    currentUser = { username: sess.username, ...user };
+    loginSuccess(sess.username, user);
+    return true;
+  } catch { return false; }
+}
+
+// =============================================
+
+// =============================================
+// 🇸🇦 محرك تقرير ZATCA
+// =============================================
+
+const ZATCA_DATA = {
+  'Q1-2026': { label:'الربع الأول 2026', deadline:'30 أبريل 2026', taxableSales:1200000, outputVat:180000, purchaseBase:84000, inputVat:12600, status:'pending' },
+  'Q4-2025': { label:'الربع الرابع 2025', deadline:'31 يناير 2026', taxableSales:980000, outputVat:147000, purchaseBase:62000, inputVat:9300, status:'submitted' },
+  'Q3-2025': { label:'الربع الثالث 2025', deadline:'31 أكتوبر 2025', taxableSales:850000, outputVat:127500, purchaseBase:54000, inputVat:8100, status:'accepted' },
+  'Q2-2025': { label:'الربع الثاني 2025', deadline:'31 يوليو 2025', taxableSales:720000, outputVat:108000, purchaseBase:41000, inputVat:6150, status:'accepted' },
+};
+
+function renderZatca() {
+  const period = document.getElementById('zatca-period')?.value || 'Q1-2026';
+  const d = ZATCA_DATA[period];
+  if (!d) return;
+
+  const fmt = n => n.toLocaleString('ar-SA');
+  const netVat = d.outputVat - d.inputVat;
+
+  // KPIs
+  setEl('z-taxable-sales', fmt(d.taxableSales));
+  setEl('z-output-vat',    fmt(d.outputVat));
+  setEl('z-input-vat',     fmt(d.inputVat));
+  setEl('z-net-vat',       fmt(netVat));
+
+  // نموذج VAT-01
+  setEl('z-period-label',       d.label);
+  setEl('z-local-base',         fmt(d.taxableSales));
+  setEl('z-local-vat',          fmt(d.outputVat));
+  setEl('z-output-total-base',  fmt(d.taxableSales));
+  setEl('z-output-total-vat',   fmt(d.outputVat));
+  setEl('z-purchase-base',      fmt(d.purchaseBase));
+  setEl('z-purchase-vat',       fmt(d.inputVat));
+  setEl('z-input-total-base',   fmt(d.purchaseBase));
+  setEl('z-input-total-vat',    fmt(d.inputVat));
+  setEl('z-net-due',            fmt(netVat));
+
+  // حالة الرفع
+  const badge = document.getElementById('z-status-badge');
+  const statusText = document.getElementById('z-status-text');
+  const steps = document.getElementById('z-steps');
+  const statusColors = {
+    pending:   { bg:'#fef3c7', color:'#92400e', text:'⏳ لم يُرفع', icon:'🔄' },
+    submitted: { bg:'#dbeafe', color:'#1d4ed8', text:'📤 تم الرفع — قيد المراجعة', icon:'📤' },
+    accepted:  { bg:'#d1fae5', color:'#065f46', text:'✅ مقبول من هيئة الزكاة', icon:'✅' },
+    rejected:  { bg:'#fee2e2', color:'#991b1b', text:'❌ مرفوض — يحتاج تصحيح', icon:'❌' },
+  };
+  const sc = statusColors[d.status] || statusColors.pending;
+  if (badge) { badge.textContent = sc.text; badge.style.background = sc.bg; badge.style.color = sc.color; }
+  if (statusText) statusText.textContent = sc.text;
+
+  // خطوات المسار
+  const stepNames = ['1. إعداد البيانات','2. التحقق','3. الرفع','4. القبول'];
+  const activeStep = { pending:0, submitted:2, accepted:3, rejected:2 }[d.status] ?? 0;
+  if (steps) {
+    steps.innerHTML = stepNames.map((s,i) => {
+      const isActive = i <= activeStep;
+      const isLast = i === 3;
+      return `${i>0?'<span style="color:var(--text3)">→</span>':''}
+        <span style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700;
+          background:${isActive ? (isLast && d.status==='accepted' ? 'var(--success-light)' : 'var(--accent-light)') : 'var(--surface2)'};
+          color:${isActive ? (isLast && d.status==='accepted' ? 'var(--success)' : 'var(--accent)') : 'var(--text3)'}">${s}</span>`;
+    }).join('');
+  }
+}
+
+function setEl(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+
+// رفع الإقرار (محاكاة)
+function submitZatca() {
+  const period = document.getElementById('zatca-period')?.value || 'Q1-2026';
+  const d = ZATCA_DATA[period];
+  if (!d) return;
+
+  if (d.status === 'accepted') { showToast('✅ هذا الإقرار مقبول مسبقاً'); return; }
+  if (d.status === 'submitted') { showToast('📤 تم رفع هذا الإقرار مسبقاً — قيد المراجعة'); return; }
+
+  // محاكاة عملية الرفع
+  showToast('🔄 جاري التحقق من البيانات...');
+
+  const btn = document.querySelector('[onclick="submitZatca()"]');
+  if (btn) { btn.textContent = '⏳ جاري الرفع...'; btn.disabled = true; }
+
+  setTimeout(() => {
+    showToast('📡 جاري إرسال البيانات لبوابة ZATCA...');
+  }, 1200);
+
+  setTimeout(() => {
+    d.status = 'submitted';
+    renderZatca();
+    if (btn) { btn.textContent = '✅ تم الرفع'; btn.disabled = false; }
+    showToast('🎉 تم رفع الإقرار الضريبي بنجاح! رقم المرجع: ZATCA-' + Date.now().toString().slice(-8));
+    // محاكاة القبول بعد 3 ثوان
+    setTimeout(() => {
+      d.status = 'accepted';
+      renderZatca();
+      showToast('✅ تم قبول الإقرار من هيئة الزكاة والضريبة والجمارك 🇸🇦');
+      if (btn) btn.textContent = '✅ مقبول';
+    }, 3000);
+  }, 2500);
+}
+
+// طباعة التقرير
+function printZatca() {
+  window.print();
+}
+
+// تصدير XML (ZATCA format)
+function exportZatcaXML() {
+  const period = document.getElementById('zatca-period')?.value || 'Q1-2026';
+  const d = ZATCA_DATA[period];
+  const netVat = d.outputVat - d.inputVat;
+
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<VATReturn xmlns="urn:zatca:vat:return:v1">
+  <TaxpayerInfo>
+    <TaxRegistrationNumber>310012345600003</TaxRegistrationNumber>
+    <Name>شركة حساباتي للتجارة</Name>
+    <CommercialRegistration>1010123456</CommercialRegistration>
+  </TaxpayerInfo>
+  <ReturnPeriod>${period}</ReturnPeriod>
+  <PeriodLabel>${d.label}</PeriodLabel>
+  <OutputTax>
+    <TaxableSupplies rate="15">${d.taxableSales}</TaxableSupplies>
+    <VATAmount>${d.outputVat}</VATAmount>
+    <ZeroRatedSupplies>0</ZeroRatedSupplies>
+    <ExemptSupplies>0</ExemptSupplies>
+  </OutputTax>
+  <InputTax>
+    <TaxablePurchases>${d.purchaseBase}</TaxablePurchases>
+    <DeductibleVAT>${d.inputVat}</DeductibleVAT>
+  </InputTax>
+  <NetVATDue>${netVat}</NetVATDue>
+  <GeneratedAt>${new Date().toISOString()}</GeneratedAt>
+  <System>حساباتي ERP v2.0</System>
+</VATReturn>`;
+
+  const blob = new Blob([xml], { type:'application/xml' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `ZATCA_${period}_${Date.now()}.xml`;
+  a.click(); URL.revokeObjectURL(url);
+  showToast('📥 تم تحميل ملف XML — جاهز للرفع على بوابة ZATCA');
+}
+
+// تحديث تلقائي عند إصدار فاتورة جديدة
+function updateZatcaFromInvoice(netAmount, vatAmount) {
+  const d = ZATCA_DATA['Q1-2026'];
+  if (d) {
+    d.taxableSales += netAmount;
+    d.outputVat    += vatAmount;
+    if (document.getElementById('page-reports')?.classList.contains('active')) {
+      renderZatca();
+    }
+  }
+}
+
+// تهيئة عند التحميل
+window.addEventListener('DOMContentLoaded', () => { renderZatca(); });
+
+// =============================================
+
+async function manualSave() {
+  const ok = await saveAllData();
+  if (!ok) showToast('❌ فشل الحفظ — تحقق من الاتصال بالإنترنت');
+  else showToast('☁️ تم الحفظ على Firebase بنجاح!');
+}
+
+// ===== TOAST =====
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), 3500);
+}
+
+// ===== CHART =====
+const months=['يول','أغس','سبت','أكت','نوف','ديس','ينا','فبر','مار'];
+const vals=[65,72,58,88,95,102,89,110,120];
+const max=Math.max(...vals);
+const colors=['#0284c7','#6366f1','#059669','#d97706','#0ea5e9','#0284c7','#6366f1','#059669','#0284c7'];
+const ch=document.getElementById('chart');
+months.forEach((m,i)=>{
+  const pct=(vals[i]/max*100).toFixed(0);
+  ch.innerHTML+=`<div class="cb-wrap"><div class="cb" style="height:${pct}%;background:${colors[i]};opacity:${.5+i/months.length*.5}"></div><div class="cb-lbl">${m}</div></div>`;
+});
+</script>
+</body>
+</html>
