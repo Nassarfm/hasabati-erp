@@ -1,0 +1,357 @@
+"""
+app/modules/accounting/service.py
+══════════════════════════════════════════════════════════
+Accounting module service layer.
+Orchestrates repositories + PostingEngine.
+Routers call this — never repositories directly.
+══════════════════════════════════════════════════════════
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import date
+from decimal import Decimal
+from typing import List, Optional, Tuple
+
+import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import (
+    InvalidStateError, NotFoundError, ValidationError,
+)
+from app.core.tenant import CurrentUser
+from app.modules.accounting.models import (
+    ChartOfAccount, FiscalPeriod, JEStatus, JournalEntry,
+)
+from app.modules.accounting.repository import (
+    AccountBalanceRepository, AccountingAuditRepository,
+    COARepository, FiscalLockRepository, JournalEntryRepository,
+)
+from app.modules.accounting.schemas import (
+    COAAccountCreate, JournalEntryCreate, LockPeriodRequest,
+    ReverseJERequest,
+)
+from app.services.fiscal.lock_service import FiscalLockService
+from app.services.posting.engine import PostingEngine, PostingLine, PostingRequest
+
+logger = structlog.get_logger(__name__)
+
+
+class AccountingService:
+    """
+    All accounting operations go through here.
+    One instance per request.
+    """
+
+    def __init__(self, db: AsyncSession, user: CurrentUser) -> None:
+        self.db = db
+        self.user = user
+        tid = user.tenant_id
+
+        # Repositories
+        self._je_repo    = JournalEntryRepository(db, tid)
+        self._coa_repo   = COARepository(db, tid)
+        self._bal_repo   = AccountBalanceRepository(db, tid)
+        self._lock_repo  = FiscalLockRepository(db, tid)
+        self._audit_repo = AccountingAuditRepository(db, tid)
+
+        # PostingEngine wired with lock service
+        self._engine = PostingEngine(db, tid)
+        self._engine.set_lock_repo(self._lock_repo)
+
+        self._lock_svc = FiscalLockService(self._lock_repo)
+
+    # ══════════════════════════════════════════════════════
+    # Chart of Accounts
+    # ══════════════════════════════════════════════════════
+    async def create_account(self, data: COAAccountCreate) -> ChartOfAccount:
+        user = self.user
+        user.require("can_manage_coa")
+
+        from app.core.exceptions import DuplicateError
+        if await self._coa_repo.exists(code=data.code):
+            raise DuplicateError("حساب", "code", data.code)
+
+        level = 1
+        if data.parent_id:
+            parent = await self._coa_repo.get_or_raise(data.parent_id)
+            level = parent.level + 1  # type: ignore[attr-defined]
+
+        acc = self._coa_repo.create(
+            code=data.code,
+            name_ar=data.name_ar,
+            name_en=data.name_en,
+            account_type=data.account_type,
+            account_nature=data.account_nature,
+            parent_id=data.parent_id,
+            level=level,
+            postable=data.postable,
+            is_active=data.is_active,
+            opening_balance=data.opening_balance,
+            created_by=user.email,
+        )
+        return await self._coa_repo.save(acc)
+
+    async def list_accounts(self) -> List[ChartOfAccount]:
+        return await self._coa_repo.list_active()
+
+    # ══════════════════════════════════════════════════════
+    # Journal Entries
+    # ══════════════════════════════════════════════════════
+    async def create_draft_je(self, data: JournalEntryCreate) -> JournalEntry:
+        """Create a draft JE (not yet posted)."""
+        self.user.require("can_create_je")
+
+        from app.services.numbering.series_service import NumberSeriesService
+        num_svc = NumberSeriesService(self.db, self.user.tenant_id)
+        serial = await num_svc.next_je(data.je_type)
+
+        je = JournalEntry(
+            tenant_id=self.user.tenant_id,
+            serial=serial,
+            je_type=data.je_type,
+            status=JEStatus.DRAFT,
+            entry_date=data.entry_date,
+            description=data.description,
+            reference=data.reference,
+            source_module=data.source_module,
+            source_doc_type=data.source_doc_type,
+            source_doc_id=data.source_doc_id,
+            source_doc_number=data.source_doc_number,
+            branch_code=data.branch_code,
+            cost_center=data.cost_center,
+            notes=data.notes,
+            fiscal_year=data.entry_date.year,
+            fiscal_month=data.entry_date.month,
+            total_debit=sum(l.debit for l in data.lines),
+            total_credit=sum(l.credit for l in data.lines),
+            created_by=self.user.email,
+        )
+        self.db.add(je)
+        await self.db.flush()
+
+        for idx, line in enumerate(data.lines):
+            from app.modules.accounting.models import JournalEntryLine
+            je_line = JournalEntryLine(
+                tenant_id=self.user.tenant_id,
+                journal_entry_id=je.id,
+                line_order=idx + 1,
+                account_code=line.account_code,
+                account_name=line.account_code,  # enriched on read
+                description=line.description,
+                debit=line.debit,
+                credit=line.credit,
+                branch_code=line.branch_code,
+                cost_center=line.cost_center,
+                created_by=self.user.email,
+            )
+            self.db.add(je_line)
+
+        await self.db.flush()
+        logger.info("je_draft_created", serial=serial)
+        return je
+
+    async def post_je(
+        self,
+        je_id: uuid.UUID,
+        *,
+        force: bool = False,
+    ) -> JournalEntry:
+        """Post a draft JE through PostingEngine."""
+        self.user.require("can_post_je")
+
+        je = await self._je_repo.get_with_lines(je_id)
+        if not je:
+            raise NotFoundError("القيد", je_id)
+        if je.status != JEStatus.DRAFT:
+            raise InvalidStateError("القيد", je.status, ["draft"])
+
+        lines = [
+            PostingLine(
+                account_code=l.account_code,
+                description=l.description,
+                debit=l.debit,
+                credit=l.credit,
+                branch_code=l.branch_code,
+                cost_center=l.cost_center,
+            )
+            for l in je.lines
+        ]
+
+        request = PostingRequest(
+            tenant_id=self.user.tenant_id,
+            je_type=je.je_type,
+            description=je.description,
+            entry_date=je.entry_date,
+            lines=lines,
+            created_by_id=self.user.user_id,
+            created_by_email=self.user.email,
+            source_module=je.source_module,
+            source_doc_number=je.source_doc_number,
+            reference=je.reference,
+            force_post=force,
+            user_role=self.user.role,
+        )
+
+        result = await self._engine.post(request)
+
+        # Update the draft JE status (engine created a new posted JE)
+        # Link back the original draft to the posted one
+        je.status = JEStatus.POSTED
+        je.posted_at = result.posted_at
+        je.posted_by = self.user.email
+        await self.db.flush()
+
+        return await self._je_repo.get_with_lines(je_id)
+
+    async def reverse_je(
+        self,
+        je_id: uuid.UUID,
+        data: ReverseJERequest,
+    ) -> dict:
+        """Reverse a posted JE."""
+        self.user.require("can_reverse_je")
+
+        result = await self._engine.reverse(
+            je_id=je_id,
+            reversal_date=data.reversal_date,
+            reason=data.reason,
+            reversed_by_id=self.user.user_id,
+            reversed_by_email=self.user.email,
+            user_role=self.user.role,
+        )
+        return result.to_dict()
+
+    async def get_je(self, je_id: uuid.UUID) -> JournalEntry:
+        je = await self._je_repo.get_with_lines(je_id)
+        if not je:
+            raise NotFoundError("القيد", je_id)
+        return je
+
+    async def list_je(
+        self,
+        *,
+        status: Optional[str] = None,
+        je_type: Optional[str] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        fiscal_year: Optional[int] = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> Tuple[List[JournalEntry], int]:
+        return await self._je_repo.list_paginated(
+            status=status,
+            je_type=je_type,
+            date_from=date_from,
+            date_to=date_to,
+            fiscal_year=fiscal_year,
+            offset=offset,
+            limit=limit,
+        )
+
+    # ══════════════════════════════════════════════════════
+    # Fiscal Locks
+    # ══════════════════════════════════════════════════════
+    async def lock_period(self, data: LockPeriodRequest) -> dict:
+        self.user.require("can_lock_period")
+
+        # Find or create fiscal period
+        from sqlalchemy import select
+        from app.modules.accounting.models import FiscalPeriod
+        result = await self.db.execute(
+            select(FiscalPeriod)
+            .where(FiscalPeriod.tenant_id == self.user.tenant_id)
+            .where(FiscalPeriod.fiscal_year == data.fiscal_year)
+            .where(FiscalPeriod.fiscal_month == (data.fiscal_month or 0))
+        )
+        period = result.scalar_one_or_none()
+
+        if not period:
+            # Auto-create period on lock
+            from datetime import date as date_type
+            period = FiscalPeriod(
+                tenant_id=self.user.tenant_id,
+                fiscal_year=data.fiscal_year,
+                fiscal_month=data.fiscal_month or 0,
+                name_ar=f"فترة {data.fiscal_year}" + (
+                    f"/{data.fiscal_month:02d}" if data.fiscal_month else ""
+                ),
+                start_date=date_type(data.fiscal_year, data.fiscal_month or 1, 1),
+                end_date=date_type(data.fiscal_year, data.fiscal_month or 12, 28),
+                created_by=self.user.email,
+            )
+            self.db.add(period)
+            await self.db.flush()
+
+        lock = await self._lock_svc.lock_period(
+            fiscal_year=data.fiscal_year,
+            fiscal_month=data.fiscal_month,
+            lock_type=data.lock_type,
+            locked_by_email=self.user.email,
+            reason=data.reason,
+            period_id=period.id,
+            tenant_id=self.user.tenant_id,
+        )
+        return {"id": str(lock.id), "lock_type": lock.lock_type, "locked_by": lock.locked_by}
+
+    async def unlock_period(self, lock_id: uuid.UUID) -> dict:
+        self.user.require("can_lock_period")
+        lock = await self._lock_svc.unlock_period(
+            lock_id=lock_id,
+            unlocked_by_email=self.user.email,
+            user_role=self.user.role,
+        )
+        return {"id": str(lock.id), "is_active": lock.is_active}
+
+    async def list_locks(self) -> list:
+        locks = await self._lock_repo.list_active_locks()
+        return [
+            {
+                "id": str(l.id),
+                "fiscal_year": l.fiscal_year,
+                "fiscal_month": l.fiscal_month,
+                "lock_type": l.lock_type,
+                "locked_by": l.locked_by,
+                "reason": l.reason,
+            }
+            for l in locks
+        ]
+
+    # ══════════════════════════════════════════════════════
+    # Reports
+    # ══════════════════════════════════════════════════════
+    async def get_trial_balance(
+        self,
+        fiscal_year: int,
+        fiscal_month: Optional[int] = None,
+    ) -> dict:
+        """Build trial balance from account_balances table."""
+        balances = await self._bal_repo.get_account_balances_for_period(
+            fiscal_year, fiscal_month
+        )
+
+        lines = []
+        total_dr = Decimal("0")
+        total_cr = Decimal("0")
+
+        for bal in balances:
+            dr_closing = max(bal.closing_balance, Decimal("0"))
+            cr_closing = max(-bal.closing_balance, Decimal("0"))
+            lines.append({
+                "account_code": bal.account_code,
+                "period_debit": float(bal.debit_total),
+                "period_credit": float(bal.credit_total),
+                "closing_debit": float(dr_closing),
+                "closing_credit": float(cr_closing),
+            })
+            total_dr += dr_closing
+            total_cr += cr_closing
+
+        return {
+            "fiscal_year": fiscal_year,
+            "fiscal_month": fiscal_month,
+            "lines": lines,
+            "total_debit": float(total_dr),
+            "total_credit": float(total_cr),
+            "is_balanced": abs(total_dr - total_cr) < Decimal("0.01"),
+        }

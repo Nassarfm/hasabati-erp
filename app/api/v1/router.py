@@ -1,0 +1,54 @@
+"""
+app/api/v1/router.py
+══════════════════════════════════════════════════════════
+API v1 router — aggregates all module routers.
+Add new modules here as they are built.
+══════════════════════════════════════════════════════════
+"""
+from fastapi import APIRouter
+
+# Import routers as modules are built:
+# from app.modules.accounting.router import router as accounting_router
+# from app.modules.purchases.router  import router as purchases_router
+# from app.modules.sales.router       import router as sales_router
+
+from app.api.v1 import health
+
+v1_router = APIRouter()
+
+# ── System ─────────────────────────────────────────────
+v1_router.include_router(health.router, tags=["النظام"])
+
+# ── Accounting (Module 1) ─────────────────────────────
+from app.modules.accounting.router import router as accounting_router
+v1_router.include_router(accounting_router)
+
+# ── Inventory (Module 2A) ──────────────────────────────
+from app.modules.inventory.router import router as inventory_router
+v1_router.include_router(inventory_router)
+
+# ── Sales (Module 2B) ──────────────────────────────────
+from app.modules.sales.router import router as sales_router
+v1_router.include_router(sales_router)
+
+# ── Purchases (Module 3) ───────────────────────────────
+from app.modules.purchases.router import router as purchases_router
+v1_router.include_router(purchases_router)
+
+
+# ── HR (Module 4)
+from app.modules.hr.router import router as hr_router
+v1_router.include_router(hr_router)
+
+
+# ── Fixed Assets (Module 5) ───────────────────────────────
+from app.modules.assets.router import router as assets_router
+v1_router.include_router(assets_router)
+
+# ── Treasury (Module 6) ───────────────────────────────────
+from app.modules.treasury.router import router as treasury_router
+v1_router.include_router(treasury_router)
+
+# ── Reports (Module 7) ────────────────────────────────────
+from app.modules.reports.router import router as reports_router
+v1_router.include_router(reports_router)
