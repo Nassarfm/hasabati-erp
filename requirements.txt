@@ -20,3 +20,4 @@ watchfiles
 rich
 typer
 structlog
+asyncpg
