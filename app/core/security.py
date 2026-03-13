@@ -1,12 +1,5 @@
-"""
-app/core/security.py
-══════════════════════════════════════════════════════════
-Supabase JWT verification using PyJWT.
-══════════════════════════════════════════════════════════
-"""
 from __future__ import annotations
 
-import base64
 from typing import Optional
 from uuid import UUID
 
@@ -23,7 +16,6 @@ logger = structlog.get_logger(__name__)
 bearer_scheme = HTTPBearer(auto_error=False)
 
 _SUPABASE_AUDIENCE = "authenticated"
-_ALGORITHM = "HS256"
 
 
 class RawTokenClaims(BaseModel):
@@ -40,20 +32,26 @@ class RawTokenClaims(BaseModel):
 
 def decode_supabase_token(token: str) -> RawTokenClaims:
     try:
-        # Decode base64 secret
-        secret = base64.b64decode(settings.SUPABASE_JWT_SECRET)
-        payload = jwt.decode(
-            token,
-            secret,
-            algorithms=[_ALGORITHM],
-            audience=_SUPABASE_AUDIENCE,
-        )
-        return RawTokenClaims(**payload)
+        unverified_header = jwt.get_unverified_header(token)
+        alg = unverified_header.get("alg")
+        logger.warning("jwt_header_debug", alg=alg)
+
+        if alg == "HS256":
+            payload = jwt.decode(
+                token,
+                settings.SUPABASE_JWT_SECRET,
+                algorithms=["HS256"],
+                audience=_SUPABASE_AUDIENCE,
+            )
+            return RawTokenClaims(**payload)
+
+        raise AuthenticationError(f"خوارزمية التوكن غير مدعومة حالياً: {alg}")
+
     except jwt.ExpiredSignatureError:
         raise AuthenticationError("رمز المصادقة منتهي الصلاحية — يرجى تسجيل الدخول مجدداً")
     except jwt.PyJWTError as exc:
         logger.warning("jwt_decode_failed", error=str(exc))
-        raise AuthenticationError()
+        raise AuthenticationError("تعذر التحقق من رمز المصادقة")
 
 
 async def get_raw_claims(
