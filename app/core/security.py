@@ -1,9 +1,8 @@
 """
 app/core/security.py
-Supabase JWT verification — supports both HS256 and ES256.
+Supabase JWT verification — supports ES256 via JWKS.
 """
 from __future__ import annotations
-import base64
 from typing import Optional
 from uuid import UUID
 
@@ -36,22 +35,6 @@ class RawTokenClaims(BaseModel):
 
 def decode_supabase_token(token: str) -> RawTokenClaims:
     try:
-        # First try with HS256 (base64 decoded secret)
-        try:
-            secret = base64.b64decode(settings.SUPABASE_JWT_SECRET)
-            payload = jwt.decode(
-                token,
-                secret,
-                algorithms=["HS256"],
-                audience=_SUPABASE_AUDIENCE,
-            )
-            return RawTokenClaims(**payload)
-        except jwt.exceptions.InvalidAlgorithmError:
-            pass
-        except Exception:
-            pass
-
-        # Then try with RS256/ES256 using JWKS from Supabase
         jwks_client = jwt.PyJWKClient(
             f"{settings.SUPABASE_URL}/auth/v1/.well-known/jwks.json"
         )
@@ -59,15 +42,18 @@ def decode_supabase_token(token: str) -> RawTokenClaims:
         payload = jwt.decode(
             token,
             signing_key.key,
-            algorithms=["RS256", "ES256"],
+            algorithms=["RS256", "ES256", "HS256"],
             audience=_SUPABASE_AUDIENCE,
         )
+        logger.info("jwt_decode_success", sub=payload.get("sub"), email=payload.get("email"))
         return RawTokenClaims(**payload)
-
     except jwt.ExpiredSignatureError:
         raise AuthenticationError("رمز المصادقة منتهي الصلاحية — يرجى تسجيل الدخول مجدداً")
     except jwt.PyJWTError as exc:
         logger.warning("jwt_decode_failed", error=str(exc))
+        raise AuthenticationError()
+    except Exception as exc:
+        logger.warning("jwt_decode_unexpected", error=str(exc))
         raise AuthenticationError()
 
 
