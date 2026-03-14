@@ -63,20 +63,18 @@ def create_app() -> FastAPI:
     )
 
     # ── Middleware (order matters — outermost = first to run) ──
-    _cors_origins = settings.BACKEND_CORS_ORIGINS or []
-    _default_origins = [
+    _cors_origins = list(set([
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:3000",
         "https://nassarfm.github.io",
-    ]
-    _all_origins = list(set(_cors_origins + _default_origins))
+    ] + (settings.BACKEND_CORS_ORIGINS or [])))
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=_all_origins,
+        allow_origins=_cors_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "Accept", "X-Request-ID"],
     )
     app.add_middleware(RequestIDMiddleware)   # inject X-Request-ID
     app.add_middleware(AuditMiddleware)       # log all mutations
