@@ -63,9 +63,17 @@ def create_app() -> FastAPI:
     )
 
     # ── Middleware (order matters — outermost = first to run) ──
+    _cors_origins = settings.BACKEND_CORS_ORIGINS or []
+    _default_origins = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "https://nassarfm.github.io",
+    ]
+    _all_origins = list(set(_cors_origins + _default_origins))
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.BACKEND_CORS_ORIGINS or ["*"],
+        allow_origins=_all_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
