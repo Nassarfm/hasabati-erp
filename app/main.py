@@ -17,7 +17,6 @@ from app.core.errors import (
 )
 from app.core.exceptions import ERPException
 from app.core.logging import configure_logging
-from app.middleware.request_id import RequestIDMiddleware
 from app.tasks.scheduler import start_scheduler, stop_scheduler
 from app.api.v1.router import v1_router
 
@@ -52,9 +51,10 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.add_middleware(RequestIDMiddleware)
-    # app.add_middleware(AuditMiddleware)       # disabled temporarily
-    # app.add_middleware(IdempotencyMiddleware) # disabled temporarily
+    # all BaseHTTPMiddleware disabled — incompatible with streaming responses
+    # app.add_middleware(RequestIDMiddleware)
+    # app.add_middleware(AuditMiddleware)
+    # app.add_middleware(IdempotencyMiddleware)
 
     app.add_exception_handler(ERPException, erp_exception_handler)
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
