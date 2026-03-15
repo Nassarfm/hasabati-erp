@@ -49,7 +49,7 @@ async def _get_coa(db: AsyncSession, tenant_id: uuid.UUID) -> Dict[str, ChartOfA
         .where(ChartOfAccount.is_active == True)
         .order_by(ChartOfAccount.code)
     )
-    return {a.account_code: a for a in result.scalars().all()}
+    return {a.code: a for a in result.scalars().all()}
 
 
 async def _period_balances(
