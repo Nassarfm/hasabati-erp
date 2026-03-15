@@ -78,7 +78,7 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(RequestIDMiddleware)   # inject X-Request-ID
     app.add_middleware(AuditMiddleware)       # log all mutations
-    app.add_middleware(IdempotencyMiddleware) # prevent double-submit
+    # app.add_middleware(IdempotencyMiddleware) # disabled temporarily
 
     # ── Exception Handlers ─────────────────────────────────────
     app.add_exception_handler(ERPException, erp_exception_handler)
