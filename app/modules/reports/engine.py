@@ -47,7 +47,7 @@ async def _get_coa(db: AsyncSession, tenant_id: uuid.UUID) -> Dict[str, ChartOfA
         select(ChartOfAccount)
         .where(ChartOfAccount.tenant_id == tenant_id)
         .where(ChartOfAccount.is_active == True)
-        .order_by(ChartOfAccount.account_code)
+        .order_by(ChartOfAccount.code)
     )
     return {a.account_code: a for a in result.scalars().all()}
 
