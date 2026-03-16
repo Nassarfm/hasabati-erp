@@ -1,13 +1,9 @@
 """
 app/services/numbering/series_service.py
-Sequential document number generator using DB.
 """
 from __future__ import annotations
-
 import uuid
 from datetime import datetime
-from typing import Optional
-
 import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,15 +22,12 @@ class NumberSeriesService:
         month = now.month
         period = f"{year}{month:02d}" if include_month else str(year)
 
-        # Use DB with SELECT FOR UPDATE to guarantee uniqueness
+        # محاولة تحديث السلسلة الموجودة
         result = await self.db.execute(
             text("""
                 UPDATE num_series
-                SET next_value = next_value + 1,
-                    updated_at = now()
-                WHERE tenant_id = :tid
-                  AND prefix = :prefix
-                  AND period_key = :period
+                SET next_value = next_value + 1, updated_at = now()
+                WHERE tenant_id = :tid AND prefix = :prefix AND period_key = :period
                 RETURNING next_value - 1 AS seq
             """),
             {"tid": str(self.tenant_id), "prefix": prefix, "period": period}
@@ -42,7 +35,7 @@ class NumberSeriesService:
         row = result.fetchone()
 
         if not row:
-            # Insert new series
+            # إنشاء سلسلة جديدة تبدأ من 1 وترجع 1
             await self.db.execute(
                 text("""
                     INSERT INTO num_series (id, tenant_id, prefix, period_key, next_value, padding, created_at, updated_at)
@@ -51,26 +44,16 @@ class NumberSeriesService:
                 """),
                 {"tid": str(self.tenant_id), "prefix": prefix, "period": period}
             )
-            result = await self.db.execute(
-                text("""
-                    UPDATE num_series
-                    SET next_value = next_value + 1, updated_at = now()
-                    WHERE tenant_id = :tid AND prefix = :prefix AND period_key = :period
-                    RETURNING next_value - 1 AS seq
-                """),
-                {"tid": str(self.tenant_id), "prefix": prefix, "period": period}
-            )
-            row = result.fetchone()
+            seq = 1
+        else:
+            seq = row[0]
 
-        seq = row[0] if row else 1
-
-        # Check if serial already exists and skip if so
+        # تحقق من أن الرقم غير مستخدم
         check = await self.db.execute(
             text("SELECT 1 FROM journal_entries WHERE tenant_id = :tid AND serial = :serial"),
             {"tid": str(self.tenant_id), "serial": f"{prefix}-{period}-{seq:05d}"}
         )
         if check.fetchone():
-            # Serial exists, get max and use next
             max_result = await self.db.execute(
                 text("""
                     SELECT COALESCE(MAX(CAST(REGEXP_REPLACE(serial, '[^0-9]', '', 'g') AS INTEGER)), 0) + 1
