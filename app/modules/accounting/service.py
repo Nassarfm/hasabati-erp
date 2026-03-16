@@ -32,7 +32,7 @@ from app.modules.accounting.schemas import (
     ReverseJERequest,
 )
 from app.services.fiscal.lock_service import FiscalLockService
-from app.services.posting.engine import PostingEngine, PostingLine, PostingRequest
+from app.services.posting.engine import PostingEngine
 
 logger = structlog.get_logger(__name__)
 
@@ -157,52 +157,66 @@ class AccountingService:
         *,
         force: bool = False,
     ) -> JournalEntry:
-        """Post a draft JE through PostingEngine."""
+        """Post an existing draft JE in place (without creating a new JE)."""
         self.user.require("can_post_je")
+
+        from datetime import datetime, timezone
+        from sqlalchemy import select
+        from app.core.exceptions import AccountNotPostableError
 
         je = await self._je_repo.get_with_lines(je_id)
         if not je:
             raise NotFoundError("القيد", je_id)
+
         if je.status != JEStatus.DRAFT:
             raise InvalidStateError("القيد", je.status, ["draft"])
 
-        from datetime import datetime, timezone
-        from decimal import Decimal
+        if not je.lines or len(je.lines) < 2:
+            raise ValidationError("القيد يجب أن يحتوي على سطرين على الأقل")
 
-        # ── Validate balance ──────────────────────────────────
-        total_dr = sum(l.debit for l in je.lines)
-        total_cr = sum(l.credit for l in je.lines)
+        # 1) Validate balance
+        total_dr = sum((l.debit or Decimal("0")) for l in je.lines)
+        total_cr = sum((l.credit or Decimal("0")) for l in je.lines)
+
         if abs(total_dr - total_cr) > Decimal("0.001"):
-            from app.core.exceptions import ValidationError
-            raise ValidationError(f"القيد غير متوازن — مدين: {total_dr} | دائن: {total_cr}")
+            raise ValidationError(
+                f"القيد غير متوازن — مدين: {total_dr} | دائن: {total_cr}"
+            )
 
-        # ── Check fiscal lock ─────────────────────────────────
+        # 2) Check fiscal lock
         await self._lock_svc.guard(
             entry_date=je.entry_date,
             user_role=self.user.role,
             force=force,
         )
 
+        # 3) Validate accounts + get account nature
+        codes = list({line.account_code for line in je.lines})
+        result = await self.db.execute(
+            select(ChartOfAccount).where(
+                ChartOfAccount.tenant_id == self.user.tenant_id,
+                ChartOfAccount.code.in_(codes),
+            )
+        )
+        accounts = result.scalars().all()
+        account_map = {acc.code: acc for acc in accounts}
+
+        missing_codes = [code for code in codes if code not in account_map]
+        if missing_codes:
+            raise ValidationError(
+                f"الحسابات التالية غير موجودة: {', '.join(missing_codes)}"
+            )
+
+        not_postable = [acc.code for acc in accounts if not acc.postable]
+        if not_postable:
+            raise AccountNotPostableError(not_postable[0])
+
         now = datetime.now(timezone.utc)
 
-        # ── Update account balances ───────────────────────────
+        # 4) Enrich lines + update balances
         for line in je.lines:
-            from app.modules.accounting.repository import AccountingRepository
-            acc = await self._je_repo.db.get(
-                __import__('app.modules.accounting.models', fromlist=['ChartOfAccount']).ChartOfAccount,
-                None
-            )
-            # Get account nature from COA
-            from sqlalchemy import select
-            from app.modules.accounting.models import ChartOfAccount
-            result_acc = await self.db.execute(
-                select(ChartOfAccount).where(
-                    ChartOfAccount.code == line.account_code,
-                    ChartOfAccount.tenant_id == self.user.tenant_id,
-                )
-            )
-            acc_obj = result_acc.scalar_one_or_none()
-            nature = acc_obj.account_nature if acc_obj else "debit"
+            acc = account_map[line.account_code]
+            line.account_name = acc.name_ar
 
             await self._bal_repo.upsert_balance(
                 account_code=line.account_code,
@@ -210,17 +224,42 @@ class AccountingService:
                 fiscal_month=je.entry_date.month,
                 delta_debit=line.debit,
                 delta_credit=line.credit,
-                account_nature=nature,
+                account_nature=acc.account_nature,
             )
 
-        # ── Mark JE as posted ─────────────────────────────────
-        je.status   = JEStatus.POSTED
+        # 5) Mark JE as posted
+        je.status = JEStatus.POSTED
         je.posting_date = je.entry_date
         je.posted_at = now
         je.posted_by = self.user.email
-        je.fiscal_year  = je.entry_date.year
+        je.fiscal_year = je.entry_date.year
         je.fiscal_month = je.entry_date.month
+
         await self.db.flush()
+
+        # 6) Audit log
+        await self._audit_repo.log(
+            action="JE_POSTED",
+            user_id=self.user.user_id,
+            user_email=self.user.email,
+            je_id=je.id,
+            je_serial=je.serial,
+            je_type=je.je_type,
+            fiscal_year=je.fiscal_year,
+            fiscal_month=je.fiscal_month,
+            total_debit=total_dr,
+            total_credit=total_cr,
+            source_module=je.source_module,
+            source_doc_number=je.source_doc_number,
+        )
+
+        logger.info(
+            "je_posted_in_place",
+            je_id=str(je.id),
+            serial=je.serial,
+            total_debit=float(total_dr),
+            total_credit=float(total_cr),
+        )
 
         return await self._je_repo.get_with_lines(je_id)
 
