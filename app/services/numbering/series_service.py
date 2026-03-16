@@ -1,25 +1,12 @@
 """
 app/services/numbering/series_service.py
-══════════════════════════════════════════════════════════
-Document number series generator.
-Generates sequential, tenant-isolated document numbers.
-
-Format examples:
-  JE-2024-00001   (Journal Entry)
-  GRN-202412-001  (Goods Receipt)
-  VINV-202412-001 (Vendor Invoice)
-  PO-202412-001   (Purchase Order)
-
-Uses DB sequence via SELECT FOR UPDATE to guarantee
-uniqueness under concurrent requests.
-MVP: uses in-memory counter with DB fallback stub.
-══════════════════════════════════════════════════════════
+Sequential document number generator using DB.
 """
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Dict
+from typing import Optional
 
 import structlog
 from sqlalchemy import text
@@ -27,56 +14,82 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger(__name__)
 
-# In-memory counters for development (replace with DB in production)
-_counters: Dict[str, int] = {}
-
 
 class NumberSeriesService:
-    """
-    Generates unique sequential document numbers per tenant.
-    Thread-safe via database locking in production.
-    """
-
     def __init__(self, db: AsyncSession, tenant_id: uuid.UUID) -> None:
         self.db = db
         self.tenant_id = tenant_id
 
-    async def next(
-        self,
-        prefix: str,
-        include_month: bool = False,
-    ) -> str:
-        """
-        Generate next number in series.
-
-        Args:
-            prefix:        "JE", "GRN", "VINV", "PO", etc.
-            include_month: True → JE-202412-00001
-                          False → JE-2024-00001
-
-        Returns unique serial string.
-        """
+    async def next(self, prefix: str, include_month: bool = False) -> str:
         now = datetime.utcnow()
         year = now.year
         month = now.month
+        period = f"{year}{month:02d}" if include_month else str(year)
 
-        if include_month:
-            period = f"{year}{month:02d}"
-        else:
-            period = str(year)
+        # Use DB with SELECT FOR UPDATE to guarantee uniqueness
+        result = await self.db.execute(
+            text("""
+                UPDATE num_series
+                SET next_value = next_value + 1,
+                    updated_at = now()
+                WHERE tenant_id = :tid
+                  AND prefix = :prefix
+                  AND period_key = :period
+                RETURNING next_value - 1 AS seq
+            """),
+            {"tid": str(self.tenant_id), "prefix": prefix, "period": period}
+        )
+        row = result.fetchone()
 
-        key = f"{self.tenant_id}::{prefix}::{period}"
+        if not row:
+            # Insert new series
+            await self.db.execute(
+                text("""
+                    INSERT INTO num_series (id, tenant_id, prefix, period_key, next_value, padding, created_at, updated_at)
+                    VALUES (gen_random_uuid(), :tid, :prefix, :period, 2, 5, now(), now())
+                    ON CONFLICT DO NOTHING
+                """),
+                {"tid": str(self.tenant_id), "prefix": prefix, "period": period}
+            )
+            result = await self.db.execute(
+                text("""
+                    UPDATE num_series
+                    SET next_value = next_value + 1, updated_at = now()
+                    WHERE tenant_id = :tid AND prefix = :prefix AND period_key = :period
+                    RETURNING next_value - 1 AS seq
+                """),
+                {"tid": str(self.tenant_id), "prefix": prefix, "period": period}
+            )
+            row = result.fetchone()
 
-        # MVP: in-memory (replace with DB SELECT FOR UPDATE)
-        _counters[key] = _counters.get(key, 0) + 1
-        seq = _counters[key]
+        seq = row[0] if row else 1
+
+        # Check if serial already exists and skip if so
+        check = await self.db.execute(
+            text("SELECT 1 FROM journal_entries WHERE tenant_id = :tid AND serial = :serial"),
+            {"tid": str(self.tenant_id), "serial": f"{prefix}-{period}-{seq:05d}"}
+        )
+        if check.fetchone():
+            # Serial exists, get max and use next
+            max_result = await self.db.execute(
+                text("""
+                    SELECT COALESCE(MAX(CAST(REGEXP_REPLACE(serial, '[^0-9]', '', 'g') AS INTEGER)), 0) + 1
+                    FROM journal_entries
+                    WHERE tenant_id = :tid AND serial LIKE :pattern
+                """),
+                {"tid": str(self.tenant_id), "pattern": f"{prefix}-{period}-%"}
+            )
+            seq = max_result.scalar() or seq
+            await self.db.execute(
+                text("UPDATE num_series SET next_value = :val WHERE tenant_id = :tid AND prefix = :prefix AND period_key = :period"),
+                {"val": seq + 1, "tid": str(self.tenant_id), "prefix": prefix, "period": period}
+            )
 
         serial = f"{prefix}-{period}-{seq:05d}"
         logger.debug("number_series_next", prefix=prefix, serial=serial)
         return serial
 
     async def next_je(self, je_type: str) -> str:
-        """Shortcut for journal entry serials."""
         return await self.next(je_type, include_month=False)
 
     async def next_po(self) -> str:
