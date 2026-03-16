@@ -166,40 +166,60 @@ class AccountingService:
         if je.status != JEStatus.DRAFT:
             raise InvalidStateError("القيد", je.status, ["draft"])
 
-        lines = [
-            PostingLine(
-                account_code=l.account_code,
-                description=l.description,
-                debit=l.debit,
-                credit=l.credit,
-                branch_code=l.branch_code,
-                cost_center=l.cost_center,
-            )
-            for l in je.lines
-        ]
+        from datetime import datetime, timezone
+        from decimal import Decimal
 
-        request = PostingRequest(
-            tenant_id=self.user.tenant_id,
-            je_type=je.je_type,
-            description=je.description,
+        # ── Validate balance ──────────────────────────────────
+        total_dr = sum(l.debit for l in je.lines)
+        total_cr = sum(l.credit for l in je.lines)
+        if abs(total_dr - total_cr) > Decimal("0.001"):
+            from app.core.exceptions import ValidationError
+            raise ValidationError(f"القيد غير متوازن — مدين: {total_dr} | دائن: {total_cr}")
+
+        # ── Check fiscal lock ─────────────────────────────────
+        await self._lock_svc.guard(
             entry_date=je.entry_date,
-            lines=lines,
-            created_by_id=self.user.user_id,
-            created_by_email=self.user.email,
-            source_module=je.source_module,
-            source_doc_number=je.source_doc_number,
-            reference=je.reference,
-            force_post=force,
             user_role=self.user.role,
+            force=force,
         )
 
-        result = await self._engine.post(request)
+        now = datetime.now(timezone.utc)
 
-        # Update the draft JE status (engine created a new posted JE)
-        # Link back the original draft to the posted one
-        je.status = JEStatus.POSTED
-        je.posted_at = result.posted_at
+        # ── Update account balances ───────────────────────────
+        for line in je.lines:
+            from app.modules.accounting.repository import AccountingRepository
+            acc = await self._je_repo.db.get(
+                __import__('app.modules.accounting.models', fromlist=['ChartOfAccount']).ChartOfAccount,
+                None
+            )
+            # Get account nature from COA
+            from sqlalchemy import select
+            from app.modules.accounting.models import ChartOfAccount
+            result_acc = await self.db.execute(
+                select(ChartOfAccount).where(
+                    ChartOfAccount.code == line.account_code,
+                    ChartOfAccount.tenant_id == self.user.tenant_id,
+                )
+            )
+            acc_obj = result_acc.scalar_one_or_none()
+            nature = acc_obj.account_nature if acc_obj else "debit"
+
+            await self._bal_repo.upsert_balance(
+                account_code=line.account_code,
+                fiscal_year=je.entry_date.year,
+                fiscal_month=je.entry_date.month,
+                delta_debit=line.debit,
+                delta_credit=line.credit,
+                account_nature=nature,
+            )
+
+        # ── Mark JE as posted ─────────────────────────────────
+        je.status   = JEStatus.POSTED
+        je.posting_date = je.entry_date
+        je.posted_at = now
         je.posted_by = self.user.email
+        je.fiscal_year  = je.entry_date.year
+        je.fiscal_month = je.entry_date.month
         await self.db.flush()
 
         return await self._je_repo.get_with_lines(je_id)
