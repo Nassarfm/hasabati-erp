@@ -198,7 +198,7 @@ class AccountBalanceRepository(BaseRepository[AccountBalance]):
         else:
             bal.balance = bal.credit_total - bal.debit_total
 
-        bal.closing_balance = bal.opening_balance + bal.balance
+        bal.closing_balance = (bal.opening_balance or 0) + (bal.balance or 0)
         bal.last_posted_at = datetime.now(timezone.utc)
 
         await self.db.flush()
