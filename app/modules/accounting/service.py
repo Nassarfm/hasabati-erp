@@ -450,6 +450,212 @@ class AccountingService:
         fiscal_year: int,
         fiscal_month: Optional[int] = None,
     ) -> dict:
+        """
+        Trial Balance with opening, period movement, and closing balances.
+        Supports monthly filtering.
+        """
+        from sqlalchemy import select as sa_select
+
+        q = sa_select(AccountBalance).where(
+            AccountBalance.tenant_id == self.user.tenant_id,
+            AccountBalance.fiscal_year == fiscal_year,
+        )
+        if fiscal_month is not None:
+            q = q.where(AccountBalance.fiscal_month <= fiscal_month)
+
+        result = await self.db.execute(q.order_by(AccountBalance.account_code, AccountBalance.fiscal_month))
+        balances = result.scalars().all()
+
+        codes = sorted({b.account_code for b in balances})
+        account_map = {}
+        if codes:
+            acc_result = await self.db.execute(
+                sa_select(ChartOfAccount).where(
+                    ChartOfAccount.tenant_id == self.user.tenant_id,
+                    ChartOfAccount.code.in_(codes),
+                )
+            )
+            account_map = {acc.code: acc for acc in acc_result.scalars().all()}
+
+        account_data: dict = {}
+        for bal in balances:
+            code = bal.account_code
+            acc = account_map.get(code)
+            nature = (acc.account_nature if acc else "debit").lower()
+            if code not in account_data:
+                account_data[code] = {
+                    "account_code": code,
+                    "account_name": acc.name_ar if acc else code,
+                    "account_nature": nature,
+                    "opening_debit": Decimal("0"),
+                    "opening_credit": Decimal("0"),
+                    "period_debit": Decimal("0"),
+                    "period_credit": Decimal("0"),
+                }
+            row = account_data[code]
+            debit_total  = Decimal(str(bal.debit_total  or 0))
+            credit_total = Decimal(str(bal.credit_total or 0))
+            if fiscal_month is None:
+                row["period_debit"]   += debit_total
+                row["period_credit"]  += credit_total
+            else:
+                if bal.fiscal_month < fiscal_month:
+                    row["opening_debit"]  += debit_total
+                    row["opening_credit"] += credit_total
+                elif bal.fiscal_month == fiscal_month:
+                    row["period_debit"]   += debit_total
+                    row["period_credit"]  += credit_total
+
+        lines = []
+        total_opening_dr = total_opening_cr = Decimal("0")
+        total_period_dr  = total_period_cr  = Decimal("0")
+        total_closing_dr = total_closing_cr = Decimal("0")
+        total_closing_net = Decimal("0")
+
+        for code in sorted(account_data.keys()):
+            row    = account_data[code]
+            nature = row["account_nature"]
+            od = row["opening_debit"];  oc = row["opening_credit"]
+            pd = row["period_debit"];   pc = row["period_credit"]
+
+            if nature == "debit":
+                opening_net = od - oc
+                period_net  = pd - pc
+            else:
+                opening_net = oc - od
+                period_net  = pc - pd
+
+            closing_natural = opening_net + period_net
+
+            if nature == "debit":
+                cd = closing_natural if closing_natural > 0 else Decimal("0")
+                cc = (-closing_natural) if closing_natural < 0 else Decimal("0")
+            else:
+                cc = closing_natural if closing_natural > 0 else Decimal("0")
+                cd = (-closing_natural) if closing_natural < 0 else Decimal("0")
+
+            closing_net = cd if cd > 0 else -cc
+
+            lines.append({
+                "account_code":   code,
+                "account_name":   row["account_name"],
+                "account_nature": nature,
+                "opening_debit":  float(od),
+                "opening_credit": float(oc),
+                "period_debit":   float(pd),
+                "period_credit":  float(pc),
+                "closing_debit":  float(cd),
+                "closing_credit": float(cc),
+                "closing_net":    float(closing_net),
+            })
+
+            total_opening_dr += od;   total_opening_cr += oc
+            total_period_dr  += pd;   total_period_cr  += pc
+            total_closing_dr += cd;   total_closing_cr += cc
+            total_closing_net += closing_net
+
+        return {
+            "fiscal_year":           fiscal_year,
+            "fiscal_month":          fiscal_month,
+            "lines":                 lines,
+            "opening_debit_total":   float(total_opening_dr),
+            "opening_credit_total":  float(total_opening_cr),
+            "period_debit_total":    float(total_period_dr),
+            "period_credit_total":   float(total_period_cr),
+            "closing_debit_total":   float(total_closing_dr),
+            "closing_credit_total":  float(total_closing_cr),
+            "closing_net_total":     float(total_closing_net),
+            "is_balanced":           abs(total_closing_dr - total_closing_cr) < Decimal("0.01"),
+        }
+
+    async def rebuild_balances(self, fiscal_year: int) -> dict:
+        """
+        Rebuild account_balances from scratch using posted JEs.
+        Deletes existing balances for the year and recalculates.
+        """
+        self.user.require("can_post_je")
+
+        from sqlalchemy import select, delete
+        from app.modules.accounting.models import JournalEntry, JournalEntryLine, AccountBalance, ChartOfAccount
+
+        # 1) حذف الأرصدة الحالية للسنة
+        await self.db.execute(
+            delete(AccountBalance).where(
+                AccountBalance.tenant_id == self.user.tenant_id,
+                AccountBalance.fiscal_year == fiscal_year,
+            )
+        )
+        await self.db.flush()
+
+        # 2) جلب كل القيود المرحّلة للسنة
+        je_result = await self.db.execute(
+            select(JournalEntry).where(
+                JournalEntry.tenant_id == self.user.tenant_id,
+                JournalEntry.fiscal_year == fiscal_year,
+                JournalEntry.status == "posted",
+            )
+        )
+        journal_entries = je_result.scalars().all()
+
+        # 3) جلب طبيعة الحسابات
+        codes_result = await self.db.execute(
+            select(ChartOfAccount.code, ChartOfAccount.account_nature).where(
+                ChartOfAccount.tenant_id == self.user.tenant_id,
+            )
+        )
+        nature_map = {row.code: row.account_nature for row in codes_result.fetchall()}
+
+        # 4) إعادة حساب الأرصدة
+        je_count = 0
+        for je in journal_entries:
+            lines_result = await self.db.execute(
+                select(JournalEntryLine).where(
+                    JournalEntryLine.journal_entry_id == je.id
+                )
+            )
+            lines = lines_result.scalars().all()
+            for line in lines:
+                nature = nature_map.get(line.account_code, "debit")
+                await self._bal_repo.upsert_balance(
+                    account_code=line.account_code,
+                    fiscal_year=je.entry_date.year,
+                    fiscal_month=je.entry_date.month,
+                    delta_debit=line.debit or Decimal("0"),
+                    delta_credit=line.credit or Decimal("0"),
+                    account_nature=nature,
+                )
+            je_count += 1
+
+        await self.db.flush()
+
+        return {
+            "fiscal_year": fiscal_year,
+            "journal_entries_processed": je_count,
+            "message": f"تم إعادة بناء الأرصدة بنجاح — تمت معالجة {je_count} قيد",
+        }
+
+    async def list_locks(self) -> list:
+        locks = await self._lock_repo.list_active_locks()
+        return [
+            {
+                "id": str(l.id),
+                "fiscal_year": l.fiscal_year,
+                "fiscal_month": l.fiscal_month,
+                "lock_type": l.lock_type,
+                "locked_by": l.locked_by,
+                "reason": l.reason,
+            }
+            for l in locks
+        ]
+
+    # ══════════════════════════════════════════════════════
+    # Reports
+    # ══════════════════════════════════════════════════════
+    async def get_trial_balance(
+        self,
+        fiscal_year: int,
+        fiscal_month: Optional[int] = None,
+    ) -> dict:
         """Build trial balance using account nature for correct closing balance."""
         from sqlalchemy import select as sa_select
 
