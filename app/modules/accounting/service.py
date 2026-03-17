@@ -419,11 +419,12 @@ class AccountingService:
             # حساب الرصيد الختامي حسب طبيعة الحساب
             if nature == "debit":
                 net = debit_total - credit_total
+                closing_debit  = net if net > 0 else Decimal("0")
+                closing_credit = (-net) if net < 0 else Decimal("0")
             else:
                 net = credit_total - debit_total
-
-            closing_debit  = net if net > 0 else Decimal("0")
-            closing_credit = (-net) if net < 0 else Decimal("0")
+                closing_credit = net if net > 0 else Decimal("0")
+                closing_debit  = (-net) if net < 0 else Decimal("0")
 
             lines.append({
                 "account_code":   bal.account_code,
