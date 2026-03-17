@@ -384,51 +384,69 @@ class AccountingService:
         fiscal_year: int,
         fiscal_month: Optional[int] = None,
     ) -> dict:
-        """Build trial balance from account_balances table."""
+        """Build trial balance using account nature for correct closing balance."""
+        from sqlalchemy import select as sa_select
+
         balances = await self._bal_repo.get_account_balances_for_period(
             fiscal_year, fiscal_month
         )
 
-        # جلب أسماء الحسابات
-        from sqlalchemy import select as sa_select
+        # جلب الحسابات مع طبيعتها
         codes = [b.account_code for b in balances]
-        acc_names = {}
+        account_map = {}
         if codes:
             result = await self.db.execute(
-                sa_select(ChartOfAccount.code, ChartOfAccount.name_ar).where(
+                sa_select(ChartOfAccount).where(
                     ChartOfAccount.tenant_id == self.user.tenant_id,
                     ChartOfAccount.code.in_(codes),
                 )
             )
-            acc_names = {row.code: row.name_ar for row in result.fetchall()}
+            account_map = {acc.code: acc for acc in result.scalars().all()}
 
         lines = []
-        total_dr = Decimal("0")
-        total_cr = Decimal("0")
+        total_period_dr = Decimal("0")
+        total_period_cr = Decimal("0")
+        total_closing_dr = Decimal("0")
+        total_closing_cr = Decimal("0")
 
         for bal in balances:
-            dr_closing = max(bal.closing_balance or Decimal("0"), Decimal("0"))
-            cr_closing = max(-(bal.closing_balance or Decimal("0")), Decimal("0"))
-            balance = float(bal.closing_balance or Decimal("0"))
+            acc = account_map.get(bal.account_code)
+            nature = (acc.account_nature if acc else "debit").lower()
+
+            debit_total  = Decimal(str(bal.debit_total  or 0))
+            credit_total = Decimal(str(bal.credit_total or 0))
+
+            # حساب الرصيد الختامي حسب طبيعة الحساب
+            if nature == "debit":
+                net = debit_total - credit_total
+            else:
+                net = credit_total - debit_total
+
+            closing_debit  = net if net > 0 else Decimal("0")
+            closing_credit = (-net) if net < 0 else Decimal("0")
+
             lines.append({
-                "account_code": bal.account_code,
-                "account_name": acc_names.get(bal.account_code, bal.account_code),
-                "total_debit":  float(bal.debit_total or 0),
-                "total_credit": float(bal.credit_total or 0),
-                "closing_debit": float(dr_closing),
-                "closing_credit": float(cr_closing),
-                "balance": balance,
-                "period_debit": float(bal.debit_total or 0),
-                "period_credit": float(bal.credit_total or 0),
+                "account_code":   bal.account_code,
+                "account_name":   acc.name_ar if acc else bal.account_code,
+                "account_nature": nature,
+                "total_debit":    float(debit_total),
+                "total_credit":   float(credit_total),
+                "closing_debit":  float(closing_debit),
+                "closing_credit": float(closing_credit),
             })
-            total_dr += dr_closing
-            total_cr += cr_closing
+
+            total_period_dr  += debit_total
+            total_period_cr  += credit_total
+            total_closing_dr += closing_debit
+            total_closing_cr += closing_credit
 
         return {
-            "fiscal_year": fiscal_year,
-            "fiscal_month": fiscal_month,
-            "lines": lines,
-            "total_debit": float(total_dr),
-            "total_credit": float(total_cr),
-            "is_balanced": abs(total_dr - total_cr) < Decimal("0.01"),
+            "fiscal_year":           fiscal_year,
+            "fiscal_month":          fiscal_month,
+            "lines":                 lines,
+            "total_debit":           float(total_period_dr),
+            "total_credit":          float(total_period_cr),
+            "closing_debit_total":   float(total_closing_dr),
+            "closing_credit_total":  float(total_closing_cr),
+            "is_balanced":           abs(total_closing_dr - total_closing_cr) < Decimal("0.01"),
         }
