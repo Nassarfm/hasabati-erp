@@ -389,19 +389,37 @@ class AccountingService:
             fiscal_year, fiscal_month
         )
 
+        # جلب أسماء الحسابات
+        from sqlalchemy import select as sa_select
+        codes = [b.account_code for b in balances]
+        acc_names = {}
+        if codes:
+            result = await self.db.execute(
+                sa_select(ChartOfAccount.code, ChartOfAccount.name_ar).where(
+                    ChartOfAccount.tenant_id == self.user.tenant_id,
+                    ChartOfAccount.code.in_(codes),
+                )
+            )
+            acc_names = {row.code: row.name_ar for row in result.fetchall()}
+
         lines = []
         total_dr = Decimal("0")
         total_cr = Decimal("0")
 
         for bal in balances:
-            dr_closing = max(bal.closing_balance, Decimal("0"))
-            cr_closing = max(-bal.closing_balance, Decimal("0"))
+            dr_closing = max(bal.closing_balance or Decimal("0"), Decimal("0"))
+            cr_closing = max(-(bal.closing_balance or Decimal("0")), Decimal("0"))
+            balance = float(bal.closing_balance or Decimal("0"))
             lines.append({
                 "account_code": bal.account_code,
-                "period_debit": float(bal.debit_total),
-                "period_credit": float(bal.credit_total),
+                "account_name": acc_names.get(bal.account_code, bal.account_code),
+                "total_debit":  float(bal.debit_total or 0),
+                "total_credit": float(bal.credit_total or 0),
                 "closing_debit": float(dr_closing),
                 "closing_credit": float(cr_closing),
+                "balance": balance,
+                "period_debit": float(bal.debit_total or 0),
+                "period_credit": float(bal.credit_total or 0),
             })
             total_dr += dr_closing
             total_cr += cr_closing
