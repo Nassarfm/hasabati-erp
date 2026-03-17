@@ -256,6 +256,16 @@ async def trial_balance(
     return ok(data=result)
 
 
+@router.post("/rebuild-balances", summary="إعادة بناء الأرصدة")
+async def rebuild_balances(
+    fiscal_year: int = Query(..., description="السنة المالية"),
+    svc: AccountingService = Depends(_svc),
+):
+    """Rebuild account balances from posted JEs for a given fiscal year."""
+    result = await svc.rebuild_balances(fiscal_year)
+    return ok(data=result)
+
+
 @router.get("/ledger/{account_code}", summary="كشف حساب")
 async def account_ledger(
     account_code: str,

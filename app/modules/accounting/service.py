@@ -362,6 +362,72 @@ class AccountingService:
         )
         return {"id": str(lock.id), "is_active": lock.is_active}
 
+    async def rebuild_balances(self, fiscal_year: int) -> dict:
+        """
+        Rebuild account_balances from scratch using posted JEs.
+        Deletes existing balances for the year and recalculates.
+        """
+        self.user.require("can_post_je")
+
+        from sqlalchemy import select, delete
+        from app.modules.accounting.models import JournalEntry, JournalEntryLine, AccountBalance, ChartOfAccount
+
+        # 1) حذف الأرصدة الحالية للسنة
+        await self.db.execute(
+            delete(AccountBalance).where(
+                AccountBalance.tenant_id == self.user.tenant_id,
+                AccountBalance.fiscal_year == fiscal_year,
+            )
+        )
+        await self.db.flush()
+
+        # 2) جلب كل القيود المرحّلة للسنة
+        je_result = await self.db.execute(
+            select(JournalEntry).where(
+                JournalEntry.tenant_id == self.user.tenant_id,
+                JournalEntry.fiscal_year == fiscal_year,
+                JournalEntry.status == "posted",
+            )
+        )
+        journal_entries = je_result.scalars().all()
+
+        # 3) جلب طبيعة الحسابات
+        codes_result = await self.db.execute(
+            select(ChartOfAccount.code, ChartOfAccount.account_nature).where(
+                ChartOfAccount.tenant_id == self.user.tenant_id,
+            )
+        )
+        nature_map = {row.code: row.account_nature for row in codes_result.fetchall()}
+
+        # 4) إعادة حساب الأرصدة
+        je_count = 0
+        for je in journal_entries:
+            lines_result = await self.db.execute(
+                select(JournalEntryLine).where(
+                    JournalEntryLine.journal_entry_id == je.id
+                )
+            )
+            lines = lines_result.scalars().all()
+            for line in lines:
+                nature = nature_map.get(line.account_code, "debit")
+                await self._bal_repo.upsert_balance(
+                    account_code=line.account_code,
+                    fiscal_year=je.entry_date.year,
+                    fiscal_month=je.entry_date.month,
+                    delta_debit=line.debit or Decimal("0"),
+                    delta_credit=line.credit or Decimal("0"),
+                    account_nature=nature,
+                )
+            je_count += 1
+
+        await self.db.flush()
+
+        return {
+            "fiscal_year": fiscal_year,
+            "journal_entries_processed": je_count,
+            "message": f"تم إعادة بناء الأرصدة بنجاح — تمت معالجة {je_count} قيد",
+        }
+
     async def list_locks(self) -> list:
         locks = await self._lock_repo.list_active_locks()
         return [
