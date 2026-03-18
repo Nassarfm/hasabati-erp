@@ -21,7 +21,7 @@ from app.core.exceptions import (
 )
 from app.core.tenant import CurrentUser
 from app.modules.accounting.models import (
-    ChartOfAccount, FiscalPeriod, JEStatus, JournalEntry,
+    AccountBalance, ChartOfAccount, FiscalPeriod, JEStatus, JournalEntry,
 )
 from app.modules.accounting.repository import (
     AccountBalanceRepository, AccountingAuditRepository,
