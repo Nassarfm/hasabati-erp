@@ -86,24 +86,45 @@ class AccountingService:
     async def update_account(self, account_id: uuid.UUID, data: COAAccountUpdate) -> ChartOfAccount:
         self.user.require("can_manage_coa")
 
+        from app.core.exceptions import DuplicateError
+
         acc = await self._coa_repo.get_or_raise(account_id)
-
         update_data = data.model_dump(exclude_unset=True)
-        for field, value in update_data.items():
-            setattr(acc, field, value)
 
-        # إعادة حساب المستوى إذا تغيّر الحساب الأب
+        # 1) الحقول الأساسية
+        if "name_ar" in update_data:
+            acc.name_ar = update_data["name_ar"]
+        if "name_en" in update_data:
+            acc.name_en = update_data["name_en"]
+        if "account_type" in update_data:
+            acc.account_type = update_data["account_type"]
+        if "account_nature" in update_data:
+            acc.account_nature = update_data["account_nature"]
+        if "postable" in update_data:
+            acc.postable = update_data["postable"]
+        if "is_active" in update_data:
+            acc.is_active = update_data["is_active"]
+        if "opening_balance" in update_data:
+            acc.opening_balance = update_data["opening_balance"]
+
+        # 2) الحساب الأب — بشكل آمن
         if "parent_id" in update_data:
-            if data.parent_id:
-                parent = await self._coa_repo.get_or_raise(data.parent_id)
+            new_parent_id = update_data["parent_id"]
+            if new_parent_id and str(new_parent_id) == str(acc.id):
+                raise ValidationError("لا يمكن جعل الحساب أبًا لنفسه")
+            if new_parent_id:
+                parent = await self._coa_repo.get_or_raise(new_parent_id)
+                acc.parent_id = parent.id
                 acc.level = parent.level + 1
             else:
+                acc.parent_id = None
                 acc.level = 1
 
         try:
             acc.updated_by = self.user.email
         except Exception:
             pass
+
         await self.db.flush()
         await self.db.refresh(acc)
         return acc
