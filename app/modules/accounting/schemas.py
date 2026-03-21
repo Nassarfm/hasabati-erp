@@ -34,6 +34,17 @@ class COAAccountCreate(COAAccountBase):
     pass
 
 
+class COAAccountUpdate(BaseModel):
+    name_ar: Optional[str]         = Field(None, min_length=1, max_length=255)
+    name_en: Optional[str]         = Field(None, max_length=255)
+    account_type: Optional[str]    = Field(None, pattern="^(asset|liability|equity|revenue|expense)$")
+    account_nature: Optional[str]  = Field(None, pattern="^(debit|credit)$")
+    parent_id: Optional[uuid.UUID] = None
+    postable: Optional[bool]       = None
+    is_active: Optional[bool]      = None
+    opening_balance: Optional[Decimal] = None
+
+
 class COAAccountResponse(COAAccountBase):
     id: uuid.UUID
     level: int
@@ -155,7 +166,6 @@ class JournalEntryListItem(BaseModel):
 
 
 class PostJERequest(BaseModel):
-    """Request body for posting a draft JE."""
     force: bool = Field(
         default=False,
         description="تجاوز تحذير الفترة المغلقة — يحتاج صلاحية مدير",
@@ -163,7 +173,6 @@ class PostJERequest(BaseModel):
 
 
 class ReverseJERequest(BaseModel):
-    """Request body for reversing a posted JE."""
     reversal_date: date
     reason: str = Field(..., min_length=5, max_length=500)
 
@@ -204,7 +213,6 @@ class LockPeriodResponse(BaseModel):
 # Ledger / Reports
 # ══════════════════════════════════════════════════════════
 class LedgerLineResponse(BaseModel):
-    """Single line in an account ledger (كشف حساب)."""
     je_serial: str
     entry_date: date
     description: str

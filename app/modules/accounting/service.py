@@ -28,8 +28,8 @@ from app.modules.accounting.repository import (
     COARepository, FiscalLockRepository, JournalEntryRepository,
 )
 from app.modules.accounting.schemas import (
-    COAAccountCreate, JournalEntryCreate, LockPeriodRequest,
-    ReverseJERequest,
+    COAAccountCreate, COAAccountUpdate, JournalEntryCreate,
+    LockPeriodRequest, ReverseJERequest,
 )
 from app.services.fiscal.lock_service import FiscalLockService
 from app.services.posting.engine import PostingEngine
@@ -38,35 +38,26 @@ logger = structlog.get_logger(__name__)
 
 
 class AccountingService:
-    """
-    All accounting operations go through here.
-    One instance per request.
-    """
-
     def __init__(self, db: AsyncSession, user: CurrentUser) -> None:
         self.db = db
         self.user = user
         tid = user.tenant_id
 
-        # Repositories
         self._je_repo    = JournalEntryRepository(db, tid)
         self._coa_repo   = COARepository(db, tid)
         self._bal_repo   = AccountBalanceRepository(db, tid)
         self._lock_repo  = FiscalLockRepository(db, tid)
         self._audit_repo = AccountingAuditRepository(db, tid)
 
-        # PostingEngine wired with lock service
         self._engine = PostingEngine(db, tid)
         self._engine.set_lock_repo(self._lock_repo)
-
         self._lock_svc = FiscalLockService(self._lock_repo)
 
     # ══════════════════════════════════════════════════════
     # Chart of Accounts
     # ══════════════════════════════════════════════════════
     async def create_account(self, data: COAAccountCreate) -> ChartOfAccount:
-        user = self.user
-        user.require("can_manage_coa")
+        self.user.require("can_manage_coa")
 
         from app.core.exceptions import DuplicateError
         if await self._coa_repo.exists(code=data.code):
@@ -75,7 +66,7 @@ class AccountingService:
         level = 1
         if data.parent_id:
             parent = await self._coa_repo.get_or_raise(data.parent_id)
-            level = parent.level + 1  # type: ignore[attr-defined]
+            level = parent.level + 1
 
         acc = self._coa_repo.create(
             code=data.code,
@@ -88,9 +79,30 @@ class AccountingService:
             postable=data.postable,
             is_active=data.is_active,
             opening_balance=data.opening_balance,
-            created_by=user.email,
+            created_by=self.user.email,
         )
         return await self._coa_repo.save(acc)
+
+    async def update_account(self, account_id: uuid.UUID, data: COAAccountUpdate) -> ChartOfAccount:
+        self.user.require("can_manage_coa")
+
+        acc = await self._coa_repo.get_or_raise(account_id)
+
+        update_data = data.model_dump(exclude_unset=True)
+        for field, value in update_data.items():
+            setattr(acc, field, value)
+
+        # إعادة حساب المستوى إذا تغيّر الحساب الأب
+        if "parent_id" in update_data:
+            if data.parent_id:
+                parent = await self._coa_repo.get_or_raise(data.parent_id)
+                acc.level = parent.level + 1
+            else:
+                acc.level = 1
+
+        acc.updated_by = self.user.email
+        await self.db.flush()
+        return acc
 
     async def list_accounts(self) -> List[ChartOfAccount]:
         return await self._coa_repo.list_active()
@@ -99,7 +111,6 @@ class AccountingService:
     # Journal Entries
     # ══════════════════════════════════════════════════════
     async def create_draft_je(self, data: JournalEntryCreate) -> JournalEntry:
-        """Create a draft JE (not yet posted)."""
         self.user.require("can_create_je")
 
         from app.services.numbering.series_service import NumberSeriesService
@@ -137,7 +148,7 @@ class AccountingService:
                 journal_entry_id=je.id,
                 line_order=idx + 1,
                 account_code=line.account_code,
-                account_name=line.account_code,  # enriched on read
+                account_name=line.account_code,
                 description=line.description,
                 debit=line.debit,
                 credit=line.credit,
@@ -151,13 +162,7 @@ class AccountingService:
         logger.info("je_draft_created", serial=serial)
         return je
 
-    async def post_je(
-        self,
-        je_id: uuid.UUID,
-        *,
-        force: bool = False,
-    ) -> JournalEntry:
-        """Post an existing draft JE in place (without creating a new JE)."""
+    async def post_je(self, je_id: uuid.UUID, *, force: bool = False) -> JournalEntry:
         self.user.require("can_post_je")
 
         from datetime import datetime, timezone
@@ -174,23 +179,18 @@ class AccountingService:
         if not je.lines or len(je.lines) < 2:
             raise ValidationError("القيد يجب أن يحتوي على سطرين على الأقل")
 
-        # 1) Validate balance
         total_dr = sum((l.debit or Decimal("0")) for l in je.lines)
         total_cr = sum((l.credit or Decimal("0")) for l in je.lines)
 
         if abs(total_dr - total_cr) > Decimal("0.001"):
-            raise ValidationError(
-                f"القيد غير متوازن — مدين: {total_dr} | دائن: {total_cr}"
-            )
+            raise ValidationError(f"القيد غير متوازن — مدين: {total_dr} | دائن: {total_cr}")
 
-        # 2) Check fiscal lock
         await self._lock_svc.guard(
             entry_date=je.entry_date,
             user_role=self.user.role,
             force=force,
         )
 
-        # 3) Validate accounts + get account nature
         codes = list({line.account_code for line in je.lines})
         result = await self.db.execute(
             select(ChartOfAccount).where(
@@ -203,9 +203,7 @@ class AccountingService:
 
         missing_codes = [code for code in codes if code not in account_map]
         if missing_codes:
-            raise ValidationError(
-                f"الحسابات التالية غير موجودة: {', '.join(missing_codes)}"
-            )
+            raise ValidationError(f"الحسابات التالية غير موجودة: {', '.join(missing_codes)}")
 
         not_postable = [acc.code for acc in accounts if not acc.postable]
         if not_postable:
@@ -213,11 +211,9 @@ class AccountingService:
 
         now = datetime.now(timezone.utc)
 
-        # 4) Enrich lines + update balances
         for line in je.lines:
             acc = account_map[line.account_code]
             line.account_name = acc.name_ar
-
             await self._bal_repo.upsert_balance(
                 account_code=line.account_code,
                 fiscal_year=je.entry_date.year,
@@ -227,7 +223,6 @@ class AccountingService:
                 account_nature=acc.account_nature,
             )
 
-        # 5) Mark JE as posted
         je.status = JEStatus.POSTED
         je.posting_date = je.entry_date
         je.posted_at = now
@@ -237,7 +232,6 @@ class AccountingService:
 
         await self.db.flush()
 
-        # 6) Audit log
         await self._audit_repo.log(
             action="JE_POSTED",
             user_id=self.user.user_id,
@@ -253,24 +247,10 @@ class AccountingService:
             source_doc_number=je.source_doc_number,
         )
 
-        logger.info(
-            "je_posted_in_place",
-            je_id=str(je.id),
-            serial=je.serial,
-            total_debit=float(total_dr),
-            total_credit=float(total_cr),
-        )
-
         return await self._je_repo.get_with_lines(je_id)
 
-    async def reverse_je(
-        self,
-        je_id: uuid.UUID,
-        data: ReverseJERequest,
-    ) -> dict:
-        """Reverse a posted JE."""
+    async def reverse_je(self, je_id: uuid.UUID, data: ReverseJERequest) -> dict:
         self.user.require("can_reverse_je")
-
         result = await self._engine.reverse(
             je_id=je_id,
             reversal_date=data.reversal_date,
@@ -314,7 +294,6 @@ class AccountingService:
     async def lock_period(self, data: LockPeriodRequest) -> dict:
         self.user.require("can_lock_period")
 
-        # Find or create fiscal period
         from sqlalchemy import select
         from app.modules.accounting.models import FiscalPeriod
         result = await self.db.execute(
@@ -326,7 +305,6 @@ class AccountingService:
         period = result.scalar_one_or_none()
 
         if not period:
-            # Auto-create period on lock
             from datetime import date as date_type
             period = FiscalPeriod(
                 tenant_id=self.user.tenant_id,
@@ -363,16 +341,11 @@ class AccountingService:
         return {"id": str(lock.id), "is_active": lock.is_active}
 
     async def rebuild_balances(self, fiscal_year: int) -> dict:
-        """
-        Rebuild account_balances from scratch using posted JEs.
-        Deletes existing balances for the year and recalculates.
-        """
         self.user.require("can_post_je")
 
         from sqlalchemy import select, delete
         from app.modules.accounting.models import JournalEntry, JournalEntryLine, AccountBalance, ChartOfAccount
 
-        # 1) حذف الأرصدة الحالية للسنة
         await self.db.execute(
             delete(AccountBalance).where(
                 AccountBalance.tenant_id == self.user.tenant_id,
@@ -381,7 +354,6 @@ class AccountingService:
         )
         await self.db.flush()
 
-        # 2) جلب كل القيود المرحّلة للسنة
         je_result = await self.db.execute(
             select(JournalEntry).where(
                 JournalEntry.tenant_id == self.user.tenant_id,
@@ -391,7 +363,6 @@ class AccountingService:
         )
         journal_entries = je_result.scalars().all()
 
-        # 3) جلب طبيعة الحسابات
         codes_result = await self.db.execute(
             select(ChartOfAccount.code, ChartOfAccount.account_nature).where(
                 ChartOfAccount.tenant_id == self.user.tenant_id,
@@ -399,7 +370,6 @@ class AccountingService:
         )
         nature_map = {row.code: row.account_nature for row in codes_result.fetchall()}
 
-        # 4) إعادة حساب الأرصدة
         je_count = 0
         for je in journal_entries:
             lines_result = await self.db.execute(
@@ -450,10 +420,6 @@ class AccountingService:
         fiscal_year: int,
         fiscal_month: Optional[int] = None,
     ) -> dict:
-        """
-        Trial Balance with opening, period movement, and closing balances.
-        Supports monthly filtering.
-        """
         from sqlalchemy import select as sa_select
 
         q = sa_select(AccountBalance).where(

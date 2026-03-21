@@ -1,12 +1,13 @@
 """
 app/modules/accounting/router.py
 ══════════════════════════════════════════════════════════
-Accounting Module API — 16 endpoints
+Accounting Module API — 17 endpoints
 
 Chart of Accounts:
   GET    /accounting/coa              قائمة الحسابات
   POST   /accounting/coa              إنشاء حساب
   GET    /accounting/coa/{id}         تفاصيل حساب
+  PUT    /accounting/coa/{id}         تعديل حساب
 
 Journal Entries:
   POST   /accounting/je               إنشاء قيد (draft)
@@ -24,6 +25,7 @@ Fiscal Periods:
 Reports:
   GET    /accounting/ledger/{code}    كشف حساب
   GET    /accounting/trial-balance    ميزان المراجعة
+  POST   /accounting/rebuild-balances إعادة بناء الأرصدة
   GET    /accounting/dashboard        ملخص محاسبي
 ══════════════════════════════════════════════════════════
 """
@@ -41,7 +43,7 @@ from app.core.response import created, ok, paginated
 from app.core.tenant import CurrentUser, get_current_user
 from app.db.session import get_db
 from app.modules.accounting.schemas import (
-    COAAccountCreate, JournalEntryCreate,
+    COAAccountCreate, COAAccountUpdate, JournalEntryCreate,
     LockPeriodRequest, PostJERequest, ReverseJERequest,
 )
 from app.modules.accounting.service import AccountingService
@@ -82,10 +84,18 @@ async def get_account(
     account_id: uuid.UUID,
     svc: AccountingService = Depends(_svc),
 ):
-    from app.core.exceptions import NotFoundError
-    # Direct repo access for simple reads
     acc = await svc._coa_repo.get_or_raise(account_id)
     return ok(data=acc.to_dict())
+
+
+@router.put("/coa/{account_id}", summary="تعديل حساب")
+async def update_account(
+    account_id: uuid.UUID,
+    data: COAAccountUpdate,
+    svc: AccountingService = Depends(_svc),
+):
+    acc = await svc.update_account(account_id, data)
+    return ok(data=acc.to_dict(), message=f"تم تعديل الحساب {acc.code}")
 
 
 # ══════════════════════════════════════════════════════════
@@ -96,11 +106,6 @@ async def create_je(
     data: JournalEntryCreate,
     svc: AccountingService = Depends(_svc),
 ):
-    """
-    Creates a DRAFT journal entry.
-    Must be explicitly posted via POST /je/{id}/post.
-    Validates double-entry balance before saving.
-    """
     je = await svc.create_draft_je(data)
     return created(
         data={
@@ -160,14 +165,6 @@ async def post_je(
     body: PostJERequest,
     svc: AccountingService = Depends(_svc),
 ):
-    """
-    Posts a draft JE through PostingEngine.
-    Validates:
-      ✅ Double-entry balance
-      ✅ Fiscal period not locked
-      ✅ All accounts are postable
-      ✅ Tenant isolation
-    """
     je = await svc.post_je(je_id, force=body.force)
     return ok(
         data={
@@ -188,11 +185,6 @@ async def reverse_je(
     data: ReverseJERequest,
     svc: AccountingService = Depends(_svc),
 ):
-    """
-    Reverses a posted JE.
-    Creates a new REV- entry with flipped DR/CR.
-    Marks original as REVERSED.
-    """
     result = await svc.reverse_je(je_id, data)
     return ok(
         data=result,
@@ -214,11 +206,6 @@ async def lock_period(
     data: LockPeriodRequest,
     svc: AccountingService = Depends(_svc),
 ):
-    """
-    Lock a fiscal period.
-    soft = warning (admin can bypass)
-    hard = absolute block (no bypass)
-    """
     result = await svc.lock_period(data)
     lock_label = "صارم" if data.lock_type == "hard" else "ناعم"
     return created(
@@ -247,11 +234,6 @@ async def trial_balance(
     fiscal_month: Optional[int] = Query(None, ge=1, le=12),
     svc: AccountingService = Depends(_svc),
 ):
-    """
-    Trial balance from account_balances table.
-    Returns debit/credit totals per account for the period.
-    is_balanced=true means DR == CR ✅
-    """
     result = await svc.get_trial_balance(fiscal_year, fiscal_month)
     return ok(data=result)
 
@@ -261,7 +243,6 @@ async def rebuild_balances(
     fiscal_year: int = Query(..., description="السنة المالية"),
     svc: AccountingService = Depends(_svc),
 ):
-    """Rebuild account balances from posted JEs for a given fiscal year."""
     result = await svc.rebuild_balances(fiscal_year)
     return ok(data=result)
 
@@ -273,9 +254,9 @@ async def account_ledger(
     date_to:      Optional[date] = Query(None),
     svc: AccountingService = Depends(_svc),
 ):
-    """Account ledger — all JE lines for a specific account."""
     from sqlalchemy import select
     from app.modules.accounting.models import JournalEntryLine, JournalEntry
+    from decimal import Decimal
 
     q = (
         select(JournalEntryLine, JournalEntry)
@@ -295,7 +276,6 @@ async def account_ledger(
 
     running = Decimal("0")
     lines = []
-    from decimal import Decimal
     for line, je in rows:
         running += line.debit - line.credit
         lines.append({
@@ -322,11 +302,9 @@ async def accounting_dashboard(
     fiscal_year: int = Query(default=2024),
     svc: AccountingService = Depends(_svc),
 ):
-    """KPIs for the accounting dashboard."""
     from sqlalchemy import func, select
     from app.modules.accounting.models import JournalEntry
 
-    # Count JEs by status
     result = await svc.db.execute(
         select(JournalEntry.status, func.count())
         .where(JournalEntry.tenant_id == svc.user.tenant_id)
@@ -355,22 +333,6 @@ async def import_coa(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """
-    استيراد دليل الحسابات من ملف Excel (.xlsx) أو CSV.
-
-    **الأعمدة المطلوبة في الملف:**
-    - `code` / `كود الحساب`
-    - `name_ar` / `اسم الحساب بالعربي`
-    - `account_type` / `نوع الحساب` — asset | liability | equity | revenue | expense
-    - `account_nature` / `طبيعة الحساب` — debit | credit
-    - `level` / `المستوى` — 1 إلى 4
-    - `postable` / `قابل للترحيل` — نعم | لا
-
-    **اختيارية:**
-    - `name_en`, `parent_code`, `opening_balance`, `notes`
-
-    **dry_run=true** → يتحقق من الملف ويعيد النتيجة بدون حفظ.
-    """
     from app.modules.accounting.coa_import import COAImportService
 
     content = await file.read()
@@ -405,10 +367,6 @@ async def import_coa(
 @router.get("/coa/template", summary="تحميل نموذج Excel لاستيراد الحسابات",
             response_class=StreamingResponse)
 async def download_coa_template():
-    """
-    يُنزّل ملف Excel جاهز يمكن تعبئته واستيراده.
-    يحتوي على: أعمدة صحيحة + تحقق من البيانات + تعليمات + مثال.
-    """
     import io
 
     try:
@@ -425,11 +383,10 @@ async def download_coa_template():
     ws.title = "دليل الحسابات"
     ws.sheet_view.rightToLeft = True
 
-    # Styles
     H_FILL   = PatternFill("solid", fgColor="1F3864")
+    EX_FILL  = PatternFill("solid", fgColor="FFF2CC")
     R_FILL   = PatternFill("solid", fgColor="FCE4D6")
     O_FILL   = PatternFill("solid", fgColor="E2EFDA")
-    EX_FILL  = PatternFill("solid", fgColor="FFF2CC")
     H_FONT   = Font(bold=True, color="FFFFFF", size=11, name="Arial")
     B_FONT   = Font(size=10, name="Arial")
     THIN     = Side(style="thin", color="BFBFBF")
@@ -456,7 +413,6 @@ async def download_coa_template():
     ws.row_dimensions[1].height = 35
     ws.freeze_panes = "A2"
 
-    # Dropdowns
     dv_type = DataValidation(type="list",
         formula1='"asset,liability,equity,revenue,expense"', showDropDown=False)
     dv_nature = DataValidation(type="list",
@@ -467,9 +423,8 @@ async def download_coa_template():
         ws.add_data_validation(dv)
     dv_type.sqref = "D2:D500"; dv_nature.sqref = "E2:E500"; dv_post.sqref = "H2:H500"
 
-    # Example rows
     EXAMPLES = [
-        ("11",   "الأصول المتداولة",      "Current Assets",    "asset",     "debit",  2, "1",   "لا",  0,    "مجموعة"),
+        ("11",   "الأصول المتداولة",      "Current Assets",    "asset",     "debit",  2, "1",   "لا",  0,    ""),
         ("1001", "الصندوق الرئيسي",       "Main Cash",          "asset",     "debit",  4, "11",  "نعم", 5000, ""),
         ("2101", "ذمم الموردين",          "Suppliers AP",       "liability", "credit", 4, "21",  "نعم", 0,    ""),
         ("4001", "مبيعات بضاعة",          "Merchandise Sales",  "revenue",   "credit", 4, "41",  "نعم", 0,    ""),
@@ -482,47 +437,11 @@ async def download_coa_template():
             c.fill = EX_FILL; c.font = B_FONT; c.border = BRD
             c.alignment = Alignment(horizontal="right" if ci <= 2 else "center")
 
-    # Empty rows
     for ri in range(len(EXAMPLES) + 2, 102):
         for ci, (_, _, _, req) in enumerate(COLS, 1):
             c = ws.cell(row=ri, column=ci)
             c.fill = R_FILL if req else O_FILL; c.border = BRD; c.font = B_FONT
 
-    # Instructions sheet
-    ws2 = wb.create_sheet("تعليمات")
-    ws2.sheet_view.rightToLeft = True
-    INST = [
-        ("📋 تعليمات استيراد دليل الحسابات", True),
-        ("", False),
-        ("الصفوف الصفراء في الورقة الأولى هي أمثلة — احذفها واستبدلها ببياناتك", False),
-        ("", False),
-        ("الأعمدة الإلزامية (خلفية برتقالية):", True),
-        ("  كود الحساب: رقم فريد — مثل 1001 أو 4001", False),
-        ("  اسم الحساب بالعربي: الاسم الكامل للحساب", False),
-        ("  نوع الحساب: asset / liability / equity / revenue / expense", False),
-        ("  طبيعة الحساب: debit (مدين) أو credit (دائن)", False),
-        ("  المستوى: من 1 إلى 4 (المستوى 4 فقط قابل للترحيل)", False),
-        ("  قابل للترحيل: نعم أو لا", False),
-        ("", False),
-        ("المستويات الهرمية:", True),
-        ("  1 = قسم رئيسي (أصول، التزامات...) — لا ترحيل", False),
-        ("  2 = مجموعة (أصول متداولة، مصروفات إدارية...) — لا ترحيل", False),
-        ("  3 = حساب رئيسي (النقدية، المبيعات...) — لا ترحيل", False),
-        ("  4 = حساب تحليلي — يقبل القيود المحاسبية ✓", False),
-        ("", False),
-        ("الطبيعة الموصى بها لكل نوع:", True),
-        ("  asset → debit | liability → credit | equity → credit", False),
-        ("  revenue → credit | expense → debit", False),
-    ]
-    for ri, (txt, bold) in enumerate(INST, 1):
-        c = ws2.cell(row=ri, column=1, value=txt)
-        c.font = Font(bold=bold, size=11, name="Arial",
-                      color="FFFFFF" if bold and txt else "000000")
-        if bold and txt:
-            c.fill = PatternFill("solid", fgColor="1F3864")
-    ws2.column_dimensions["A"].width = 65
-
-    # Stream response
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -534,33 +453,17 @@ async def download_coa_template():
     )
 
 
-@router.post("/coa/seed", status_code=201, summary="تحميل دليل الحسابات الجاهز الموصى به",
+@router.post("/coa/seed", status_code=201, summary="تحميل دليل الحسابات الجاهز",
              response_model=None)
 async def seed_default_coa(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """
-    يُدرج دليل الحسابات الجاهز والموصى به للشركات السعودية.
-
-    يحتوي على **80+ حساب** موزعة على 4 مستويات:
-    - أصول (متداولة + ثابتة + غير ملموسة)
-    - التزامات (متداولة + طويلة الأجل)
-    - حقوق الملكية
-    - إيرادات
-    - تكلفة المبيعات
-    - مصروفات تشغيلية + مالية + إهلاك
-
-    متوافق مع: IFRS · IAS 1 · ZATCA
-
-    ⚠️ إذا كان الحساب موجوداً بنفس الكود — يتم تخطيه (لا استبدال).
-    """
     from app.modules.accounting.coa_import import COAImportService
     from scripts.seed_coa import COA
 
     user.require("can_manage_coa")
 
-    # Convert seed data → CSV in memory → import
     import csv, io
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=[
