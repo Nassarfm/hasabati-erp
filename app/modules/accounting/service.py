@@ -79,6 +79,11 @@ class AccountingService:
             postable=data.postable,
             is_active=data.is_active,
             opening_balance=data.opening_balance,
+            function_type=data.function_type,
+            grp=data.grp,
+            sub_group=data.sub_group,
+            cash_flow_type=data.cash_flow_type,
+            dimension_required=data.dimension_required,
             created_by=self.user.email,
         )
         return await self._coa_repo.save(acc)
@@ -106,6 +111,16 @@ class AccountingService:
             acc.is_active = update_data["is_active"]
         if "opening_balance" in update_data:
             acc.opening_balance = update_data["opening_balance"]
+        if "function_type" in update_data:
+            acc.function_type = update_data["function_type"]
+        if "grp" in update_data:
+            acc.grp = update_data["grp"]
+        if "sub_group" in update_data:
+            acc.sub_group = update_data["sub_group"]
+        if "cash_flow_type" in update_data:
+            acc.cash_flow_type = update_data["cash_flow_type"]
+        if "dimension_required" in update_data:
+            acc.dimension_required = update_data["dimension_required"]
 
         # 2) الحساب الأب — بشكل آمن
         if "parent_id" in update_data:

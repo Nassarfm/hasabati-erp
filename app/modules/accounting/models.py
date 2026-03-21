@@ -41,41 +41,41 @@ from app.db.mixins import ERPModel, SoftDeleteMixin, TimestampMixin, TenantMixin
 # Enums
 # ══════════════════════════════════════════════════════════
 class AccountType(str, enum.Enum):
-    ASSET     = "asset"       # أصول
-    LIABILITY = "liability"   # التزامات
-    EQUITY    = "equity"      # حقوق الملكية
-    REVENUE   = "revenue"     # إيرادات
-    EXPENSE   = "expense"     # مصاريف
+    ASSET     = "asset"
+    LIABILITY = "liability"
+    EQUITY    = "equity"
+    REVENUE   = "revenue"
+    EXPENSE   = "expense"
 
 
 class AccountNature(str, enum.Enum):
-    DEBIT  = "debit"    # طبيعة مدينة (assets, expenses)
-    CREDIT = "credit"   # طبيعة دائنة (liabilities, equity, revenue)
+    DEBIT  = "debit"
+    CREDIT = "credit"
 
 
 class JEStatus(str, enum.Enum):
-    DRAFT    = "draft"      # مسودة — يمكن التعديل
-    POSTED   = "posted"     # مرحَّل — لا تعديل، فقط عكس
-    REVERSED = "reversed"   # معكوس — مغلق نهائياً
-    VOID     = "void"       # ملغى (draft only)
+    DRAFT    = "draft"
+    POSTED   = "posted"
+    REVERSED = "reversed"
+    VOID     = "void"
 
 
 class JEType(str, enum.Enum):
-    GJE  = "GJE"   # General Journal Entry
-    SJE  = "SJE"   # Sales Journal Entry
-    PJE  = "PJE"   # Purchase Journal Entry
-    PIE  = "PIE"   # Purchase Invoice Entry
-    PAY  = "PAY"   # Payment Entry
-    RCV  = "RCV"   # Receipt Entry
-    PRV  = "PRV"   # Payroll Entry
-    DEP  = "DEP"   # Depreciation Entry
-    ADJ  = "ADJ"   # Adjustment Entry
-    REV  = "REV"   # Reversal Entry
+    GJE  = "GJE"
+    SJE  = "SJE"
+    PJE  = "PJE"
+    PIE  = "PIE"
+    PAY  = "PAY"
+    RCV  = "RCV"
+    PRV  = "PRV"
+    DEP  = "DEP"
+    ADJ  = "ADJ"
+    REV  = "REV"
 
 
 class FiscalLockType(str, enum.Enum):
-    SOFT = "soft"   # تحذير — يمكن تجاوزه بصلاحية مدير
-    HARD = "hard"   # إغلاق نهائي — لا يمكن تجاوزه أبداً
+    SOFT = "soft"
+    HARD = "hard"
 
 
 class FiscalPeriodStatus(str, enum.Enum):
@@ -124,6 +124,23 @@ class ChartOfAccount(ERPModel, Base):
         Numeric(18, 3), default=0, nullable=False
     )
 
+    # حقول القوائم المالية
+    function_type: Mapped[Optional[str]] = mapped_column(
+        String(10), nullable=True
+    )  # BS | PL | BS/PL
+    grp: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True
+    )  # Group
+    sub_group: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True
+    )  # Sub-Group
+    cash_flow_type: Mapped[Optional[str]] = mapped_column(
+        String(20), nullable=True
+    )  # operating | investing | financing | none
+    dimension_required: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )  # هل يتطلب بُعد عند الترحيل
+
     # Relationships
     children: Mapped[List["ChartOfAccount"]] = relationship(
         "ChartOfAccount", back_populates="parent"
@@ -162,7 +179,6 @@ class JournalEntry(ERPModel, Base):
     description: Mapped[str] = mapped_column(String(500), nullable=False)
     reference: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
-    # Source document link (invoice, GRN, payroll, etc.)
     source_module: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     source_doc_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     source_doc_id: Mapped[Optional[uuid.UUID]] = mapped_column(
@@ -170,7 +186,6 @@ class JournalEntry(ERPModel, Base):
     )
     source_doc_number: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
-    # Totals (denormalized for fast reporting)
     total_debit: Mapped[Decimal] = mapped_column(
         Numeric(18, 3), default=0, nullable=False
     )
@@ -178,21 +193,17 @@ class JournalEntry(ERPModel, Base):
         Numeric(18, 3), default=0, nullable=False
     )
 
-    # Fiscal period
     fiscal_year: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     fiscal_month: Mapped[int] = mapped_column(Integer, nullable=False)
 
-    # Dimensions
     branch_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     cost_center: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
-    # Posting info
     posted_at: Mapped[Optional[str]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     posted_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
-    # Reversal link
     reversed_by_je_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), nullable=True
     )
@@ -200,15 +211,12 @@ class JournalEntry(ERPModel, Base):
         UUID(as_uuid=True), nullable=True
     )
 
-    # Idempotency
     idempotency_key: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True, index=True
     )
 
-    # Notes
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    # Relationships
     lines: Mapped[List["JournalEntryLine"]] = relationship(
         "JournalEntryLine",
         back_populates="journal_entry",
@@ -255,12 +263,10 @@ class JournalEntryLine(ERPModel, Base):
         Numeric(18, 3), default=0, nullable=False
     )
 
-    # Dimensions per line
     branch_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     cost_center: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     project_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
-    # Relationships
     journal_entry: Mapped["JournalEntry"] = relationship(
         "JournalEntry", back_populates="lines"
     )
@@ -300,7 +306,7 @@ class AccountBalance(ERPModel, Base):
     )
 
     fiscal_year: Mapped[int] = mapped_column(Integer, nullable=False)
-    fiscal_month: Mapped[int] = mapped_column(Integer, nullable=False)  # 0 = annual
+    fiscal_month: Mapped[int] = mapped_column(Integer, nullable=False)
 
     debit_total: Mapped[Decimal] = mapped_column(
         Numeric(18, 3), default=0, nullable=False
@@ -310,7 +316,7 @@ class AccountBalance(ERPModel, Base):
     )
     balance: Mapped[Decimal] = mapped_column(
         Numeric(18, 3), default=0, nullable=False
-    )  # debit_total - credit_total (signed)
+    )
 
     opening_balance: Mapped[Decimal] = mapped_column(
         Numeric(18, 3), default=0, nullable=False
@@ -323,7 +329,6 @@ class AccountBalance(ERPModel, Base):
         DateTime(timezone=True), nullable=True
     )
 
-    # Relationships
     account: Mapped[Optional["ChartOfAccount"]] = relationship(
         "ChartOfAccount", back_populates="balances"
     )
@@ -341,13 +346,10 @@ class AccountBalance(ERPModel, Base):
 # 5. Fiscal Period
 # ══════════════════════════════════════════════════════════
 class FiscalPeriod(ERPModel, Base):
-    """
-    السنة/الشهر المالي — Fiscal Period.
-    """
     __tablename__ = "fiscal_periods"
 
     fiscal_year: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    fiscal_month: Mapped[int] = mapped_column(Integer, nullable=False)  # 1-12 or 0 for annual
+    fiscal_month: Mapped[int] = mapped_column(Integer, nullable=False)
     name_ar: Mapped[str] = mapped_column(String(100), nullable=False)
 
     status: Mapped[FiscalPeriodStatus] = mapped_column(
@@ -364,7 +366,6 @@ class FiscalPeriod(ERPModel, Base):
     )
     closed_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
-    # Relationships
     locks: Mapped[List["FiscalLock"]] = relationship(
         "FiscalLock", back_populates="period"
     )
@@ -381,11 +382,6 @@ class FiscalPeriod(ERPModel, Base):
 # 6. Fiscal Lock
 # ══════════════════════════════════════════════════════════
 class FiscalLock(ERPModel, Base):
-    """
-    قفل الفترة المالية.
-    soft = تحذير، يحتاج صلاحية للمرور.
-    hard = إغلاق نهائي، لا أحد يتجاوزه.
-    """
     __tablename__ = "fiscal_locks"
 
     period_id: Mapped[uuid.UUID] = mapped_column(
@@ -413,7 +409,6 @@ class FiscalLock(ERPModel, Base):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
-    # Relationships
     period: Mapped["FiscalPeriod"] = relationship("FiscalPeriod", back_populates="locks")
 
     __table_args__ = (
@@ -425,11 +420,6 @@ class FiscalLock(ERPModel, Base):
 # 7. Accounting Audit Log (immutable)
 # ══════════════════════════════════════════════════════════
 class AccountingAuditLog(TenantMixin, TimestampMixin, Base):
-    """
-    سجل التدقيق المحاسبي — Immutable.
-    No updates, no deletes, ever.
-    Records every posting / reversal / lock action.
-    """
     __tablename__ = "accounting_audit_log"
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -437,13 +427,10 @@ class AccountingAuditLog(TenantMixin, TimestampMixin, Base):
     )
 
     action: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
-    # JE_POSTED | JE_REVERSED | JE_VOIDED | PERIOD_LOCKED | PERIOD_UNLOCKED
 
-    # Who
     user_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
     user_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
-    # What
     je_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
     je_serial: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     je_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
@@ -451,17 +438,14 @@ class AccountingAuditLog(TenantMixin, TimestampMixin, Base):
     fiscal_year: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     fiscal_month: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
-    # Amounts
     total_debit: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 3), nullable=True)
     total_credit: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 3), nullable=True)
 
-    # Context
     source_module: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     source_doc_number: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     extra_data: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
-    # Request tracing
     request_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     ip_address: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 

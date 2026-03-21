@@ -28,6 +28,12 @@ class COAAccountBase(BaseModel):
     postable: bool         = True
     is_active: bool        = True
     opening_balance: Decimal = Decimal("0")
+    # حقول القوائم المالية
+    function_type: Optional[str] = Field(None, pattern="^(BS|PL|BS/PL)?$")
+    grp: Optional[str]           = Field(None, max_length=100)
+    sub_group: Optional[str]     = Field(None, max_length=100)
+    cash_flow_type: Optional[str] = Field(None, pattern="^(operating|investing|financing|none)?$")
+    dimension_required: bool     = False
 
 
 class COAAccountCreate(COAAccountBase):
@@ -43,6 +49,11 @@ class COAAccountUpdate(BaseModel):
     postable: Optional[bool]       = None
     is_active: Optional[bool]      = None
     opening_balance: Optional[Decimal] = None
+    function_type: Optional[str]      = Field(None, pattern="^(BS|PL|BS/PL)?$")
+    grp: Optional[str]                = Field(None, max_length=100)
+    sub_group: Optional[str]          = Field(None, max_length=100)
+    cash_flow_type: Optional[str]     = Field(None, pattern="^(operating|investing|financing|none)?$")
+    dimension_required: Optional[bool] = None
 
 
 class COAAccountResponse(COAAccountBase):
