@@ -100,8 +100,12 @@ class AccountingService:
             else:
                 acc.level = 1
 
-        acc.updated_by = self.user.email
+        try:
+            acc.updated_by = self.user.email
+        except Exception:
+            pass
         await self.db.flush()
+        await self.db.refresh(acc)
         return acc
 
     async def list_accounts(self) -> List[ChartOfAccount]:
