@@ -158,6 +158,11 @@ COLUMN_ALIASES = {
     "postable":        ["postable", "قابل للترحيل", "ترحيل"],
     "opening_balance": ["opening_balance", "رصيد افتتاحي", "الرصيد الافتتاحي", "رصيد"],
     "notes":           ["notes", "ملاحظات"],
+    "function_type":   ["function_type", "function", "bs/pl", "نوع القائمة", "func"],
+    "grp":             ["grp", "group", "المجموعة", "مجموعة"],
+    "sub_group":       ["sub_group", "sub-group", "subgroup", "المجموعة الفرعية", "sub group"],
+    "cash_flow_type":  ["cash_flow_type", "cash flow type", "cash_flow", "التدفق النقدي", "cash flow"],
+    "dimension_required": ["dimension_required", "dimension required", "يتطلب بعد", "dimension"],
 }
 
 
@@ -225,7 +230,28 @@ class COAImportService:
             parent   = get("parent_code")
             postable = get("postable")
             ob_str   = get("opening_balance")
-            notes    = get("notes")
+            notes              = get("notes")
+            function_type      = get("function_type") or "BS"
+            grp                = get("grp") or ""
+            sub_group          = get("sub_group") or ""
+            cash_flow_type_raw = get("cash_flow_type") or "none"
+            dim_raw            = get("dimension_required")
+
+            # تحويل cash_flow_type
+            cf_map = {
+                "operating activities": "operating", "operating": "operating", "أنشطة تشغيلية": "operating",
+                "investing activities": "investing", "investing": "investing", "أنشطة استثمارية": "investing",
+                "financing activities": "financing", "financing": "financing", "أنشطة تمويلية": "financing",
+                "none": "none", "لا ينطبق": "none", "": "none",
+            }
+            cash_flow_type = cf_map.get(cash_flow_type_raw.strip().lower(), "none")
+
+            # تحويل dimension_required
+            dimension_required = dim_raw.strip().lower() in {"نعم", "yes", "true", "1", "y"}
+
+            # تحويل function_type
+            ft_map = {"bs": "BS", "pl": "PL", "bs/pl": "BS/PL", "": "BS"}
+            function_type = ft_map.get(function_type.strip().lower(), function_type.strip().upper() or "BS")
 
             row_errors = []
 
@@ -285,17 +311,22 @@ class COAImportService:
                 continue
 
             parsed_rows.append({
-                "row_idx":         row_idx,
-                "code":            code,
-                "name_ar":         name_ar,
-                "name_en":         name_en or None,
-                "account_type":    parsed_type,
-                "account_nature":  parsed_nature,
-                "level":           level,
-                "parent_code":     parent or None,
-                "postable":        _parse_bool(postable),
-                "opening_balance": opening_balance,
-                "notes":           notes or None,
+                "row_idx":            row_idx,
+                "code":               code,
+                "name_ar":            name_ar,
+                "name_en":            name_en or None,
+                "account_type":       parsed_type,
+                "account_nature":     parsed_nature,
+                "level":              level,
+                "parent_code":        parent or None,
+                "postable":           _parse_bool(postable),
+                "opening_balance":    opening_balance,
+                "notes":              notes or None,
+                "function_type":      function_type,
+                "grp":                grp or None,
+                "sub_group":          sub_group or None,
+                "cash_flow_type":     cash_flow_type,
+                "dimension_required": dimension_required,
             })
 
         if result.has_errors:
@@ -336,6 +367,11 @@ class COAImportService:
                 allow_direct_posting=r["postable"],
                 is_active=True,
                 opening_balance=r["opening_balance"],
+                function_type=r.get("function_type"),
+                grp=r.get("grp"),
+                sub_group=r.get("sub_group"),
+                cash_flow_type=r.get("cash_flow_type", "none"),
+                dimension_required=r.get("dimension_required", False),
                 created_by=self.user.email,
                 created_at=now,
                 updated_at=now,
