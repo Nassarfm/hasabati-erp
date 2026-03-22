@@ -31,20 +31,22 @@ class DimensionService:
     # Dimensions CRUD
     # ══════════════════════════════════════════════
     async def list_dimensions(self, active_only: bool = True) -> List[Dimension]:
-        q = select(Dimension).where(Dimension.tenant_id == self.tid)
+        from sqlalchemy.orm import selectinload
+        q = select(Dimension).options(
+            selectinload(Dimension.values)
+        ).where(Dimension.tenant_id == self.tid)
         if active_only:
             q = q.where(Dimension.is_active == True)
         q = q.order_by(Dimension.sort_order, Dimension.code)
         result = await self.db.execute(q)
-        dims = result.scalars().all()
-        # load values
-        for dim in dims:
-            await self.db.refresh(dim, ["values"])
-        return dims
+        return result.scalars().all()
 
     async def get_dimension(self, dim_id: uuid.UUID) -> Dimension:
+        from sqlalchemy.orm import selectinload
         result = await self.db.execute(
-            select(Dimension).where(
+            select(Dimension).options(
+                selectinload(Dimension.values)
+            ).where(
                 Dimension.tenant_id == self.tid,
                 Dimension.id == dim_id,
             )
@@ -52,7 +54,6 @@ class DimensionService:
         dim = result.scalar_one_or_none()
         if not dim:
             raise NotFoundError("البُعد", dim_id)
-        await self.db.refresh(dim, ["values"])
         return dim
 
     async def create_dimension(self, data: DimensionCreate) -> Dimension:
