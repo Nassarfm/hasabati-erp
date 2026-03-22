@@ -147,6 +147,69 @@ class AccountingService:
     async def list_accounts(self) -> List[ChartOfAccount]:
         return await self._coa_repo.list_active()
 
+    async def reset_coa(self) -> dict:
+        """
+        إعادة تهيئة دليل الحسابات — حذف كامل.
+        يُسمح فقط إذا لا توجد قيود مرحّلة.
+        صلاحية: owner فقط.
+        """
+        self.user.require("can_manage_coa")
+
+        from sqlalchemy import select, delete, func as sql_func
+        from app.modules.accounting.models import (
+            JournalEntry, AccountBalance, ChartOfAccount
+        )
+
+        # 1) التحقق: لا توجد قيود مرحّلة
+        result = await self.db.execute(
+            select(sql_func.count()).select_from(JournalEntry).where(
+                JournalEntry.tenant_id == self.user.tenant_id,
+                JournalEntry.status == "posted",
+            )
+        )
+        posted_count = result.scalar() or 0
+        if posted_count > 0:
+            raise ValidationError(
+                f"لا يمكن حذف دليل الحسابات — يوجد {posted_count} قيد مرحّل. "
+                "يجب حذف جميع القيود أولاً."
+            )
+
+        # 2) حذف الأرصدة
+        await self.db.execute(
+            delete(AccountBalance).where(
+                AccountBalance.tenant_id == self.user.tenant_id
+            )
+        )
+
+        # 3) حذف دليل الحسابات
+        result2 = await self.db.execute(
+            select(sql_func.count()).select_from(ChartOfAccount).where(
+                ChartOfAccount.tenant_id == self.user.tenant_id
+            )
+        )
+        coa_count = result2.scalar() or 0
+
+        await self.db.execute(
+            delete(ChartOfAccount).where(
+                ChartOfAccount.tenant_id == self.user.tenant_id
+            )
+        )
+
+        # 4) تسجيل في Audit Log
+        await self._audit_repo.log(
+            action="COA_RESET",
+            user_id=self.user.user_id,
+            user_email=self.user.email,
+            notes=f"تم حذف {coa_count} حساب من دليل الحسابات",
+        )
+
+        await self.db.flush()
+
+        return {
+            "deleted_accounts": coa_count,
+            "message": f"تم حذف {coa_count} حساب بنجاح — دليل الحسابات فارغ الآن",
+        }
+
     # ══════════════════════════════════════════════════════
     # Journal Entries
     # ══════════════════════════════════════════════════════

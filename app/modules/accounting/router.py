@@ -325,6 +325,12 @@ async def accounting_dashboard(
 # ══════════════════════════════════════════════════════════
 # COA Import — Excel / CSV
 # ══════════════════════════════════════════════════════════
+@router.delete("/coa/reset", summary="إعادة تهيئة دليل الحسابات")
+async def reset_coa(svc: AccountingService = Depends(_svc)):
+    result = await svc.reset_coa()
+    return ok(data=result, message=result["message"])
+
+
 @router.post("/coa/import", status_code=201, summary="استيراد دليل الحسابات من Excel أو CSV",
              response_model=None)
 async def import_coa(
