@@ -159,6 +159,9 @@ async def list_branches(svc: SettingsService = Depends(_svc)):
         "city_id": str(b.city_id) if b.city_id else None,
         "city_name": b.city.name_ar if b.city else None,
         "city_sequence": b.city_sequence, "is_active": b.is_active,
+        "deactivated_at": str(b.deactivated_at) if b.deactivated_at else None,
+        "deactivated_by": b.deactivated_by,
+        "deactivation_reason": b.deactivation_reason,
     } for b in branches], message=f"{len(branches)} فرع")
 
 @router.post("/branches", status_code=201)
@@ -172,6 +175,17 @@ async def update_branch(branch_id: uuid.UUID, body: BranchBody, svc: SettingsSer
     data = body.model_dump(exclude={'code'})
     b = await svc.update_branch(branch_id, data)
     return ok(data={"id": str(b.id)}, message=f"تم تعديل الفرع {b.name_ar}")
+
+class DeactivateBody(BaseModel):
+    reason: Optional[str] = None
+
+@router.post("/branches/{branch_id}/deactivate")
+async def deactivate_branch(branch_id: uuid.UUID, body: DeactivateBody, svc: SettingsService = Depends(_svc)):
+    return ok(data=await svc.deactivate_branch(branch_id, body.reason))
+
+@router.post("/branches/{branch_id}/activate")
+async def activate_branch(branch_id: uuid.UUID, svc: SettingsService = Depends(_svc)):
+    return ok(data=await svc.activate_branch(branch_id))
 
 @router.delete("/branches/{branch_id}")
 async def delete_branch(branch_id: uuid.UUID, svc: SettingsService = Depends(_svc)):
@@ -217,6 +231,9 @@ async def list_cost_centers(svc: SettingsService = Depends(_svc)):
         "cost_center_type_name": c.cc_type_rel.name_en if c.cc_type_rel else c.cost_center_type,
         "department_code": c.department_code, "department_name": c.department_name,
         "parent_id": str(c.parent_id) if c.parent_id else None, "is_active": c.is_active,
+        "deactivated_at": str(c.deactivated_at) if c.deactivated_at else None,
+        "deactivated_by": c.deactivated_by,
+        "deactivation_reason": c.deactivation_reason,
     } for c in ccs])
 
 @router.post("/cost-centers", status_code=201)
@@ -228,6 +245,14 @@ async def create_cost_center(body: CCBody, svc: SettingsService = Depends(_svc))
 async def update_cost_center(cc_id: uuid.UUID, body: CCBody, svc: SettingsService = Depends(_svc)):
     cc = await svc.update_cost_center(cc_id, body.model_dump(exclude={'code'}))
     return ok(data={"id": str(cc.id)}, message=f"تم تعديل مركز التكلفة {cc.name_en}")
+
+@router.post("/cost-centers/{cc_id}/deactivate")
+async def deactivate_cc(cc_id: uuid.UUID, body: DeactivateBody, svc: SettingsService = Depends(_svc)):
+    return ok(data=await svc.deactivate_cost_center(cc_id, body.reason))
+
+@router.post("/cost-centers/{cc_id}/activate")
+async def activate_cc(cc_id: uuid.UUID, svc: SettingsService = Depends(_svc)):
+    return ok(data=await svc.activate_cost_center(cc_id))
 
 @router.delete("/cost-centers/{cc_id}")
 async def delete_cost_center(cc_id: uuid.UUID, svc: SettingsService = Depends(_svc)):

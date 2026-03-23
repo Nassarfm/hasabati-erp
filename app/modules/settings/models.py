@@ -6,7 +6,7 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 from typing import List, Optional
-from sqlalchemy import Boolean, Date, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
@@ -60,6 +60,9 @@ class Branch(ERPModel, Base):
     city_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("cities.id"), nullable=True)
     city_sequence: Mapped[int] = mapped_column(Integer, default=1)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    deactivated_at: Mapped[Optional[str]] = mapped_column(DateTime(timezone=True), nullable=True)
+    deactivated_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    deactivation_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     children: Mapped[List["Branch"]] = relationship("Branch", back_populates="parent")
     parent: Mapped[Optional["Branch"]] = relationship("Branch", back_populates="children", remote_side="Branch.id")
     region: Mapped[Optional["Region"]] = relationship("Region")
@@ -92,6 +95,9 @@ class CostCenter(ERPModel, Base):
     cost_center_type_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("cost_center_types.id"), nullable=True)
     cost_center_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    deactivated_at: Mapped[Optional[str]] = mapped_column(DateTime(timezone=True), nullable=True)
+    deactivated_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    deactivation_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     children: Mapped[List["CostCenter"]] = relationship("CostCenter", back_populates="parent")
     parent: Mapped[Optional["CostCenter"]] = relationship("CostCenter", back_populates="children", remote_side="CostCenter.id")
     cc_type_rel: Mapped[Optional["CostCenterType"]] = relationship("CostCenterType", back_populates="cost_centers")

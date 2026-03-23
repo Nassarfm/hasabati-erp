@@ -200,14 +200,33 @@ class SettingsService:
         await self.db.flush()
         return branch
 
-    async def delete_branch(self, branch_id: uuid.UUID) -> dict:
+    async def deactivate_branch(self, branch_id: uuid.UUID, reason: str = None) -> dict:
+        from datetime import datetime, timezone
         self.user.require("can_manage_coa")
         result = await self.db.execute(select(Branch).where(Branch.tenant_id == self.tid, Branch.id == branch_id))
         branch = result.scalar_one_or_none()
         if not branch: raise NotFoundError("الفرع", branch_id)
         branch.is_active = False
+        branch.deactivated_at = datetime.now(timezone.utc)
+        branch.deactivated_by = self.user.email
+        branch.deactivation_reason = reason
         await self.db.flush()
-        return {"message": f"تم تعطيل الفرع {branch.name_ar}"}
+        return {"message": f"تم إيقاف الفرع {branch.name_ar}", "deactivated_at": str(branch.deactivated_at)}
+
+    async def activate_branch(self, branch_id: uuid.UUID) -> dict:
+        self.user.require("can_manage_coa")
+        result = await self.db.execute(select(Branch).where(Branch.tenant_id == self.tid, Branch.id == branch_id))
+        branch = result.scalar_one_or_none()
+        if not branch: raise NotFoundError("الفرع", branch_id)
+        branch.is_active = True
+        branch.deactivated_at = None
+        branch.deactivated_by = None
+        branch.deactivation_reason = None
+        await self.db.flush()
+        return {"message": f"تم تفعيل الفرع {branch.name_ar}"}
+
+    async def delete_branch(self, branch_id: uuid.UUID) -> dict:
+        return await self.deactivate_branch(branch_id)
 
     # ══════════════════════════════════════════════
     # Cost Center Types
@@ -310,14 +329,33 @@ class SettingsService:
         await self.db.flush()
         return cc
 
-    async def delete_cost_center(self, cc_id: uuid.UUID) -> dict:
+    async def deactivate_cost_center(self, cc_id: uuid.UUID, reason: str = None) -> dict:
+        from datetime import datetime, timezone
         self.user.require("can_manage_coa")
         result = await self.db.execute(select(CostCenter).where(CostCenter.tenant_id == self.tid, CostCenter.id == cc_id))
         cc = result.scalar_one_or_none()
         if not cc: raise NotFoundError("مركز التكلفة", cc_id)
         cc.is_active = False
+        cc.deactivated_at = datetime.now(timezone.utc)
+        cc.deactivated_by = self.user.email
+        cc.deactivation_reason = reason
         await self.db.flush()
-        return {"message": f"تم تعطيل مركز التكلفة {cc.name_en}"}
+        return {"message": f"تم إيقاف مركز التكلفة {cc.name_en}", "deactivated_at": str(cc.deactivated_at)}
+
+    async def activate_cost_center(self, cc_id: uuid.UUID) -> dict:
+        self.user.require("can_manage_coa")
+        result = await self.db.execute(select(CostCenter).where(CostCenter.tenant_id == self.tid, CostCenter.id == cc_id))
+        cc = result.scalar_one_or_none()
+        if not cc: raise NotFoundError("مركز التكلفة", cc_id)
+        cc.is_active = True
+        cc.deactivated_at = None
+        cc.deactivated_by = None
+        cc.deactivation_reason = None
+        await self.db.flush()
+        return {"message": f"تم تفعيل مركز التكلفة {cc.name_en}"}
+
+    async def delete_cost_center(self, cc_id: uuid.UUID) -> dict:
+        return await self.deactivate_cost_center(cc_id)
 
     # ══════════════════════════════════════════════
     # Projects
