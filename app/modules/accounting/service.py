@@ -294,13 +294,47 @@ class AccountingService:
             force=force,
         )
 
-        # ── التحقق من الأبعاد — الفروع ومراكز التكلفة والمشاريع ──
+        # ── التحقق من الأبعاد ──────────────────────────────────────
         from sqlalchemy import select as _sel
         try:
             from app.modules.settings.models import Branch, CostCenter, Project
+            from app.modules.accounting.models import ChartOfAccount as _COA
 
             for line in je.lines:
-                # التحقق من الفرع
+                # جلب بيانات الحساب للتحقق من dimension_required
+                acct_r = (await self.db.execute(
+                    _sel(_COA).where(
+                        _COA.tenant_id == self.user.tenant_id,
+                        _COA.code == line.account_code,
+                    )
+                )).scalar_one_or_none()
+
+                dim_required = acct_r.dimension_required if acct_r else False
+                is_expense   = acct_r.account_type == "expense" if acct_r else False
+
+                if dim_required:
+                    # فرع إجباري
+                    if not line.branch_code:
+                        raise ValidationError(
+                            f"الحساب '{line.account_code}' يتطلب تحديد الفرع"
+                        )
+                    # مركز التكلفة إجباري
+                    if not line.cost_center:
+                        raise ValidationError(
+                            f"الحساب '{line.account_code}' يتطلب تحديد مركز التكلفة"
+                        )
+                    # المشروع إجباري
+                    if not line.project_code:
+                        raise ValidationError(
+                            f"الحساب '{line.account_code}' يتطلب تحديد المشروع"
+                        )
+                    # تصنيف المصروف إجباري للمصاريف
+                    if is_expense and not line.expense_classification_code:
+                        raise ValidationError(
+                            f"الحساب '{line.account_code}' يتطلب تحديد تصنيف المصروف"
+                        )
+
+                # التحقق من حالة الفرع
                 if line.branch_code:
                     br = (await self.db.execute(
                         _sel(Branch).where(
@@ -309,12 +343,11 @@ class AccountingService:
                         )
                     )).scalar_one_or_none()
                     if br and not br.is_active:
-                        reason = br.deactivation_reason or "غير محدد"
                         raise ValidationError(
-                            f"الفرع '{line.branch_code}' موقف — لا يمكن الترحيل عليه. السبب: {reason}"
+                            f"الفرع '{line.branch_code}' موقف — السبب: {br.deactivation_reason or 'غير محدد'}"
                         )
 
-                # التحقق من مركز التكلفة
+                # التحقق من حالة مركز التكلفة
                 if line.cost_center:
                     cc = (await self.db.execute(
                         _sel(CostCenter).where(
@@ -323,12 +356,11 @@ class AccountingService:
                         )
                     )).scalar_one_or_none()
                     if cc and not cc.is_active:
-                        reason = cc.deactivation_reason or "غير محدد"
                         raise ValidationError(
-                            f"مركز التكلفة '{line.cost_center}' موقف — لا يمكن الترحيل عليه. السبب: {reason}"
+                            f"مركز التكلفة '{line.cost_center}' موقف — السبب: {cc.deactivation_reason or 'غير محدد'}"
                         )
 
-                # التحقق من المشروع
+                # التحقق من حالة المشروع
                 if line.project_code:
                     proj = (await self.db.execute(
                         _sel(Project).where(
@@ -347,7 +379,7 @@ class AccountingService:
         except ValidationError:
             raise
         except Exception:
-            pass  # إذا لم يكن وحدة settings موجودة — تجاهل التحقق
+            pass
 
         codes = list({line.account_code for line in je.lines})
         result = await self.db.execute(

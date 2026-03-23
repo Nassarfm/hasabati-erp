@@ -83,9 +83,15 @@ class JELineCreate(BaseModel):
     description: str    = Field(..., min_length=1, max_length=500)
     debit: Decimal      = Field(default=Decimal("0"), ge=0)
     credit: Decimal     = Field(default=Decimal("0"), ge=0)
-    branch_code: Optional[str]   = None
-    cost_center: Optional[str]   = None
-    project_code: Optional[str]  = None
+    # الأبعاد
+    branch_code: Optional[str]                    = None
+    branch_name: Optional[str]                    = None
+    cost_center: Optional[str]                    = None
+    cost_center_name: Optional[str]               = None
+    project_code: Optional[str]                   = None
+    project_name: Optional[str]                   = None
+    expense_classification_code: Optional[str]    = None
+    expense_classification_name: Optional[str]    = None
 
     @model_validator(mode="after")
     def validate_one_side_only(self) -> "JELineCreate":
@@ -104,14 +110,19 @@ class JELineResponse(BaseModel):
     description: str
     debit: Decimal
     credit: Decimal
-    branch_code: Optional[str]
-    cost_center: Optional[str]
+    branch_code: Optional[str]                 = None
+    branch_name: Optional[str]                 = None
+    cost_center: Optional[str]                 = None
+    cost_center_name: Optional[str]            = None
+    project_code: Optional[str]                = None
+    project_name: Optional[str]                = None
+    expense_classification_code: Optional[str] = None
+    expense_classification_name: Optional[str] = None
     model_config = {"from_attributes": True}
 
 
 class JournalEntryCreate(BaseModel):
-    je_type: str        = Field(default="GJE",
-                                pattern="^(GJE|SJE|PJE|PIE|PAY|RCV|PRV|DEP|ADJ)$")
+    je_type: str        = Field(default="JV")  # JV|PV|RV|SV|PRV|PRJ|ACR|EXP|PET|REC|ADJ|CLS|INT
     entry_date: date
     description: str    = Field(..., min_length=1, max_length=500)
     reference: Optional[str]        = Field(None, max_length=100)
