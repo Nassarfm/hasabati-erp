@@ -177,13 +177,45 @@ async def update_branch(branch_id: uuid.UUID, body: BranchBody, svc: SettingsSer
 async def delete_branch(branch_id: uuid.UUID, svc: SettingsService = Depends(_svc)):
     return ok(data=await svc.delete_branch(branch_id))
 
+# ── Cost Center Types ────────────────────────
+@router.get("/cost-center-types")
+async def list_cc_types(svc: SettingsService = Depends(_svc)):
+    types = await svc.list_cc_types()
+    return ok(data=[{
+        "id": str(t.id), "code": t.code, "name_en": t.name_en, "name_ar": t.name_ar,
+        "is_system": t.is_system, "is_active": t.is_active, "sort_order": t.sort_order,
+    } for t in types])
+
+@router.post("/cost-center-types", status_code=201)
+async def create_cc_type(body: NameBody, svc: SettingsService = Depends(_svc)):
+    ct = await svc.create_cc_type({"code": body.code, "name_en": body.name_en or body.name_ar, "name_ar": body.name_ar})
+    return created(data={"id": str(ct.id)}, message=f"تم إضافة {ct.name_en}")
+
+@router.put("/cost-center-types/{ct_id}")
+async def update_cc_type(ct_id: uuid.UUID, body: NameBody, svc: SettingsService = Depends(_svc)):
+    ct = await svc.update_cc_type(ct_id, {"name_en": body.name_en or body.name_ar, "name_ar": body.name_ar, "is_active": body.is_active})
+    return ok(data={"id": str(ct.id)}, message=f"تم تعديل {ct.name_en}")
+
+@router.delete("/cost-center-types/{ct_id}")
+async def delete_cc_type(ct_id: uuid.UUID, svc: SettingsService = Depends(_svc)):
+    return ok(data=await svc.delete_cc_type(ct_id))
+
 # ── Cost Centers ──────────────────────────────
+@router.get("/cost-centers/suggest-code")
+async def suggest_cc_code(parent_code: str = Query(...), svc: SettingsService = Depends(_svc)):
+    code = await svc.suggest_cc_code(parent_code)
+    return ok(data={"suggested_code": code})
+
 @router.get("/cost-centers")
 async def list_cost_centers(svc: SettingsService = Depends(_svc)):
     ccs = await svc.list_cost_centers()
     return ok(data=[{
         "id": str(c.id), "code": c.code, "name_en": c.name_en, "name_ar": c.name_ar,
-        "level": c.level, "department_code": c.department_code, "department_name": c.department_name,
+        "level": c.level,
+        "cost_center_type": c.cost_center_type,
+        "cost_center_type_id": str(c.cost_center_type_id) if c.cost_center_type_id else None,
+        "cost_center_type_name": c.cc_type_rel.name_en if c.cc_type_rel else c.cost_center_type,
+        "department_code": c.department_code, "department_name": c.department_name,
         "parent_id": str(c.parent_id) if c.parent_id else None, "is_active": c.is_active,
     } for c in ccs])
 
@@ -196,6 +228,10 @@ async def create_cost_center(body: CCBody, svc: SettingsService = Depends(_svc))
 async def update_cost_center(cc_id: uuid.UUID, body: CCBody, svc: SettingsService = Depends(_svc)):
     cc = await svc.update_cost_center(cc_id, body.model_dump(exclude={'code'}))
     return ok(data={"id": str(cc.id)}, message=f"تم تعديل مركز التكلفة {cc.name_en}")
+
+@router.delete("/cost-centers/{cc_id}")
+async def delete_cost_center(cc_id: uuid.UUID, svc: SettingsService = Depends(_svc)):
+    return ok(data=await svc.delete_cost_center(cc_id))
 
 # ── Projects ──────────────────────────────────
 @router.get("/projects")

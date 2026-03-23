@@ -68,6 +68,18 @@ class Branch(ERPModel, Base):
     __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_branch_tenant_code"),)
 
 
+class CostCenterType(ERPModel, Base):
+    __tablename__ = "cost_center_types"
+    code: Mapped[str] = mapped_column(String(50), nullable=False)
+    name_en: Mapped[str] = mapped_column(String(255), nullable=False)
+    name_ar: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    cost_centers: Mapped[List["CostCenter"]] = relationship("CostCenter", back_populates="cc_type_rel")
+    __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_cctype_tenant_code"),)
+
+
 class CostCenter(ERPModel, Base):
     __tablename__ = "cost_centers"
     code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
@@ -77,9 +89,12 @@ class CostCenter(ERPModel, Base):
     department_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     department_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     parent_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("cost_centers.id"), nullable=True)
+    cost_center_type_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("cost_center_types.id"), nullable=True)
+    cost_center_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     children: Mapped[List["CostCenter"]] = relationship("CostCenter", back_populates="parent")
     parent: Mapped[Optional["CostCenter"]] = relationship("CostCenter", back_populates="children", remote_side="CostCenter.id")
+    cc_type_rel: Mapped[Optional["CostCenterType"]] = relationship("CostCenterType", back_populates="cost_centers")
     __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_cc_tenant_code"),)
 
 

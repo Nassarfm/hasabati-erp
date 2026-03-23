@@ -210,13 +210,83 @@ class SettingsService:
         return {"message": f"تم تعطيل الفرع {branch.name_ar}"}
 
     # ══════════════════════════════════════════════
+    # Cost Center Types
+    # ══════════════════════════════════════════════
+    async def list_cc_types(self) -> list:
+        from app.modules.settings.models import CostCenterType
+        result = await self.db.execute(
+            select(CostCenterType)
+            .where(CostCenterType.tenant_id == self.tid, CostCenterType.is_active == True)
+            .order_by(CostCenterType.sort_order, CostCenterType.code)
+        )
+        return result.scalars().all()
+
+    async def create_cc_type(self, data: dict) -> object:
+        from app.modules.settings.models import CostCenterType
+        self.user.require("can_manage_coa")
+        exists = await self.db.execute(
+            select(CostCenterType).where(CostCenterType.tenant_id == self.tid, CostCenterType.code == data['code'])
+        )
+        if exists.scalar_one_or_none():
+            raise DuplicateError("نوع مركز تكلفة", "code", data['code'])
+        ct = CostCenterType(tenant_id=self.tid, is_system=False, created_by=self.user.email, **data)
+        self.db.add(ct)
+        await self.db.flush()
+        return ct
+
+    async def update_cc_type(self, ct_id: uuid.UUID, data: dict) -> object:
+        from app.modules.settings.models import CostCenterType
+        self.user.require("can_manage_coa")
+        result = await self.db.execute(select(CostCenterType).where(CostCenterType.tenant_id == self.tid, CostCenterType.id == ct_id))
+        ct = result.scalar_one_or_none()
+        if not ct: raise NotFoundError("نوع مركز التكلفة", ct_id)
+        if ct.is_system and data.get('code'):
+            raise ValidationError("لا يمكن تعديل كود النوع الأساسي")
+        for k, v in data.items():
+            setattr(ct, k, v)
+        await self.db.flush()
+        return ct
+
+    async def delete_cc_type(self, ct_id: uuid.UUID) -> dict:
+        from app.modules.settings.models import CostCenterType
+        self.user.require("can_manage_coa")
+        result = await self.db.execute(select(CostCenterType).where(CostCenterType.tenant_id == self.tid, CostCenterType.id == ct_id))
+        ct = result.scalar_one_or_none()
+        if not ct: raise NotFoundError("نوع مركز التكلفة", ct_id)
+        if ct.is_system:
+            raise ValidationError("لا يمكن حذف النوع الأساسي — يمكن تعطيله فقط")
+        ct.is_active = False
+        await self.db.flush()
+        return {"message": f"تم تعطيل {ct.name_en}"}
+
+    # ══════════════════════════════════════════════
     # Cost Centers
     # ══════════════════════════════════════════════
     async def list_cost_centers(self) -> List[CostCenter]:
         result = await self.db.execute(
-            select(CostCenter).where(CostCenter.tenant_id == self.tid).order_by(CostCenter.code)
+            select(CostCenter)
+            .options(selectinload(CostCenter.cc_type_rel))
+            .where(CostCenter.tenant_id == self.tid)
+            .order_by(CostCenter.code)
         )
         return result.scalars().all()
+
+    async def suggest_cc_code(self, parent_code: str) -> str:
+        """توليد كود مركز التكلفة تلقائياً تحت القسم الأب"""
+        result = await self.db.execute(
+            select(CostCenter.code)
+            .where(CostCenter.tenant_id == self.tid, CostCenter.level == 2,
+                   CostCenter.parent_id.in_(
+                       select(CostCenter.id).where(CostCenter.tenant_id == self.tid, CostCenter.code == parent_code)
+                   ))
+            .order_by(CostCenter.code.desc())
+        )
+        codes = result.scalars().all()
+        parent_num = int(parent_code)
+        if not codes:
+            return str(parent_num + 1)
+        last_num = max(int(c) for c in codes if c.isdigit())
+        return str(last_num + 1)
 
     async def create_cost_center(self, data: dict) -> CostCenter:
         self.user.require("can_manage_coa")
@@ -239,6 +309,15 @@ class SettingsService:
             setattr(cc, k, v)
         await self.db.flush()
         return cc
+
+    async def delete_cost_center(self, cc_id: uuid.UUID) -> dict:
+        self.user.require("can_manage_coa")
+        result = await self.db.execute(select(CostCenter).where(CostCenter.tenant_id == self.tid, CostCenter.id == cc_id))
+        cc = result.scalar_one_or_none()
+        if not cc: raise NotFoundError("مركز التكلفة", cc_id)
+        cc.is_active = False
+        await self.db.flush()
+        return {"message": f"تم تعطيل مركز التكلفة {cc.name_en}"}
 
     # ══════════════════════════════════════════════
     # Projects
