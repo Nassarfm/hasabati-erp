@@ -259,6 +259,49 @@ async def delete_cost_center(cc_id: uuid.UUID, svc: SettingsService = Depends(_s
     return ok(data=await svc.delete_cost_center(cc_id))
 
 # ── Projects ──────────────────────────────────
+# ── JE Types ─────────────────────────────────────────
+@router.get("/je-types")
+async def list_je_types(svc: SettingsService = Depends(_svc)):
+    from sqlalchemy import text as _text
+    result = await svc.db.execute(
+        _text("SELECT id, code, name_en, name_ar, is_system, is_active, sort_order "
+              "FROM je_types WHERE tenant_id = :tid AND is_active = true ORDER BY sort_order"),
+        {"tid": str(svc.tid)}
+    )
+    rows = result.fetchall()
+    return ok(data=[{
+        "id": str(r[0]), "code": r[1], "name_en": r[2], "name_ar": r[3],
+        "is_system": r[4], "is_active": r[5], "sort_order": r[6],
+    } for r in rows])
+
+@router.post("/je-types", status_code=201)
+async def create_je_type(body: NameBody, svc: SettingsService = Depends(_svc)):
+    import uuid as _uuid
+    from sqlalchemy import text as _text
+    svc.user.require("can_manage_coa")
+    await svc.db.execute(
+        _text("INSERT INTO je_types (id, tenant_id, code, name_en, name_ar, is_system, is_active, sort_order, created_by) "
+              "VALUES (:id, :tid, :code, :name_en, :name_ar, false, true, 99, :by) "
+              "ON CONFLICT (tenant_id, code) DO NOTHING"),
+        {"id": str(_uuid.uuid4()), "tid": str(svc.tid), "code": body.code,
+         "name_en": body.name_en or body.name_ar, "name_ar": body.name_ar, "by": svc.user.email}
+    )
+    return created(data={"code": body.code}, message=f"تم إضافة النوع {body.code}")
+
+@router.put("/je-types/{je_type_id}")
+async def update_je_type(je_type_id: uuid.UUID, body: NameBody, svc: SettingsService = Depends(_svc)):
+    from sqlalchemy import text as _text
+    svc.user.require("can_manage_coa")
+    await svc.db.execute(
+        _text("UPDATE je_types SET name_ar = :name_ar, name_en = :name_en, "
+              "is_active = :active, updated_at = now() "
+              "WHERE id = :id AND tenant_id = :tid AND is_system = false"),
+        {"id": str(je_type_id), "tid": str(svc.tid),
+         "name_ar": body.name_ar, "name_en": body.name_en or body.name_ar, "active": body.is_active}
+    )
+    return ok(data={"id": str(je_type_id)}, message="تم التعديل")
+
+
 @router.get("/projects")
 async def list_projects(svc: SettingsService = Depends(_svc)):
     projects = await svc.list_projects()
