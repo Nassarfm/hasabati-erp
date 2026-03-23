@@ -17,6 +17,10 @@ v1_router.include_router(health.router, tags=["النظام"])
 from app.modules.accounting.router import router as accounting_router
 v1_router.include_router(accounting_router)
 
+# ── Settings (Branches, Cost Centers, Projects) ──────
+from app.modules.settings.router import router as settings_router
+v1_router.include_router(settings_router)
+
 # ── Dimensions ────────────────────────────────────────
 from app.modules.dimensions.router import router as dimensions_router
 v1_router.include_router(dimensions_router)
