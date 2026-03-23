@@ -265,6 +265,49 @@ class AccountingService:
         logger.info("je_draft_created", serial=serial)
         return je
 
+    async def submit_je(self, je_id: uuid.UUID) -> JournalEntry:
+        """إرسال القيد للمراجعة: draft → pending_review"""
+        from datetime import datetime, timezone
+        je = await self._je_repo.get_with_lines(je_id)
+        if not je:
+            raise NotFoundError("القيد", je_id)
+        if je.status != "draft":
+            raise ValidationError(f"لا يمكن إرسال القيد — الحالة الحالية: {je.status}")
+        je.status = "pending_review"
+        je.submitted_at = datetime.now(timezone.utc)
+        je.submitted_by = self.user.email
+        await self.db.flush()
+        return je
+
+    async def approve_je(self, je_id: uuid.UUID) -> JournalEntry:
+        """الموافقة على القيد: pending_review → posted"""
+        from datetime import datetime, timezone
+        je = await self._je_repo.get_with_lines(je_id)
+        if not je:
+            raise NotFoundError("القيد", je_id)
+        if je.status != "pending_review":
+            raise ValidationError(f"لا يمكن الموافقة — الحالة الحالية: {je.status}")
+        je.approved_at = datetime.now(timezone.utc)
+        je.approved_by = self.user.email
+        await self.db.flush()
+        # ترحيل تلقائي بعد الموافقة
+        return await self.post_je(je_id, force=False)
+
+    async def reject_je(self, je_id: uuid.UUID, note: str = "") -> JournalEntry:
+        """رفض القيد: pending_review → draft مع ملاحظة"""
+        from datetime import datetime, timezone
+        je = await self._je_repo.get_with_lines(je_id)
+        if not je:
+            raise NotFoundError("القيد", je_id)
+        if je.status != "pending_review":
+            raise ValidationError(f"لا يمكن الرفض — الحالة الحالية: {je.status}")
+        je.status = "draft"
+        je.rejected_at = datetime.now(timezone.utc)
+        je.rejected_by = self.user.email
+        je.rejection_note = note
+        await self.db.flush()
+        return je
+
     async def post_je(self, je_id: uuid.UUID, *, force: bool = False) -> JournalEntry:
         self.user.require("can_post_je")
 

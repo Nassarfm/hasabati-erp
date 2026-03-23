@@ -159,6 +159,29 @@ async def get_je(
     return ok(data=data)
 
 
+@router.post("/je/{je_id}/submit", summary="إرسال للمراجعة")
+async def submit_je(je_id: uuid.UUID, svc: AccountingService = Depends(_svc)):
+    je = await svc.submit_je(je_id)
+    return ok(data={"id": str(je.id), "status": je.status}, message="تم إرسال القيد للمراجعة")
+
+
+@router.post("/je/{je_id}/approve", summary="الموافقة على القيد")
+async def approve_je(je_id: uuid.UUID, svc: AccountingService = Depends(_svc)):
+    je = await svc.approve_je(je_id)
+    return ok(data={"id": str(je.id), "status": je.status}, message="تمت الموافقة وترحيل القيد")
+
+
+@router.post("/je/{je_id}/reject", summary="رفض القيد")
+async def reject_je(
+    je_id: uuid.UUID,
+    body: dict = Body(default={}),
+    svc: AccountingService = Depends(_svc)
+):
+    note = body.get("note", "")
+    je = await svc.reject_je(je_id, note)
+    return ok(data={"id": str(je.id), "status": je.status}, message="تم رفض القيد وإعادته للمسودة")
+
+
 @router.post("/je/{je_id}/post", summary="ترحيل قيد محاسبي")
 async def post_je(
     je_id: uuid.UUID,
