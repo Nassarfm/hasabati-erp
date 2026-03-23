@@ -77,6 +77,16 @@ async def list_regions(svc: SettingsService = Depends(_svc)):
                    for c in sorted(r.cities, key=lambda x: x.code)],
     } for r in regions])
 
+@router.get("/regions/suggest-code")
+async def suggest_region_code(svc: SettingsService = Depends(_svc)):
+    from sqlalchemy import text as _text
+    result = await svc.db.execute(
+        _text("SELECT COALESCE(MAX(CAST(code AS INTEGER)), 0) + 1 FROM regions WHERE tenant_id = :tid"),
+        {"tid": str(svc.tid)}
+    )
+    code = str(result.scalar() or 1)
+    return ok(data={"suggested_code": code})
+
 @router.post("/regions", status_code=201)
 async def create_region(body: NameBody, svc: SettingsService = Depends(_svc)):
     r = await svc.create_region(body.code, body.name_ar, body.name_en)
@@ -100,9 +110,14 @@ async def list_cities(region_id: Optional[uuid.UUID] = Query(None), svc: Setting
         "region_id": str(c.region_id), "region_name": c.region.name_ar if c.region else None, "is_active": c.is_active,
     } for c in cities])
 
+@router.get("/cities/suggest-code")
+async def suggest_city_code(region_id: uuid.UUID = Query(...), svc: SettingsService = Depends(_svc)):
+    code = await svc.suggest_city_code(region_id)
+    return ok(data={"suggested_code": code})
+
 @router.post("/cities", status_code=201)
 async def create_city(body: NameBody, region_id: uuid.UUID = Query(...), svc: SettingsService = Depends(_svc)):
-    c = await svc.create_city(region_id, body.code, body.name_ar, body.name_en)
+    c = await svc.create_city(region_id, body.code or None, body.name_ar, body.name_en)
     return created(data={"id": str(c.id), "code": c.code}, message=f"تم إضافة المدينة {c.name_ar}")
 
 @router.put("/cities/{city_id}")

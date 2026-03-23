@@ -72,13 +72,35 @@ class SettingsService:
         result = await self.db.execute(q)
         return result.scalars().all()
 
+    async def suggest_city_code(self, region_id: uuid.UUID) -> str:
+        """توليد كود المدينة تلقائياً داخل المنطقة: 01, 02, 03..."""
+        result = await self.db.execute(
+            select(City.code)
+            .where(City.tenant_id == self.tid, City.region_id == region_id)
+            .order_by(City.code.desc())
+        )
+        codes = result.scalars().all()
+        if not codes:
+            return "01"
+        numeric = [int(c) for c in codes if c.isdigit()]
+        last = max(numeric) if numeric else 0
+        return f"{last + 1:02d}"
+
     async def create_city(self, region_id: uuid.UUID, code: str, name_ar: str, name_en: str = None) -> City:
         self.user.require("can_manage_coa")
+        # auto-generate code if not provided
+        if not code:
+            code = await self.suggest_city_code(region_id)
+        # تحقق من عدم التكرار داخل المنطقة فقط
         exists = await self.db.execute(
-            select(City).where(City.tenant_id == self.tid, City.code == code)
+            select(City).where(
+                City.tenant_id == self.tid,
+                City.region_id == region_id,
+                City.code == code,
+            )
         )
         if exists.scalar_one_or_none():
-            raise DuplicateError("مدينة", "code", code)
+            raise DuplicateError("مدينة", "code", f"{code} في هذه المنطقة")
         city = City(tenant_id=self.tid, region_id=region_id, code=code, name_ar=name_ar, name_en=name_en, created_by=self.user.email)
         self.db.add(city)
         await self.db.flush()
