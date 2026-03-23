@@ -294,6 +294,61 @@ class AccountingService:
             force=force,
         )
 
+        # ── التحقق من الأبعاد — الفروع ومراكز التكلفة والمشاريع ──
+        from sqlalchemy import select as _sel
+        try:
+            from app.modules.settings.models import Branch, CostCenter, Project
+
+            for line in je.lines:
+                # التحقق من الفرع
+                if line.branch_code:
+                    br = (await self.db.execute(
+                        _sel(Branch).where(
+                            Branch.tenant_id == self.user.tenant_id,
+                            Branch.code == line.branch_code,
+                        )
+                    )).scalar_one_or_none()
+                    if br and not br.is_active:
+                        reason = br.deactivation_reason or "غير محدد"
+                        raise ValidationError(
+                            f"الفرع '{line.branch_code}' موقف — لا يمكن الترحيل عليه. السبب: {reason}"
+                        )
+
+                # التحقق من مركز التكلفة
+                if line.cost_center:
+                    cc = (await self.db.execute(
+                        _sel(CostCenter).where(
+                            CostCenter.tenant_id == self.user.tenant_id,
+                            CostCenter.code == line.cost_center,
+                        )
+                    )).scalar_one_or_none()
+                    if cc and not cc.is_active:
+                        reason = cc.deactivation_reason or "غير محدد"
+                        raise ValidationError(
+                            f"مركز التكلفة '{line.cost_center}' موقف — لا يمكن الترحيل عليه. السبب: {reason}"
+                        )
+
+                # التحقق من المشروع
+                if line.project_code:
+                    proj = (await self.db.execute(
+                        _sel(Project).where(
+                            Project.tenant_id == self.user.tenant_id,
+                            Project.code == line.project_code,
+                        )
+                    )).scalar_one_or_none()
+                    if proj and not proj.is_active:
+                        raise ValidationError(
+                            f"المشروع '{line.project_code}' غير نشط — لا يمكن الترحيل عليه."
+                        )
+                    if proj and proj.status in ('completed', 'cancelled'):
+                        raise ValidationError(
+                            f"المشروع '{line.project_code}' في حالة '{proj.status}' — لا يمكن الترحيل عليه."
+                        )
+        except ValidationError:
+            raise
+        except Exception:
+            pass  # إذا لم يكن وحدة settings موجودة — تجاهل التحقق
+
         codes = list({line.account_code for line in je.lines})
         result = await self.db.execute(
             select(ChartOfAccount).where(
