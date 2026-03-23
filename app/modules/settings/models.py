@@ -1,12 +1,12 @@
 """
 app/modules/settings/models.py
-الإعدادات المالية — الفروع، مراكز التكلفة، المشاريع
+الإعدادات المالية — المناطق، المدن، أنواع الفروع، الفروع، مراكز التكلفة، المشاريع
 """
 from __future__ import annotations
 import uuid
 from decimal import Decimal
 from typing import List, Optional
-from sqlalchemy import Boolean, Date, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
@@ -19,7 +19,7 @@ class Region(ERPModel, Base):
     name_ar: Mapped[str] = mapped_column(String(255), nullable=False)
     name_en: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    cities: Mapped[List["City"]] = relationship("City", back_populates="region")
+    cities: Mapped[List["City"]] = relationship("City", back_populates="region", order_by="City.code")
     __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_region_tenant_code"),)
 
 
@@ -35,12 +35,23 @@ class City(ERPModel, Base):
     __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_city_tenant_code"),)
 
 
+class BranchType(ERPModel, Base):
+    __tablename__ = "branch_types"
+    code: Mapped[str] = mapped_column(String(50), nullable=False)
+    name_ar: Mapped[str] = mapped_column(String(255), nullable=False)
+    name_en: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    branches: Mapped[List["Branch"]] = relationship("Branch", back_populates="branch_type_rel")
+    __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_brtype_tenant_code"),)
+
+
 class Branch(ERPModel, Base):
     __tablename__ = "branches"
     code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
     name_ar: Mapped[str] = mapped_column(String(255), nullable=False)
     name_en: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     branch_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    branch_type_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("branch_types.id"), nullable=True)
     address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     country: Mapped[str] = mapped_column(String(100), default="KSA")
     currency: Mapped[str] = mapped_column(String(10), default="SAR")
@@ -53,6 +64,7 @@ class Branch(ERPModel, Base):
     parent: Mapped[Optional["Branch"]] = relationship("Branch", back_populates="children", remote_side="Branch.id")
     region: Mapped[Optional["Region"]] = relationship("Region")
     city: Mapped[Optional["City"]] = relationship("City", back_populates="branches")
+    branch_type_rel: Mapped[Optional["BranchType"]] = relationship("BranchType", back_populates="branches")
     __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_branch_tenant_code"),)
 
 
