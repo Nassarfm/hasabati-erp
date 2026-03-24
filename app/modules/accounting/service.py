@@ -246,9 +246,10 @@ class AccountingService:
 
         # جلب أسماء الحسابات دفعة واحدة
         codes = list({l.account_code for l in data.lines})
+        from sqlalchemy import select as _sel2
         from app.modules.accounting.models import ChartOfAccount as _COA2
         _coa_res = await self.db.execute(
-            select(_COA2).where(
+            _sel2(_COA2).where(
                 _COA2.tenant_id == self.user.tenant_id,
                 _COA2.code.in_(codes)
             )
@@ -376,24 +377,32 @@ class AccountingService:
 
                 if dim_required:
                     # فرع إجباري
-                    if not line.branch_code:
+                    branch_req = getattr(acct_r, 'dim_branch_required', False) if acct_r else False
+                    cc_req     = getattr(acct_r, 'dim_cc_required', False) if acct_r else False
+                    proj_req   = getattr(acct_r, 'dim_project_required', False) if acct_r else False
+                    exp_req    = getattr(acct_r, 'dim_exp_class_required', False) if acct_r else False
+
+                    # fallback: إذا لم تُحدد بشكل منفصل نستخدم dimension_required للكل
+                    if not any([branch_req, cc_req, proj_req, exp_req]):
+                        branch_req = cc_req = dim_required
+                        proj_req   = dim_required
+                        exp_req    = is_expense and dim_required
+
+                    if branch_req and not line.branch_code:
                         raise ValidationError(
-                            f"الحساب '{line.account_code}' يتطلب تحديد الفرع"
+                            f"الحساب '{line.account_code}' — {acct_r.name_ar if acct_r else ''} يتطلب تحديد الفرع"
                         )
-                    # مركز التكلفة إجباري
-                    if not line.cost_center:
+                    if cc_req and not line.cost_center:
                         raise ValidationError(
-                            f"الحساب '{line.account_code}' يتطلب تحديد مركز التكلفة"
+                            f"الحساب '{line.account_code}' — {acct_r.name_ar if acct_r else ''} يتطلب تحديد مركز التكلفة"
                         )
-                    # المشروع إجباري
-                    if not line.project_code:
+                    if proj_req and not line.project_code:
                         raise ValidationError(
-                            f"الحساب '{line.account_code}' يتطلب تحديد المشروع"
+                            f"الحساب '{line.account_code}' — {acct_r.name_ar if acct_r else ''} يتطلب تحديد المشروع"
                         )
-                    # تصنيف المصروف إجباري للمصاريف
-                    if is_expense and not line.expense_classification_code:
+                    if exp_req and not line.expense_classification_code:
                         raise ValidationError(
-                            f"الحساب '{line.account_code}' يتطلب تحديد تصنيف المصروف"
+                            f"الحساب '{line.account_code}' — {acct_r.name_ar if acct_r else ''} يتطلب تحديد تصنيف المصروف"
                         )
 
                 # التحقق من حالة الفرع

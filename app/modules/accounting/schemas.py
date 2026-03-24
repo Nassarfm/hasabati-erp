@@ -33,7 +33,11 @@ class COAAccountBase(BaseModel):
     grp: Optional[str]           = Field(None, max_length=100)
     sub_group: Optional[str]     = Field(None, max_length=100)
     cash_flow_type: Optional[str] = Field(None, pattern="^(operating|investing|financing|none)?$")
-    dimension_required: bool     = False
+    dimension_required: bool      = False
+    dim_branch_required:    bool  = False
+    dim_cc_required:        bool  = False
+    dim_project_required:   bool  = False
+    dim_exp_class_required: bool  = False
 
 
 class COAAccountCreate(COAAccountBase):
@@ -53,7 +57,11 @@ class COAAccountUpdate(BaseModel):
     grp: Optional[str]                = Field(None, max_length=100)
     sub_group: Optional[str]          = Field(None, max_length=100)
     cash_flow_type: Optional[str]     = Field(None, pattern="^(operating|investing|financing|none)?$")
-    dimension_required: Optional[bool] = None
+    dimension_required:    Optional[bool] = None
+    dim_branch_required:   Optional[bool] = None
+    dim_cc_required:       Optional[bool] = None
+    dim_project_required:  Optional[bool] = None
+    dim_exp_class_required:Optional[bool] = None
 
 
 class COAAccountResponse(COAAccountBase):

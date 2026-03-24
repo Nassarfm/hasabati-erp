@@ -102,6 +102,11 @@ class ChartOfAccount(ERPModel, Base):
     sub_group: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     cash_flow_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     dimension_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # أبعاد تفصيلية لكل حساب
+    dim_branch_required:    Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    dim_cc_required:        Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    dim_project_required:   Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    dim_exp_class_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     children: Mapped[List["ChartOfAccount"]] = relationship("ChartOfAccount", back_populates="parent")
     parent: Mapped[Optional["ChartOfAccount"]] = relationship("ChartOfAccount", back_populates="children", remote_side="ChartOfAccount.id")
