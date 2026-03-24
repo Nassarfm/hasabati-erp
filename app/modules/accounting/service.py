@@ -291,6 +291,69 @@ class AccountingService:
         logger.info("je_draft_created", serial=serial)
         return je
 
+    async def update_draft_je(self, je_id: uuid.UUID, data) -> JournalEntry:
+        """تعديل قيد في حالة draft فقط"""
+        from app.modules.accounting.models import JournalEntryLine
+        je = await self._je_repo.get_with_lines(je_id)
+        if not je:
+            raise NotFoundError("القيد", je_id)
+        if je.status not in ("draft", "rejected"):
+            raise ValidationError(f"لا يمكن تعديل قيد في حالة {je.status}")
+
+        # تحديث الهيدر
+        je.description  = data.description
+        je.entry_date   = data.entry_date
+        je.reference    = data.reference
+        je.je_type      = data.je_type
+        if hasattr(data, 'notes') and data.notes:
+            je.notes = data.notes
+
+        # حذف الأسطر القديمة وإعادة إنشائها
+        from sqlalchemy import delete as _del
+        await self.db.execute(
+            _del(JournalEntryLine).where(JournalEntryLine.journal_entry_id == je_id)
+        )
+
+        # إعادة حساب الإجمالي
+        codes = list({l.account_code for l in data.lines})
+        from sqlalchemy import select as _sel3
+        from app.modules.accounting.models import ChartOfAccount as _COA3
+        _coa_res = await self.db.execute(
+            _sel3(_COA3).where(_COA3.tenant_id == self.user.tenant_id, _COA3.code.in_(codes))
+        )
+        _acct_map = {a.code: a.name_ar for a in _coa_res.scalars().all()}
+
+        total_dr = total_cr = 0
+        for idx, line in enumerate(data.lines):
+            je_line = JournalEntryLine(
+                tenant_id=self.user.tenant_id,
+                journal_entry_id=je_id,
+                line_order=idx + 1,
+                account_code=line.account_code,
+                account_name=_acct_map.get(line.account_code, line.account_code),
+                description=line.description,
+                debit=line.debit,
+                credit=line.credit,
+                branch_code=line.branch_code,
+                branch_name=getattr(line, 'branch_name', None),
+                cost_center=line.cost_center,
+                cost_center_name=getattr(line, 'cost_center_name', None),
+                project_code=getattr(line, 'project_code', None),
+                project_name=getattr(line, 'project_name', None),
+                expense_classification_code=getattr(line, 'expense_classification_code', None),
+                expense_classification_name=getattr(line, 'expense_classification_name', None),
+                created_by=self.user.email,
+            )
+            self.db.add(je_line)
+            total_dr += float(line.debit)
+            total_cr += float(line.credit)
+
+        je.total_debit  = total_dr
+        je.total_credit = total_cr
+        je.status = "draft"  # إعادة لمسودة
+        await self.db.flush()
+        return je
+
     async def submit_je(self, je_id: uuid.UUID) -> JournalEntry:
         """إرسال القيد للمراجعة: draft → pending_review"""
         from datetime import datetime, timezone

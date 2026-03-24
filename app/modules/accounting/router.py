@@ -159,6 +159,19 @@ async def get_je(
     return ok(data=data)
 
 
+@router.put("/je/{je_id}", summary="تعديل قيد مسودة")
+async def update_je(
+    je_id: uuid.UUID,
+    data: JournalEntryCreate,
+    svc: AccountingService = Depends(_svc),
+):
+    je = await svc.update_draft_je(je_id, data)
+    return ok(
+        data={"id": str(je.id), "serial": je.serial, "status": je.status},
+        message=f"تم تعديل القيد {je.serial}",
+    )
+
+
 @router.post("/je/{je_id}/submit", summary="إرسال للمراجعة")
 async def submit_je(je_id: uuid.UUID, svc: AccountingService = Depends(_svc)):
     je = await svc.submit_je(je_id)
