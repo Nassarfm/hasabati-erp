@@ -121,6 +121,14 @@ class AccountingService:
             acc.cash_flow_type = update_data["cash_flow_type"]
         if "dimension_required" in update_data:
             acc.dimension_required = update_data["dimension_required"]
+        if "dim_branch_required" in update_data:
+            acc.dim_branch_required = update_data["dim_branch_required"]
+        if "dim_cc_required" in update_data:
+            acc.dim_cc_required = update_data["dim_cc_required"]
+        if "dim_project_required" in update_data:
+            acc.dim_project_required = update_data["dim_project_required"]
+        if "dim_exp_class_required" in update_data:
+            acc.dim_exp_class_required = update_data["dim_exp_class_required"]
 
         # 2) الحساب الأب — بشكل آمن
         if "parent_id" in update_data:
@@ -382,10 +390,13 @@ class AccountingService:
                     proj_req   = getattr(acct_r, 'dim_project_required', False) if acct_r else False
                     exp_req    = getattr(acct_r, 'dim_exp_class_required', False) if acct_r else False
 
-                    # fallback: إذا لم تُحدد بشكل منفصل نستخدم dimension_required للكل
+                    # fallback: إذا لم تُحدد بشكل منفصل
+                    # الفرع ومركز التكلفة إجباريان بشكل افتراضي
+                    # المشروع وتصنيف المصروف اختياريان إلا إذا حُددا صراحةً
                     if not any([branch_req, cc_req, proj_req, exp_req]):
-                        branch_req = cc_req = dim_required
-                        proj_req   = dim_required
+                        branch_req = dim_required
+                        cc_req     = dim_required
+                        proj_req   = False  # اختياري دائماً ما لم يُحدد صراحةً
                         exp_req    = is_expense and dim_required
 
                     if branch_req and not line.branch_code:
@@ -396,6 +407,7 @@ class AccountingService:
                         raise ValidationError(
                             f"الحساب '{line.account_code}' — {acct_r.name_ar if acct_r else ''} يتطلب تحديد مركز التكلفة"
                         )
+                    # المشروع اختياري إلا إذا حُدد صراحةً كإجباري
                     if proj_req and not line.project_code:
                         raise ValidationError(
                             f"الحساب '{line.account_code}' — {acct_r.name_ar if acct_r else ''} يتطلب تحديد المشروع"
