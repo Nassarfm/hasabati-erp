@@ -280,13 +280,15 @@ class AccountingService:
         return je
 
     async def approve_je(self, je_id: uuid.UUID) -> JournalEntry:
-        """الموافقة على القيد: pending_review → posted"""
+        """الموافقة على القيد: pending_review → approved → posted"""
         from datetime import datetime, timezone
         je = await self._je_repo.get_with_lines(je_id)
         if not je:
             raise NotFoundError("القيد", je_id)
         if je.status != "pending_review":
             raise ValidationError(f"لا يمكن الموافقة — الحالة الحالية: {je.status}")
+        # تغيير الحالة إلى approved أولاً
+        je.status = "approved"
         je.approved_at = datetime.now(timezone.utc)
         je.approved_by = self.user.email
         await self.db.flush()
