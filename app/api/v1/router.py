@@ -16,6 +16,8 @@ v1_router.include_router(health.router, tags=["النظام"])
 # ── Accounting (Module 1) ─────────────────────────────
 from app.modules.accounting.router import router as accounting_router
 v1_router.include_router(accounting_router)
+from app.modules.accounting.je_attachments_router import router as je_att_router
+v1_router.include_router(je_att_router)
 
 # ── Settings (Branches, Cost Centers, Projects) ──────
 from app.modules.settings.router import router as settings_router
