@@ -244,6 +244,17 @@ class AccountingService:
         self.db.add(je)
         await self.db.flush()
 
+        # جلب أسماء الحسابات دفعة واحدة
+        codes = list({l.account_code for l in data.lines})
+        from app.modules.accounting.models import ChartOfAccount as _COA2
+        _coa_res = await self.db.execute(
+            select(_COA2).where(
+                _COA2.tenant_id == self.user.tenant_id,
+                _COA2.code.in_(codes)
+            )
+        )
+        _acct_map = {a.code: a.name_ar for a in _coa_res.scalars().all()}
+
         for idx, line in enumerate(data.lines):
             from app.modules.accounting.models import JournalEntryLine
             je_line = JournalEntryLine(
@@ -251,12 +262,18 @@ class AccountingService:
                 journal_entry_id=je.id,
                 line_order=idx + 1,
                 account_code=line.account_code,
-                account_name=line.account_code,
+                account_name=_acct_map.get(line.account_code, line.account_code),
                 description=line.description,
                 debit=line.debit,
                 credit=line.credit,
                 branch_code=line.branch_code,
+                branch_name=getattr(line, 'branch_name', None),
                 cost_center=line.cost_center,
+                cost_center_name=getattr(line, 'cost_center_name', None),
+                project_code=getattr(line, 'project_code', None),
+                project_name=getattr(line, 'project_name', None),
+                expense_classification_code=getattr(line, 'expense_classification_code', None),
+                expense_classification_name=getattr(line, 'expense_classification_name', None),
                 created_by=self.user.email,
             )
             self.db.add(je_line)
