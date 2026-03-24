@@ -319,8 +319,8 @@ class AccountingService:
         if not je:
             raise NotFoundError("القيد", je_id)
 
-        if je.status != JEStatus.DRAFT:
-            raise InvalidStateError("القيد", je.status, ["draft"])
+        if je.status not in (JEStatus.DRAFT, "approved", "draft"):
+            raise InvalidStateError("القيد", je.status, ["draft", "approved"])
 
         if not je.lines or len(je.lines) < 2:
             raise ValidationError("القيد يجب أن يحتوي على سطرين على الأقل")
