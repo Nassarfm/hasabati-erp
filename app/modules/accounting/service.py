@@ -366,6 +366,40 @@ class AccountingService:
         await self.db.flush()
         return je
 
+    async def _check_period(self, entry_date) -> None:
+        """التحقق من أن الفترة المالية موجودة ومفتوحة"""
+        from sqlalchemy import text as _txt
+        entry_date_str = str(entry_date)
+
+        result = await self.db.execute(
+            _txt("""
+                SELECT ap.status, ap.period_name, fy.status as fy_status, fy.year_name
+                FROM accounting_periods ap
+                JOIN fiscal_years fy ON fy.id = ap.fiscal_year_id
+                WHERE ap.tenant_id = :tid
+                  AND :edate BETWEEN ap.start_date AND ap.end_date
+                ORDER BY ap.start_date DESC LIMIT 1
+            """),
+            {"tid": str(self.user.tenant_id), "edate": entry_date_str}
+        )
+        row = result.fetchone()
+
+        if not row:
+            raise ValidationError(
+                f"لا توجد فترة مالية مفتوحة للتاريخ {entry_date_str}. "
+                f"يرجى إنشاء السنة المالية أولاً من صفحة الفترات المالية."
+            )
+        if row[0] == 'closed':
+            raise ValidationError(
+                f"الفترة المالية '{row[1]}' مغلقة — "
+                f"لا يمكن إدخال أو ترحيل قيود على فترة مغلقة."
+            )
+        if row[2] == 'closed':
+            raise ValidationError(
+                f"السنة المالية '{row[3]}' مغلقة — "
+                f"لا يمكن إدخال قيود على سنة مالية مغلقة."
+            )
+
     async def _get_display_name(self) -> str:
         """جلب اسم العرض من user_roles"""
         try:
@@ -590,25 +624,7 @@ class AccountingService:
 
         # ── التحقق من الفترة المالية ──────────────────────────────
         try:
-            from sqlalchemy import text as _txt
-            entry_date_str = str(je.entry_date)
-            period_result = await self.db.execute(
-                _txt("""
-                    SELECT ap.status, ap.period_name
-                    FROM accounting_periods ap
-                    WHERE ap.tenant_id = :tid
-                      AND :edate BETWEEN ap.start_date AND ap.end_date
-                    ORDER BY ap.start_date DESC LIMIT 1
-                """),
-                {"tid": str(self.user.tenant_id), "edate": entry_date_str}
-            )
-            period_row = period_result.fetchone()
-            if period_row and period_row[0] == 'closed':
-                raise ValidationError(
-                    f"الفترة المالية '{period_row[1]}' مغلقة — "
-                    f"لا يمكن الترحيل على فترة مغلقة. "
-                    f"يرجى التواصل مع مدير النظام لإعادة فتح الفترة."
-                )
+            await self._check_period(je.entry_date)
         except ValidationError:
             raise
         except Exception:
@@ -726,6 +742,40 @@ class AccountingService:
         je.status = "draft"  # إعادة لمسودة
         await self.db.flush()
         return je
+
+    async def _check_period(self, entry_date) -> None:
+        """التحقق من أن الفترة المالية موجودة ومفتوحة"""
+        from sqlalchemy import text as _txt
+        entry_date_str = str(entry_date)
+
+        result = await self.db.execute(
+            _txt("""
+                SELECT ap.status, ap.period_name, fy.status as fy_status, fy.year_name
+                FROM accounting_periods ap
+                JOIN fiscal_years fy ON fy.id = ap.fiscal_year_id
+                WHERE ap.tenant_id = :tid
+                  AND :edate BETWEEN ap.start_date AND ap.end_date
+                ORDER BY ap.start_date DESC LIMIT 1
+            """),
+            {"tid": str(self.user.tenant_id), "edate": entry_date_str}
+        )
+        row = result.fetchone()
+
+        if not row:
+            raise ValidationError(
+                f"لا توجد فترة مالية مفتوحة للتاريخ {entry_date_str}. "
+                f"يرجى إنشاء السنة المالية أولاً من صفحة الفترات المالية."
+            )
+        if row[0] == 'closed':
+            raise ValidationError(
+                f"الفترة المالية '{row[1]}' مغلقة — "
+                f"لا يمكن إدخال أو ترحيل قيود على فترة مغلقة."
+            )
+        if row[2] == 'closed':
+            raise ValidationError(
+                f"السنة المالية '{row[3]}' مغلقة — "
+                f"لا يمكن إدخال قيود على سنة مالية مغلقة."
+            )
 
     async def _get_display_name(self) -> str:
         """جلب اسم العرض من user_roles"""
@@ -889,25 +939,7 @@ class AccountingService:
 
         # ── التحقق من الفترة المالية ──────────────────────────────
         try:
-            from sqlalchemy import text as _txt
-            entry_date_str = str(je.entry_date)
-            period_result = await self.db.execute(
-                _txt("""
-                    SELECT ap.status, ap.period_name
-                    FROM accounting_periods ap
-                    WHERE ap.tenant_id = :tid
-                      AND :edate BETWEEN ap.start_date AND ap.end_date
-                    ORDER BY ap.start_date DESC LIMIT 1
-                """),
-                {"tid": str(self.user.tenant_id), "edate": entry_date_str}
-            )
-            period_row = period_result.fetchone()
-            if period_row and period_row[0] == 'closed':
-                raise ValidationError(
-                    f"الفترة المالية '{period_row[1]}' مغلقة — "
-                    f"لا يمكن الترحيل على فترة مغلقة. "
-                    f"يرجى التواصل مع مدير النظام لإعادة فتح الفترة."
-                )
+            await self._check_period(je.entry_date)
         except ValidationError:
             raise
         except Exception:
