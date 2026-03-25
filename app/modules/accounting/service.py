@@ -366,6 +366,19 @@ class AccountingService:
         je.submitted_at = datetime.now(timezone.utc)
         je.submitted_by = self.user.email
         await self.db.flush()
+        # إشعار
+        try:
+            from app.modules.notifications.router import create_notification
+            await create_notification(
+                self.db, self.user.tenant_id,
+                title=f"📤 قيد جديد للمراجعة — {je.serial}",
+                message=f"أرسل {self.user.email.split('@')[0]} القيد {je.serial} للمراجعة. البيان: {je.description}",
+                notif_type="pending_review",
+                je_id=je.id, je_serial=je.serial,
+                created_by=self.user.email,
+            )
+        except Exception:
+            pass
         return je
 
     async def approve_je(self, je_id: uuid.UUID) -> JournalEntry:
@@ -381,6 +394,19 @@ class AccountingService:
         je.approved_at = datetime.now(timezone.utc)
         je.approved_by = self.user.email
         await self.db.flush()
+        # إشعار الموافقة
+        try:
+            from app.modules.notifications.router import create_notification
+            await create_notification(
+                self.db, self.user.tenant_id,
+                title=f"✅ تمت الموافقة على القيد — {je.serial}",
+                message=f"وافق {self.user.email.split('@')[0]} على القيد {je.serial} وسيتم ترحيله تلقائياً.",
+                notif_type="approved",
+                je_id=je.id, je_serial=je.serial,
+                created_by=self.user.email,
+            )
+        except Exception:
+            pass
         # ترحيل تلقائي بعد الموافقة
         return await self.post_je(je_id, force=False)
 
@@ -397,6 +423,19 @@ class AccountingService:
         je.rejected_by = self.user.email
         je.rejection_note = note
         await self.db.flush()
+        # إشعار الرفض
+        try:
+            from app.modules.notifications.router import create_notification
+            await create_notification(
+                self.db, self.user.tenant_id,
+                title=f"❌ تم رفض القيد — {je.serial}",
+                message=f"رفض {self.user.email.split('@')[0]} القيد {je.serial}. السبب: {note or 'غير محدد'}",
+                notif_type="rejected",
+                je_id=je.id, je_serial=je.serial,
+                created_by=self.user.email,
+            )
+        except Exception:
+            pass
         return je
 
     async def post_je(self, je_id: uuid.UUID, *, force: bool = False) -> JournalEntry:
@@ -603,6 +642,19 @@ class AccountingService:
         je.submitted_at = datetime.now(timezone.utc)
         je.submitted_by = self.user.email
         await self.db.flush()
+        # إشعار
+        try:
+            from app.modules.notifications.router import create_notification
+            await create_notification(
+                self.db, self.user.tenant_id,
+                title=f"📤 قيد جديد للمراجعة — {je.serial}",
+                message=f"أرسل {self.user.email.split('@')[0]} القيد {je.serial} للمراجعة. البيان: {je.description}",
+                notif_type="pending_review",
+                je_id=je.id, je_serial=je.serial,
+                created_by=self.user.email,
+            )
+        except Exception:
+            pass
         return je
 
     async def approve_je(self, je_id: uuid.UUID) -> JournalEntry:
@@ -618,6 +670,19 @@ class AccountingService:
         je.approved_at = datetime.now(timezone.utc)
         je.approved_by = self.user.email
         await self.db.flush()
+        # إشعار الموافقة
+        try:
+            from app.modules.notifications.router import create_notification
+            await create_notification(
+                self.db, self.user.tenant_id,
+                title=f"✅ تمت الموافقة على القيد — {je.serial}",
+                message=f"وافق {self.user.email.split('@')[0]} على القيد {je.serial} وسيتم ترحيله تلقائياً.",
+                notif_type="approved",
+                je_id=je.id, je_serial=je.serial,
+                created_by=self.user.email,
+            )
+        except Exception:
+            pass
         # ترحيل تلقائي بعد الموافقة
         return await self.post_je(je_id, force=False)
 
@@ -634,6 +699,19 @@ class AccountingService:
         je.rejected_by = self.user.email
         je.rejection_note = note
         await self.db.flush()
+        # إشعار الرفض
+        try:
+            from app.modules.notifications.router import create_notification
+            await create_notification(
+                self.db, self.user.tenant_id,
+                title=f"❌ تم رفض القيد — {je.serial}",
+                message=f"رفض {self.user.email.split('@')[0]} القيد {je.serial}. السبب: {note or 'غير محدد'}",
+                notif_type="rejected",
+                je_id=je.id, je_serial=je.serial,
+                created_by=self.user.email,
+            )
+        except Exception:
+            pass
         return je
 
     async def post_je(self, je_id: uuid.UUID, *, force: bool = False) -> JournalEntry:

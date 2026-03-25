@@ -19,6 +19,10 @@ v1_router.include_router(accounting_router)
 from app.modules.accounting.je_attachments_router import router as je_att_router
 v1_router.include_router(je_att_router)
 
+# ── Notifications ────────────────────────────────────
+from app.modules.notifications.router import router as notifications_router
+v1_router.include_router(notifications_router)
+
 # ── Settings (Branches, Cost Centers, Projects) ──────
 from app.modules.settings.router import router as settings_router
 v1_router.include_router(settings_router)
