@@ -3,7 +3,7 @@ app/modules/accounting/service.py
 ══════════════════════════════════════════════════════════
 Accounting module service layer.
 Orchestrates repositories + PostingEngine.
-Routers call this — never repositories directly.
+Routers call this - never repositories directly.
 ══════════════════════════════════════════════════════════
 """
 from __future__ import annotations
@@ -491,7 +491,7 @@ class AccountingService:
         )
 
 repositories + PostingEngine.
-Routers call this — never repositories directly.
+Routers call this - never repositories directly.
 ══════════════════════════════════════════════════════════
 """
 from __future__ import annotations
