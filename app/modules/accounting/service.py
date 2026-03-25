@@ -289,6 +289,18 @@ class AccountingService:
 
         await self.db.flush()
         logger.info("je_draft_created", serial=serial)
+        # سجل الحدث
+        try:
+            from app.modules.accounting.je_activity_router import log_activity
+            dn = await self._get_display_name()
+            await log_activity(
+                self.db, self.user.tenant_id, je.id, serial,
+                action="created", action_ar="إنشاء القيد",
+                performed_by=self.user.email, display_name=dn,
+                metadata={"total_debit": float(je.total_debit), "je_type": je.je_type}
+            )
+        except Exception:
+            pass
         return je
 
     async def update_draft_je(self, je_id: uuid.UUID, data) -> JournalEntry:
@@ -354,6 +366,19 @@ class AccountingService:
         await self.db.flush()
         return je
 
+    async def _get_display_name(self) -> str:
+        """جلب اسم العرض من user_roles"""
+        try:
+            from sqlalchemy import text as _t
+            r = await self.db.execute(
+                _t("SELECT display_name FROM user_roles WHERE user_id = :uid AND tenant_id = :tid LIMIT 1"),
+                {"uid": str(self.user.user_id), "tid": str(self.user.tenant_id)}
+            )
+            row = r.fetchone()
+            return row[0] if row and row[0] else self.user.email.split('@')[0]
+        except Exception:
+            return self.user.email.split('@')[0]
+
     async def submit_je(self, je_id: uuid.UUID) -> JournalEntry:
         """إرسال القيد للمراجعة: draft → pending_review"""
         from datetime import datetime, timezone
@@ -376,6 +401,17 @@ class AccountingService:
                 notif_type="pending_review",
                 je_id=je.id, je_serial=je.serial,
                 created_by=self.user.email,
+            )
+        except Exception:
+            pass
+        # سجل الحدث
+        try:
+            from app.modules.accounting.je_activity_router import log_activity
+            dn = await self._get_display_name()
+            await log_activity(
+                self.db, self.user.tenant_id, je.id, je.serial,
+                action="submitted", action_ar="إرسال للمراجعة",
+                performed_by=self.user.email, display_name=dn,
             )
         except Exception:
             pass
@@ -407,6 +443,17 @@ class AccountingService:
             )
         except Exception:
             pass
+        # سجل الحدث
+        try:
+            from app.modules.accounting.je_activity_router import log_activity
+            dn = await self._get_display_name()
+            await log_activity(
+                self.db, self.user.tenant_id, je.id, je.serial,
+                action="approved", action_ar="موافقة على القيد",
+                performed_by=self.user.email, display_name=dn,
+            )
+        except Exception:
+            pass
         # ترحيل تلقائي بعد الموافقة
         return await self.post_je(je_id, force=False)
 
@@ -433,6 +480,18 @@ class AccountingService:
                 notif_type="rejected",
                 je_id=je.id, je_serial=je.serial,
                 created_by=self.user.email,
+            )
+        except Exception:
+            pass
+        # سجل الحدث
+        try:
+            from app.modules.accounting.je_activity_router import log_activity
+            dn = await self._get_display_name()
+            await log_activity(
+                self.db, self.user.tenant_id, je.id, je.serial,
+                action="rejected", action_ar="رفض القيد",
+                performed_by=self.user.email, display_name=dn,
+                notes=note,
             )
         except Exception:
             pass
@@ -565,6 +624,18 @@ class AccountingService:
 
         await self.db.flush()
         logger.info("je_draft_created", serial=serial)
+        # سجل الحدث
+        try:
+            from app.modules.accounting.je_activity_router import log_activity
+            dn = await self._get_display_name()
+            await log_activity(
+                self.db, self.user.tenant_id, je.id, serial,
+                action="created", action_ar="إنشاء القيد",
+                performed_by=self.user.email, display_name=dn,
+                metadata={"total_debit": float(je.total_debit), "je_type": je.je_type}
+            )
+        except Exception:
+            pass
         return je
 
     async def update_draft_je(self, je_id: uuid.UUID, data) -> JournalEntry:
@@ -630,6 +701,19 @@ class AccountingService:
         await self.db.flush()
         return je
 
+    async def _get_display_name(self) -> str:
+        """جلب اسم العرض من user_roles"""
+        try:
+            from sqlalchemy import text as _t
+            r = await self.db.execute(
+                _t("SELECT display_name FROM user_roles WHERE user_id = :uid AND tenant_id = :tid LIMIT 1"),
+                {"uid": str(self.user.user_id), "tid": str(self.user.tenant_id)}
+            )
+            row = r.fetchone()
+            return row[0] if row and row[0] else self.user.email.split('@')[0]
+        except Exception:
+            return self.user.email.split('@')[0]
+
     async def submit_je(self, je_id: uuid.UUID) -> JournalEntry:
         """إرسال القيد للمراجعة: draft → pending_review"""
         from datetime import datetime, timezone
@@ -652,6 +736,17 @@ class AccountingService:
                 notif_type="pending_review",
                 je_id=je.id, je_serial=je.serial,
                 created_by=self.user.email,
+            )
+        except Exception:
+            pass
+        # سجل الحدث
+        try:
+            from app.modules.accounting.je_activity_router import log_activity
+            dn = await self._get_display_name()
+            await log_activity(
+                self.db, self.user.tenant_id, je.id, je.serial,
+                action="submitted", action_ar="إرسال للمراجعة",
+                performed_by=self.user.email, display_name=dn,
             )
         except Exception:
             pass
@@ -683,6 +778,17 @@ class AccountingService:
             )
         except Exception:
             pass
+        # سجل الحدث
+        try:
+            from app.modules.accounting.je_activity_router import log_activity
+            dn = await self._get_display_name()
+            await log_activity(
+                self.db, self.user.tenant_id, je.id, je.serial,
+                action="approved", action_ar="موافقة على القيد",
+                performed_by=self.user.email, display_name=dn,
+            )
+        except Exception:
+            pass
         # ترحيل تلقائي بعد الموافقة
         return await self.post_je(je_id, force=False)
 
@@ -709,6 +815,18 @@ class AccountingService:
                 notif_type="rejected",
                 je_id=je.id, je_serial=je.serial,
                 created_by=self.user.email,
+            )
+        except Exception:
+            pass
+        # سجل الحدث
+        try:
+            from app.modules.accounting.je_activity_router import log_activity
+            dn = await self._get_display_name()
+            await log_activity(
+                self.db, self.user.tenant_id, je.id, je.serial,
+                action="rejected", action_ar="رفض القيد",
+                performed_by=self.user.email, display_name=dn,
+                notes=note,
             )
         except Exception:
             pass
