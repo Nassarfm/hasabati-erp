@@ -588,6 +588,32 @@ class AccountingService:
             force=force,
         )
 
+        # ── التحقق من الفترة المالية ──────────────────────────────
+        try:
+            from sqlalchemy import text as _txt
+            entry_date_str = str(je.entry_date)
+            period_result = await self.db.execute(
+                _txt("""
+                    SELECT ap.status, ap.period_name
+                    FROM accounting_periods ap
+                    WHERE ap.tenant_id = :tid
+                      AND :edate BETWEEN ap.start_date AND ap.end_date
+                    ORDER BY ap.start_date DESC LIMIT 1
+                """),
+                {"tid": str(self.user.tenant_id), "edate": entry_date_str}
+            )
+            period_row = period_result.fetchone()
+            if period_row and period_row[0] == 'closed':
+                raise ValidationError(
+                    f"الفترة المالية '{period_row[1]}' مغلقة — "
+                    f"لا يمكن الترحيل على فترة مغلقة. "
+                    f"يرجى التواصل مع مدير النظام لإعادة فتح الفترة."
+                )
+        except ValidationError:
+            raise
+        except Exception:
+            pass
+
         codes = list({l.account_code for l in data.lines})
         from sqlalchemy import select as _sel2
         from app.modules.accounting.models import ChartOfAccount as _COA2
@@ -860,6 +886,32 @@ class AccountingService:
             user_role=self.user.role,
             force=force,
         )
+
+        # ── التحقق من الفترة المالية ──────────────────────────────
+        try:
+            from sqlalchemy import text as _txt
+            entry_date_str = str(je.entry_date)
+            period_result = await self.db.execute(
+                _txt("""
+                    SELECT ap.status, ap.period_name
+                    FROM accounting_periods ap
+                    WHERE ap.tenant_id = :tid
+                      AND :edate BETWEEN ap.start_date AND ap.end_date
+                    ORDER BY ap.start_date DESC LIMIT 1
+                """),
+                {"tid": str(self.user.tenant_id), "edate": entry_date_str}
+            )
+            period_row = period_result.fetchone()
+            if period_row and period_row[0] == 'closed':
+                raise ValidationError(
+                    f"الفترة المالية '{period_row[1]}' مغلقة — "
+                    f"لا يمكن الترحيل على فترة مغلقة. "
+                    f"يرجى التواصل مع مدير النظام لإعادة فتح الفترة."
+                )
+        except ValidationError:
+            raise
+        except Exception:
+            pass
 
         codes = list({line.account_code for line in je.lines})
         result = await self.db.execute(

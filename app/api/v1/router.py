@@ -20,6 +20,8 @@ from app.modules.accounting.je_attachments_router import router as je_att_router
 v1_router.include_router(je_att_router)
 from app.modules.accounting.je_activity_router import router as je_activity_router
 v1_router.include_router(je_activity_router)
+from app.modules.accounting.fiscal_router import router as fiscal_router
+v1_router.include_router(fiscal_router)
 
 # ── Notifications ────────────────────────────────────
 from app.modules.notifications.router import router as notifications_router
