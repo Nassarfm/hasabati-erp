@@ -582,56 +582,6 @@ class AccountingService:
         # ── التحقق من الفترة المالية ──────────────────────────────
         await self._check_period(je.entry_date)
 
-        codes = list({l.account_code for l in data.lines})
-        from sqlalchemy import select as _sel2
-        from app.modules.accounting.models import ChartOfAccount as _COA2
-        _coa_res = await self.db.execute(
-            _sel2(_COA2).where(
-                _COA2.tenant_id == self.user.tenant_id,
-                _COA2.code.in_(codes)
-            )
-        )
-        _acct_map = {a.code: a.name_ar for a in _coa_res.scalars().all()}
-
-        for idx, line in enumerate(data.lines):
-            from app.modules.accounting.models import JournalEntryLine
-            je_line = JournalEntryLine(
-                tenant_id=self.user.tenant_id,
-                journal_entry_id=je.id,
-                line_order=idx + 1,
-                account_code=line.account_code,
-                account_name=_acct_map.get(line.account_code, line.account_code),
-                description=line.description,
-                debit=line.debit,
-                credit=line.credit,
-                branch_code=line.branch_code,
-                branch_name=getattr(line, 'branch_name', None),
-                cost_center=line.cost_center,
-                cost_center_name=getattr(line, 'cost_center_name', None),
-                project_code=getattr(line, 'project_code', None),
-                project_name=getattr(line, 'project_name', None),
-                expense_classification_code=getattr(line, 'expense_classification_code', None),
-                expense_classification_name=getattr(line, 'expense_classification_name', None),
-                created_by=self.user.email,
-            )
-            self.db.add(je_line)
-
-        await self.db.flush()
-        logger.info("je_draft_created", serial=serial)
-        # سجل الحدث
-        try:
-            from app.modules.accounting.je_activity_router import log_activity
-            dn = await self._get_display_name()
-            await log_activity(
-                self.db, self.user.tenant_id, je.id, serial,
-                action="created", action_ar="إنشاء القيد",
-                performed_by=self.user.email, display_name=dn,
-                metadata={"total_debit": float(je.total_debit), "je_type": je.je_type}
-            )
-        except Exception:
-            pass
-        return je
-
     async def reverse_je(self, je_id: uuid.UUID, data: ReverseJERequest) -> dict:
         self.user.require("can_reverse_je")
         result = await self._engine.reverse(
