@@ -224,6 +224,9 @@ class AccountingService:
     async def create_draft_je(self, data: JournalEntryCreate) -> JournalEntry:
         self.user.require("can_create_je")
 
+        # ── التحقق من الفترة المالية قبل الحفظ ──
+        await self._check_period(data.entry_date)
+
         from app.services.numbering.series_service import NumberSeriesService
         num_svc = NumberSeriesService(self.db, self.user.tenant_id)
         serial = await num_svc.next_je(data.je_type)
@@ -312,6 +315,9 @@ class AccountingService:
         if je.status not in ("draft", "rejected"):
             raise ValidationError(f"لا يمكن تعديل قيد في حالة {je.status}")
 
+        # ── التحقق من الفترة المالية للتاريخ الجديد ──
+        await self._check_period(data.entry_date)
+
         # تحديث الهيدر
         je.description  = data.description
         je.entry_date   = data.entry_date
@@ -367,18 +373,24 @@ class AccountingService:
         return je
 
     async def _check_period(self, entry_date) -> None:
-        """التحقق من أن الفترة المالية موجودة ومفتوحة"""
+        """التحقق من أن السنة والفترة المالية موجودتان ومفتوحتان"""
         from sqlalchemy import text as _txt
         entry_date_str = str(entry_date)
 
         result = await self.db.execute(
             _txt("""
-                SELECT ap.status, ap.period_name, fy.status as fy_status, fy.year_name
+                SELECT
+                    ap.status       AS period_status,
+                    ap.period_name  AS period_name,
+                    fy.status       AS fy_status,
+                    fy.year_name    AS year_name
                 FROM accounting_periods ap
                 JOIN fiscal_years fy ON fy.id = ap.fiscal_year_id
                 WHERE ap.tenant_id = :tid
+                  AND fy.tenant_id = :tid
                   AND :edate BETWEEN ap.start_date AND ap.end_date
-                ORDER BY ap.start_date DESC LIMIT 1
+                ORDER BY ap.start_date DESC
+                LIMIT 1
             """),
             {"tid": str(self.user.tenant_id), "edate": entry_date_str}
         )
@@ -386,18 +398,22 @@ class AccountingService:
 
         if not row:
             raise ValidationError(
-                f"لا توجد فترة مالية مفتوحة للتاريخ {entry_date_str}. "
-                f"يرجى إنشاء السنة المالية أولاً من صفحة الفترات المالية."
+                f"لا توجد سنة/فترة مالية تغطي تاريخ القيد {entry_date_str}. "
+                "يرجى إنشاء السنة المالية والفترات أولاً من صفحة الفترات المالية."
             )
-        if row[0] == 'closed':
+
+        period_status = row[0]
+        period_name   = row[1]
+        fy_status     = row[2]
+        year_name     = row[3]
+
+        if fy_status != "open":
             raise ValidationError(
-                f"الفترة المالية '{row[1]}' مغلقة — "
-                f"لا يمكن إدخال أو ترحيل قيود على فترة مغلقة."
+                f"السنة المالية '{year_name}' ليست مفتوحة — لا يمكن حفظ أو ترحيل القيد."
             )
-        if row[2] == 'closed':
+        if period_status != "open":
             raise ValidationError(
-                f"السنة المالية '{row[3]}' مغلقة — "
-                f"لا يمكن إدخال قيود على سنة مالية مغلقة."
+                f"الفترة المالية '{period_name}' مغلقة — لا يمكن حفظ أو ترحيل القيد."
             )
 
     async def _get_display_name(self) -> str:
@@ -689,6 +705,9 @@ class AccountingService:
         if je.status not in ("draft", "rejected"):
             raise ValidationError(f"لا يمكن تعديل قيد في حالة {je.status}")
 
+        # ── التحقق من الفترة المالية للتاريخ الجديد ──
+        await self._check_period(data.entry_date)
+
         # تحديث الهيدر
         je.description  = data.description
         je.entry_date   = data.entry_date
@@ -744,18 +763,24 @@ class AccountingService:
         return je
 
     async def _check_period(self, entry_date) -> None:
-        """التحقق من أن الفترة المالية موجودة ومفتوحة"""
+        """التحقق من أن السنة والفترة المالية موجودتان ومفتوحتان"""
         from sqlalchemy import text as _txt
         entry_date_str = str(entry_date)
 
         result = await self.db.execute(
             _txt("""
-                SELECT ap.status, ap.period_name, fy.status as fy_status, fy.year_name
+                SELECT
+                    ap.status       AS period_status,
+                    ap.period_name  AS period_name,
+                    fy.status       AS fy_status,
+                    fy.year_name    AS year_name
                 FROM accounting_periods ap
                 JOIN fiscal_years fy ON fy.id = ap.fiscal_year_id
                 WHERE ap.tenant_id = :tid
+                  AND fy.tenant_id = :tid
                   AND :edate BETWEEN ap.start_date AND ap.end_date
-                ORDER BY ap.start_date DESC LIMIT 1
+                ORDER BY ap.start_date DESC
+                LIMIT 1
             """),
             {"tid": str(self.user.tenant_id), "edate": entry_date_str}
         )
@@ -763,18 +788,22 @@ class AccountingService:
 
         if not row:
             raise ValidationError(
-                f"لا توجد فترة مالية مفتوحة للتاريخ {entry_date_str}. "
-                f"يرجى إنشاء السنة المالية أولاً من صفحة الفترات المالية."
+                f"لا توجد سنة/فترة مالية تغطي تاريخ القيد {entry_date_str}. "
+                "يرجى إنشاء السنة المالية والفترات أولاً من صفحة الفترات المالية."
             )
-        if row[0] == 'closed':
+
+        period_status = row[0]
+        period_name   = row[1]
+        fy_status     = row[2]
+        year_name     = row[3]
+
+        if fy_status != "open":
             raise ValidationError(
-                f"الفترة المالية '{row[1]}' مغلقة — "
-                f"لا يمكن إدخال أو ترحيل قيود على فترة مغلقة."
+                f"السنة المالية '{year_name}' ليست مفتوحة — لا يمكن حفظ أو ترحيل القيد."
             )
-        if row[2] == 'closed':
+        if period_status != "open":
             raise ValidationError(
-                f"السنة المالية '{row[3]}' مغلقة — "
-                f"لا يمكن إدخال قيود على سنة مالية مغلقة."
+                f"الفترة المالية '{period_name}' مغلقة — لا يمكن حفظ أو ترحيل القيد."
             )
 
     async def _get_display_name(self) -> str:
