@@ -577,67 +577,7 @@ class AccountingService:
         if abs(total_dr - total_cr) > Decimal("0.001"):
             raise ValidationError(f"القيد غير متوازن — مدين: {total_dr} | دائن: {total_cr}")
 
-        # ── التحقق من الأبعاد ──────────────────────────────────────
-        try:
-            from sqlalchemy import select as _sel2
-            from app.modules.settings.models import Branch, CostCenter, Project
-            from app.modules.accounting.models import ChartOfAccount as _COA
-
-            for line in je.lines:
-                acct_r = (await self.db.execute(
-                    _sel2(_COA).where(_COA.tenant_id == self.user.tenant_id, _COA.code == line.account_code)
-                )).scalar_one_or_none()
-
-                dim_required = getattr(acct_r, 'dimension_required', False)
-                is_expense   = getattr(acct_r, 'account_type', '') == "expense"
-
-                if dim_required:
-                    branch_req = getattr(acct_r, 'dim_branch_required', False)
-                    cc_req     = getattr(acct_r, 'dim_cc_required', False)
-                    proj_req   = getattr(acct_r, 'dim_project_required', False)
-                    exp_req    = getattr(acct_r, 'dim_exp_class_required', False)
-
-                    if not any([branch_req, cc_req, proj_req, exp_req]):
-                        branch_req = cc_req = dim_required
-                        proj_req = False
-                        exp_req  = is_expense and dim_required
-
-                    if branch_req and not line.branch_code:
-                        raise ValidationError(f"الحساب '{line.account_code}' يتطلب تحديد الفرع")
-                    if cc_req and not line.cost_center:
-                        raise ValidationError(f"الحساب '{line.account_code}' يتطلب تحديد مركز التكلفة")
-                    if proj_req and not line.project_code:
-                        raise ValidationError(f"الحساب '{line.account_code}' يتطلب تحديد المشروع")
-                    if exp_req and not line.expense_classification_code:
-                        raise ValidationError(f"الحساب '{line.account_code}' يتطلب تحديد تصنيف المصروف")
-
-                if line.branch_code:
-                    br = (await self.db.execute(
-                        _sel2(Branch).where(Branch.tenant_id == self.user.tenant_id, Branch.code == line.branch_code)
-                    )).scalar_one_or_none()
-                    if br and not br.is_active:
-                        raise ValidationError(f"الفرع '{line.branch_code}' موقف")
-
-                if line.cost_center:
-                    cc = (await self.db.execute(
-                        _sel2(CostCenter).where(CostCenter.tenant_id == self.user.tenant_id, CostCenter.code == line.cost_center)
-                    )).scalar_one_or_none()
-                    if cc and not cc.is_active:
-                        raise ValidationError(f"مركز التكلفة '{line.cost_center}' موقف")
-
-                if line.project_code:
-                    proj = (await self.db.execute(
-                        _sel2(Project).where(Project.tenant_id == self.user.tenant_id, Project.code == line.project_code)
-                    )).scalar_one_or_none()
-                    if proj and not proj.is_active:
-                        raise ValidationError(f"المشروع '{line.project_code}' غير نشط")
-                    if proj and proj.status in ('completed', 'cancelled'):
-                        raise ValidationError(f"المشروع '{line.project_code}' في حالة {proj.status}")
-
-        except ValidationError:
-            raise
-        except Exception:
-            pass
+        # التحقق من الأبعاد يتم في create_draft_je
 
         # ── التحقق من الفترة المالية ──────────────────────────────
         await self._check_period(je.entry_date)
