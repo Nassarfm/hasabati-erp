@@ -632,19 +632,8 @@ class AccountingService:
         except Exception:
             pass
 
-        await self._lock_svc.guard(
-            entry_date=je.entry_date,
-            user_role=self.user.role,
-            force=force,
-        )
-
         # ── التحقق من الفترة المالية ──────────────────────────────
-        try:
-            await self._check_period(je.entry_date)
-        except ValidationError:
-            raise
-        except Exception:
-            pass
+        await self._check_period(je.entry_date)
 
         codes = list({l.account_code for l in data.lines})
         from sqlalchemy import select as _sel2
@@ -960,19 +949,8 @@ class AccountingService:
         if abs(total_dr - total_cr) > Decimal("0.001"):
             raise ValidationError(f"القيد غير متوازن — مدين: {total_dr} | دائن: {total_cr}")
 
-        await self._lock_svc.guard(
-            entry_date=je.entry_date,
-            user_role=self.user.role,
-            force=force,
-        )
-
         # ── التحقق من الفترة المالية ──────────────────────────────
-        try:
-            await self._check_period(je.entry_date)
-        except ValidationError:
-            raise
-        except Exception:
-            pass
+        await self._check_period(je.entry_date)
 
         codes = list({line.account_code for line in je.lines})
         result = await self.db.execute(
