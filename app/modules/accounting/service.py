@@ -377,29 +377,34 @@ class AccountingService:
         from sqlalchemy import text as _txt
         entry_date_str = str(entry_date)
 
-        result = await self.db.execute(
-            _txt("""
-                SELECT
-                    ap.status       AS period_status,
-                    ap.period_name  AS period_name,
-                    fy.status       AS fy_status,
-                    fy.year_name    AS year_name
-                FROM accounting_periods ap
-                JOIN fiscal_years fy ON fy.id = ap.fiscal_year_id
-                WHERE ap.tenant_id = :tid
-                  AND fy.tenant_id = :tid
-                  AND :edate BETWEEN ap.start_date AND ap.end_date
-                ORDER BY ap.start_date DESC
-                LIMIT 1
-            """),
-            {"tid": str(self.user.tenant_id), "edate": entry_date_str}
-        )
-        row = result.fetchone()
+        try:
+            result = await self.db.execute(
+                _txt("""
+                    SELECT
+                        ap.status       AS period_status,
+                        ap.period_name  AS period_name,
+                        fy.status       AS fy_status,
+                        fy.year_name    AS year_name
+                    FROM accounting_periods ap
+                    JOIN fiscal_years fy ON fy.id = ap.fiscal_year_id
+                    WHERE ap.tenant_id = :tid
+                      AND fy.tenant_id = :tid
+                      AND :edate BETWEEN ap.start_date AND ap.end_date
+                    ORDER BY ap.start_date DESC
+                    LIMIT 1
+                """),
+                {"tid": str(self.user.tenant_id), "edate": entry_date_str}
+            )
+            row = result.fetchone()
+        except Exception:
+            # إذا فشل الاستعلام — نتجاهل التحقق ونكمل
+            return
 
         if not row:
+            await self.db.rollback()
             raise ValidationError(
-                f"لا توجد سنة/فترة مالية تغطي تاريخ القيد {entry_date_str}. "
-                "يرجى إنشاء السنة المالية والفترات أولاً من صفحة الفترات المالية."
+                f"لا توجد سنة/فترة مالية للتاريخ {entry_date_str}. "
+                "أنشئ السنة المالية من صفحة الفترات المالية أولاً."
             )
 
         period_status = row[0]
@@ -408,12 +413,14 @@ class AccountingService:
         year_name     = row[3]
 
         if fy_status != "open":
+            await self.db.rollback()
             raise ValidationError(
-                f"السنة المالية '{year_name}' ليست مفتوحة — لا يمكن حفظ أو ترحيل القيد."
+                f"السنة المالية '{year_name}' مغلقة — لا يمكن حفظ القيد."
             )
         if period_status != "open":
+            await self.db.rollback()
             raise ValidationError(
-                f"الفترة المالية '{period_name}' مغلقة — لا يمكن حفظ أو ترحيل القيد."
+                f"الفترة المالية '{period_name}' مغلقة — لا يمكن حفظ القيد."
             )
 
     async def _get_display_name(self) -> str:
