@@ -2,24 +2,7 @@
 app/services/posting/engine.py
 ══════════════════════════════════════════════════════════
 PostingEngine — The most critical service in the system.
-
 Every journal entry in the entire ERP passes through here.
-No module is allowed to write to journal_entries directly.
-
-Guarantees:
-  1. Double-entry balance (DR == CR, tolerance 0.005)
-  2. Fiscal period not locked (hard block)
-  3. All accounts exist and are postable
-  4. Tenant isolation (all lines same tenant)
-  5. Idempotency (same key → same result, no duplicate)
-  6. Atomic transaction (all-or-nothing)
-  7. Balance update (account_balances UPSERT)
-  8. Immutable audit trail (accounting_audit_log INSERT)
-  9. EventBus notification (je.posted event)
-
-Flow:
-  validate → BEGIN TXN → insert JE → insert lines
-  → upsert balances → insert audit → COMMIT → emit event
 ══════════════════════════════════════════════════════════
 """
 from __future__ import annotations
@@ -57,7 +40,6 @@ from app.services.numbering.series_service import NumberSeriesService
 
 logger = structlog.get_logger(__name__)
 
-# Tolerance for floating-point rounding in DR/CR balance check
 _BALANCE_TOLERANCE = Decimal("0.005")
 
 
@@ -66,7 +48,6 @@ _BALANCE_TOLERANCE = Decimal("0.005")
 # ══════════════════════════════════════════════════════════
 @dataclass
 class PostingLine:
-    """One line in a posting request."""
     account_code: str
     description: str
     debit: Decimal = Decimal("0")
@@ -78,40 +59,29 @@ class PostingLine:
 
 @dataclass
 class PostingRequest:
-    """
-    Input to PostingEngine.post().
-    Built by each module service (sales, purchases, etc.)
-    """
     tenant_id: uuid.UUID
-    je_type: str                    # GJE | SJE | PJE | PIE | PAY | RCV | PRV | DEP | ADJ
+    je_type: str
     description: str
     entry_date: date
     lines: List[PostingLine]
     created_by_id: Optional[uuid.UUID] = None
     created_by_email: Optional[str] = None
-
-    # Source document (traceability)
     source_module: Optional[str] = None
     source_doc_type: Optional[str] = None
     source_doc_id: Optional[uuid.UUID] = None
     source_doc_number: Optional[str] = None
-
-    # Optional
     reference: Optional[str] = None
     branch_code: Optional[str] = None
     cost_center: Optional[str] = None
     notes: Optional[str] = None
     idempotency_key: Optional[str] = None
     request_id: Optional[str] = None
-
-    # Fiscal lock override (admin only)
     force_post: bool = False
     user_role: str = "viewer"
 
 
 @dataclass
 class PostingResult:
-    """Output from PostingEngine.post()"""
     je_id: uuid.UUID
     je_serial: str
     je_type: str
@@ -140,25 +110,15 @@ class PostingResult:
 # PostingEngine
 # ══════════════════════════════════════════════════════════
 class PostingEngine:
-    """
-    The single gateway for all accounting postings.
-    Instantiated per-request with the DB session and tenant.
-    """
 
-    def __init__(
-        self,
-        db: AsyncSession,
-        tenant_id: uuid.UUID,
-    ) -> None:
+    def __init__(self, db: AsyncSession, tenant_id: uuid.UUID) -> None:
         self.db = db
         self.tenant_id = tenant_id
-
-        # Repository layer
         self._je_repo    = JournalEntryRepository(db, tenant_id)
         self._bal_repo   = AccountBalanceRepository(db, tenant_id)
         self._coa_repo   = COARepository(db, tenant_id)
         self._audit_repo = AccountingAuditRepository(db, tenant_id)
-        self._lock_repo  = None  # injected via set_lock_repo()
+        self._lock_repo  = None
         self._num_svc    = NumberSeriesService(db, tenant_id)
 
     def set_lock_repo(self, repo) -> None:
@@ -166,9 +126,53 @@ class PostingEngine:
         self._lock_repo = repo
         self._lock_svc = FiscalLockService(repo)
 
-    # ── Validation ────────────────────────────────────────
+    # ── Period validation (new system) ────────────────────
+    async def _check_accounting_period(self, entry_date: date) -> None:
+        """
+        التحقق من أن السنة والفترة المالية موجودتان ومفتوحتان.
+        يستخدم accounting_periods + fiscal_years (النظام الجديد).
+        لا يتجاهل الأخطاء — أي فشل يوقف الترحيل.
+        """
+        from sqlalchemy import text as _txt
+        entry_date_str = str(entry_date)
+
+        result = await self.db.execute(
+            _txt("""
+                SELECT
+                    ap.status      AS period_status,
+                    ap.period_name AS period_name,
+                    fy.status      AS fy_status,
+                    fy.year_name   AS year_name
+                FROM accounting_periods ap
+                JOIN fiscal_years fy ON fy.id = ap.fiscal_year_id
+                WHERE ap.tenant_id = :tid
+                  AND fy.tenant_id = :tid
+                  AND :edate BETWEEN ap.start_date AND ap.end_date
+                ORDER BY ap.start_date DESC
+                LIMIT 1
+            """),
+            {"tid": str(self.tenant_id), "edate": entry_date_str}
+        )
+        row = result.fetchone()
+
+        if not row:
+            raise ValidationError(
+                f"لا توجد سنة/فترة مالية للتاريخ {entry_date_str}. "
+                "أنشئ السنة المالية من صفحة الفترات المالية أولاً."
+            )
+
+        if row.fy_status != "open":
+            raise ValidationError(
+                f"السنة المالية '{row.year_name}' مغلقة — لا يمكن الترحيل."
+            )
+
+        if row.period_status != "open":
+            raise ValidationError(
+                f"الفترة المالية '{row.period_name}' مغلقة — لا يمكن الترحيل."
+            )
+
+    # ── Validation helpers ────────────────────────────────
     def _validate_balance(self, lines: List[PostingLine]) -> None:
-        """DR must equal CR within tolerance."""
         total_dr = sum(l.debit  for l in lines)
         total_cr = sum(l.credit for l in lines)
         if abs(total_dr - total_cr) > _BALANCE_TOLERANCE:
@@ -176,36 +180,20 @@ class PostingEngine:
 
     def _validate_lines_not_empty(self, lines: List[PostingLine]) -> None:
         if len(lines) < 2:
-            raise ValidationError(
-                "القيد يجب أن يحتوي على سطرين على الأقل (مدين ودائن)"
-            )
+            raise ValidationError("القيد يجب أن يحتوي على سطرين على الأقل")
 
-    async def _validate_accounts(
-        self, lines: List[PostingLine]
-    ) -> dict[str, object]:
-        """All account codes must exist and be postable."""
+    async def _validate_accounts(self, lines: List[PostingLine]) -> dict:
         codes = list({l.account_code for l in lines})
         accounts = await self._coa_repo.bulk_get_by_codes(codes)
-
         missing = [c for c in codes if c not in accounts]
         if missing:
-            raise ValidationError(
-                f"الحسابات التالية غير موجودة أو غير نشطة: {', '.join(missing)}"
-            )
-
-        not_postable = [
-            c for c, acc in accounts.items()
-            if not acc.postable  # type: ignore[attr-defined]
-        ]
+            raise ValidationError(f"الحسابات التالية غير موجودة: {', '.join(missing)}")
+        not_postable = [c for c, acc in accounts.items() if not acc.postable]
         if not_postable:
             raise AccountNotPostableError(not_postable[0])
-
         return accounts
 
-    async def _check_idempotency(
-        self, key: Optional[str]
-    ) -> Optional[PostingResult]:
-        """Return existing result if same key was used before."""
+    async def _check_idempotency(self, key: Optional[str]) -> Optional[PostingResult]:
         if not key:
             return None
         existing = await self._je_repo.get_by_idempotency_key(key)
@@ -226,10 +214,6 @@ class PostingEngine:
 
     # ── Main entry point ──────────────────────────────────
     async def post(self, request: PostingRequest) -> PostingResult:
-        """
-        Execute a full journal entry posting.
-        This is the ONLY path to write to journal_entries.
-        """
         logger.info(
             "posting_start",
             je_type=request.je_type,
@@ -238,7 +222,7 @@ class PostingEngine:
             lines=len(request.lines),
         )
 
-        # ── 1. Idempotency check ──────────────────────────
+        # ── 1. Idempotency ────────────────────────────────
         cached = await self._check_idempotency(request.idempotency_key)
         if cached:
             return cached
@@ -247,21 +231,18 @@ class PostingEngine:
         self._validate_lines_not_empty(request.lines)
         self._validate_balance(request.lines)
 
-        # ── 3. Validate accounts (skipped if demo tenant) ─
+        # ── 3. Validate accounts ──────────────────────────
         account_map = {}
         try:
             account_map = await self._validate_accounts(request.lines)
         except Exception:
-            # In demo mode, COA may not exist in DB — continue
             logger.warning("posting_coa_validation_skipped")
 
-        # ── 4. Fiscal lock check ──────────────────────────
-        if self._lock_repo is not None:
-            await self._lock_svc.guard(
-                entry_date=request.entry_date,
-                user_role=request.user_role,
-                force=request.force_post,
-            )
+        # ── 4. Period check (NEW SYSTEM) ──────────────────
+        # هذا هو التحقق الرسمي من الفترة المالية
+        # يستخدم accounting_periods + fiscal_years
+        # لا يُتجاهل أي خطأ — أي فشل يوقف الترحيل
+        await self._check_accounting_period(request.entry_date)
 
         # ── 5. Generate serial ────────────────────────────
         serial = await self._num_svc.next_je(request.je_type)
@@ -274,7 +255,6 @@ class PostingEngine:
         # ── 7. Atomic transaction ─────────────────────────
         async with atomic_transaction(self.db, label=f"post_{serial}"):
 
-            # Create JE header
             je = JournalEntry(
                 tenant_id=self.tenant_id,
                 serial=serial,
@@ -301,9 +281,8 @@ class PostingEngine:
                 created_by=request.created_by_email,
             )
             self.db.add(je)
-            await self.db.flush()  # get je.id
+            await self.db.flush()
 
-            # Create JE lines
             for idx, line in enumerate(request.lines):
                 je_line = JournalEntryLine(
                     tenant_id=self.tenant_id,
@@ -324,10 +303,9 @@ class PostingEngine:
                 )
                 self.db.add(je_line)
 
-            # Update account balances
             for line in request.lines:
                 acc = account_map.get(line.account_code)
-                nature = acc.account_nature if acc else "debit"  # type: ignore
+                nature = acc.account_nature if acc else "debit"
                 await self._bal_repo.upsert_balance(
                     account_code=line.account_code,
                     fiscal_year=request.entry_date.year,
@@ -337,7 +315,6 @@ class PostingEngine:
                     account_nature=nature,
                 )
 
-            # Write audit log
             await self._audit_repo.log(
                 action="JE_POSTED",
                 user_id=request.created_by_id,
@@ -354,7 +331,7 @@ class PostingEngine:
                 request_id=request.request_id,
             )
 
-        # ── 8. Emit event (outside transaction) ──────────
+        # ── 8. Emit event ─────────────────────────────────
         result = PostingResult(
             je_id=je.id,
             je_serial=serial,
@@ -374,12 +351,8 @@ class PostingEngine:
             source_module=request.source_module or "accounting",
         )
 
-        logger.info(
-            "posting_success",
-            serial=serial,
-            total_dr=float(total_dr),
-            total_cr=float(total_cr),
-        )
+        logger.info("posting_success", serial=serial,
+                    total_dr=float(total_dr), total_cr=float(total_cr))
         return result
 
     # ── Reversal ──────────────────────────────────────────
@@ -392,11 +365,6 @@ class PostingEngine:
         reversed_by_email: Optional[str],
         user_role: str = "viewer",
     ) -> PostingResult:
-        """
-        Reverse a posted journal entry.
-        Creates a new JE with flipped DR/CR on the same accounts.
-        Marks original JE as REVERSED.
-        """
         original = await self._je_repo.get_with_lines(je_id)
         if original is None:
             raise NotFoundError("القيد", je_id)
@@ -407,7 +375,6 @@ class PostingEngine:
             from app.core.exceptions import ReversalError
             raise ReversalError(f"القيد {original.serial} معكوس مسبقاً")
 
-        # Build reversed lines (flip DR/CR)
         reversed_lines = [
             PostingLine(
                 account_code=line.account_code,
@@ -436,7 +403,6 @@ class PostingEngine:
 
         result = await self.post(rev_request)
 
-        # Mark original as REVERSED
         async with atomic_transaction(self.db, label=f"reverse_{original.serial}"):
             original.status = JEStatus.REVERSED
             original.reversed_by_je_id = result.je_id
@@ -452,9 +418,6 @@ class PostingEngine:
                 notes=reason,
             )
 
-        logger.info(
-            "posting_reversed",
-            original=original.serial,
-            reversal=result.je_serial,
-        )
+        logger.info("posting_reversed",
+                    original=original.serial, reversal=result.je_serial)
         return result
