@@ -548,74 +548,91 @@ class AccountingService:
         return je
 
     async def post_je(self, je_id: uuid.UUID, *, force: bool = False) -> JournalEntry:
+        """
+        ترحيل القيد المحاسبي — يعمل على القيد الموجود نفسه.
+        لا ينشئ قيداً جديداً — فقط يغير الحالة ويحدث الأرصدة.
+        """
         self.user.require("can_post_je")
-
         from datetime import datetime, timezone
+        from sqlalchemy import text as _txt2
 
+        # ── 1. جلب القيد مع أسطره ────────────────────────────────
         je = await self._je_repo.get_with_lines(je_id)
         if not je:
             raise NotFoundError("القيد", je_id)
 
+        # ── 2. التحقق من الحالة ───────────────────────────────────
         if je.status not in (JEStatus.DRAFT, "approved", "draft"):
             raise InvalidStateError("القيد", je.status, ["draft", "approved"])
 
+        # ── 3. التحقق من الأسطر والتوازن ─────────────────────────
         if not je.lines or len(je.lines) < 2:
             raise ValidationError("القيد يجب أن يحتوي على سطرين على الأقل")
 
-        total_dr = sum((l.debit or Decimal("0")) for l in je.lines)
+        total_dr = sum((l.debit  or Decimal("0")) for l in je.lines)
         total_cr = sum((l.credit or Decimal("0")) for l in je.lines)
 
         if abs(total_dr - total_cr) > Decimal("0.001"):
-            raise ValidationError(f"القيد غير متوازن — مدين: {total_dr} | دائن: {total_cr}")
+            raise ValidationError(
+                f"القيد غير متوازن — مدين: {total_dr} | دائن: {total_cr}"
+            )
 
-        # ── التحقق من الفترة المالية (صارم — لا يُتجاهل) ──────────
+        # ── 4. التحقق من الفترة المالية (صارم) ───────────────────
         await self._check_period(je.entry_date)
 
-        # ── الترحيل عبر PostingEngine ────────────────────────────
-        from app.services.posting.engine import PostingLine, PostingRequest
-        posting_lines = [
-            PostingLine(
-                account_code=l.account_code,
-                description=l.description,
-                debit=l.debit or Decimal("0"),
-                credit=l.credit or Decimal("0"),
-                branch_code=l.branch_code,
-                cost_center=l.cost_center,
-                project_code=l.project_code,
-            )
-            for l in je.lines
-        ]
-
-        request = PostingRequest(
-            tenant_id=self.user.tenant_id,
-            je_type=je.je_type,
-            description=je.description,
-            entry_date=je.entry_date,
-            lines=posting_lines,
-            created_by_id=self.user.user_id,
-            created_by_email=self.user.email,
-            source_module=je.source_module,
-            source_doc_type=je.source_doc_type,
-            source_doc_id=je.source_doc_id,
-            source_doc_number=je.source_doc_number,
-            reference=je.reference,
-            notes=je.notes,
-            force_post=force,
-            user_role=self.user.role,
-        )
-
-        # Engine يتحقق من الفترة مرة أخرى + ينفذ الترحيل الذري
-        result = await self._engine.post(request)
-
-        # تحديث حالة القيد الأصلي
+        # ── 5. ترحيل القيد الموجود — تحديث الحالة فقط ───────────
         now = datetime.now(timezone.utc)
-        je.status     = JEStatus.POSTED
-        je.serial     = result.je_serial
-        je.posted_at  = now
-        je.posted_by  = self.user.email
+        je.status      = JEStatus.POSTED
+        je.posting_date = je.entry_date
+        je.posted_at   = now
+        je.posted_by   = self.user.email
         await self.db.flush()
 
-        # سجل الحدث
+        # ── 6. تحديث أرصدة الحسابات ──────────────────────────────
+        try:
+            from app.modules.accounting.models import ChartOfAccount as _COA4
+            from sqlalchemy import select as _sel4
+            codes = list({l.account_code for l in je.lines})
+            _res = await self.db.execute(
+                _sel4(_COA4).where(
+                    _COA4.tenant_id == self.user.tenant_id,
+                    _COA4.code.in_(codes)
+                )
+            )
+            acct_map = {a.code: a for a in _res.scalars().all()}
+
+            for line in je.lines:
+                acc = acct_map.get(line.account_code)
+                nature = acc.account_nature if acc else "debit"
+                await self._bal_repo.upsert_balance(
+                    account_code=line.account_code,
+                    fiscal_year=je.entry_date.year,
+                    fiscal_month=je.entry_date.month,
+                    delta_debit=line.debit  or Decimal("0"),
+                    delta_credit=line.credit or Decimal("0"),
+                    account_nature=nature,
+                )
+        except Exception as e:
+            logger.warning("balance_update_failed", error=str(e))
+
+        # ── 7. سجل التدقيق ────────────────────────────────────────
+        try:
+            await self._audit_repo.log(
+                action="JE_POSTED",
+                user_id=self.user.user_id,
+                user_email=self.user.email,
+                je_id=je.id,
+                je_serial=je.serial,
+                je_type=je.je_type,
+                fiscal_year=je.entry_date.year,
+                fiscal_month=je.entry_date.month,
+                total_debit=total_dr,
+                total_credit=total_cr,
+            )
+        except Exception:
+            pass
+
+        # ── 8. سجل الأحداث ───────────────────────────────────────
         try:
             from app.modules.accounting.je_activity_router import log_activity
             dn = await self._get_display_name()
@@ -628,13 +645,13 @@ class AccountingService:
         except Exception:
             pass
 
-        # إشعار الترحيل
+        # ── 9. إشعار ─────────────────────────────────────────────
         try:
             from app.modules.notifications.router import create_notification
             await create_notification(
                 self.db, self.user.tenant_id,
                 title=f"🚀 تم ترحيل القيد — {je.serial}",
-                message=f"تم ترحيل القيد {je.serial} بواسطة {self.user.email.split('@')[0]}",
+                message=f"رحَّل {self.user.email.split('@')[0]} القيد {je.serial}.",
                 notif_type="posted",
                 je_id=je.id, je_serial=je.serial,
                 created_by=self.user.email,
