@@ -551,8 +551,6 @@ class AccountingService:
         self.user.require("can_post_je")
 
         from datetime import datetime, timezone
-        from sqlalchemy import select
-        from app.core.exceptions import AccountNotPostableError
 
         je = await self._je_repo.get_with_lines(je_id)
         if not je:
@@ -570,10 +568,81 @@ class AccountingService:
         if abs(total_dr - total_cr) > Decimal("0.001"):
             raise ValidationError(f"القيد غير متوازن — مدين: {total_dr} | دائن: {total_cr}")
 
-        # التحقق من الأبعاد يتم في create_draft_je
-
-        # ── التحقق من الفترة المالية ──────────────────────────────
+        # ── التحقق من الفترة المالية (صارم — لا يُتجاهل) ──────────
         await self._check_period(je.entry_date)
+
+        # ── الترحيل عبر PostingEngine ────────────────────────────
+        from app.services.posting.engine import PostingLine, PostingRequest
+        posting_lines = [
+            PostingLine(
+                account_code=l.account_code,
+                description=l.description,
+                debit=l.debit or Decimal("0"),
+                credit=l.credit or Decimal("0"),
+                branch_code=l.branch_code,
+                cost_center=l.cost_center,
+                project_code=l.project_code,
+            )
+            for l in je.lines
+        ]
+
+        request = PostingRequest(
+            tenant_id=self.user.tenant_id,
+            je_type=je.je_type,
+            description=je.description,
+            entry_date=je.entry_date,
+            lines=posting_lines,
+            created_by_id=self.user.user_id,
+            created_by_email=self.user.email,
+            source_module=je.source_module,
+            source_doc_type=je.source_doc_type,
+            source_doc_id=je.source_doc_id,
+            source_doc_number=je.source_doc_number,
+            reference=je.reference,
+            notes=je.notes,
+            force_post=force,
+            user_role=self.user.role,
+        )
+
+        # Engine يتحقق من الفترة مرة أخرى + ينفذ الترحيل الذري
+        result = await self._engine.post(request)
+
+        # تحديث حالة القيد الأصلي
+        now = datetime.now(timezone.utc)
+        je.status     = JEStatus.POSTED
+        je.serial     = result.je_serial
+        je.posted_at  = now
+        je.posted_by  = self.user.email
+        await self.db.flush()
+
+        # سجل الحدث
+        try:
+            from app.modules.accounting.je_activity_router import log_activity
+            dn = await self._get_display_name()
+            await log_activity(
+                self.db, self.user.tenant_id, je.id, je.serial,
+                action="posted", action_ar="ترحيل القيد",
+                performed_by=self.user.email, display_name=dn,
+                metadata={"total_debit": float(total_dr), "total_credit": float(total_cr)}
+            )
+        except Exception:
+            pass
+
+        # إشعار الترحيل
+        try:
+            from app.modules.notifications.router import create_notification
+            await create_notification(
+                self.db, self.user.tenant_id,
+                title=f"🚀 تم ترحيل القيد — {je.serial}",
+                message=f"تم ترحيل القيد {je.serial} بواسطة {self.user.email.split('@')[0]}",
+                notif_type="posted",
+                je_id=je.id, je_serial=je.serial,
+                created_by=self.user.email,
+            )
+        except Exception:
+            pass
+
+        return je
 
     async def reverse_je(self, je_id: uuid.UUID, data: ReverseJERequest) -> dict:
         self.user.require("can_reverse_je")

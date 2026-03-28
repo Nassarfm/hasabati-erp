@@ -235,7 +235,10 @@ class PostingEngine:
         account_map = {}
         try:
             account_map = await self._validate_accounts(request.lines)
+        except (ValidationError, AccountNotPostableError):
+            raise  # أخطاء المحاسبة لا تُتجاهل أبداً
         except Exception:
+            # فقط إذا فشل الاتصال بقاعدة البيانات — نكمل في وضع demo
             logger.warning("posting_coa_validation_skipped")
 
         # ── 4. Period check (NEW SYSTEM) ──────────────────
