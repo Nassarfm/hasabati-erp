@@ -134,7 +134,14 @@ class PostingEngine:
         لا يتجاهل الأخطاء — أي فشل يوقف الترحيل.
         """
         from sqlalchemy import text as _txt
-        entry_date_str = str(entry_date)
+        from datetime import date as _date, datetime as _datetime
+        # تحويل التاريخ إلى date object — asyncpg لا يقبل string
+        if isinstance(entry_date, str):
+            entry_date_obj = _date.fromisoformat(entry_date[:10])
+        elif hasattr(entry_date, 'date') and callable(entry_date.date):
+            entry_date_obj = entry_date.date()
+        else:
+            entry_date_obj = entry_date
 
         result = await self.db.execute(
             _txt("""
@@ -151,7 +158,7 @@ class PostingEngine:
                 ORDER BY ap.start_date DESC
                 LIMIT 1
             """),
-            {"tid": str(self.tenant_id), "edate": entry_date_str}
+            {"tid": str(self.tenant_id), "edate": entry_date_obj}
         )
         row = result.fetchone()
 

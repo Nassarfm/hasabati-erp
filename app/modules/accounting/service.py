@@ -375,7 +375,12 @@ class AccountingService:
     async def _check_period(self, entry_date) -> None:
         """التحقق من أن السنة والفترة المالية موجودتان ومفتوحتان"""
         from sqlalchemy import text as _txt
-        entry_date_str = str(entry_date)
+        from datetime import date as _date
+        # تحويل التاريخ إلى date object لـ asyncpg
+        if isinstance(entry_date, str):
+            entry_date_obj = _date.fromisoformat(entry_date)
+        else:
+            entry_date_obj = entry_date
 
         result = await self.db.execute(
             _txt("""
@@ -392,13 +397,13 @@ class AccountingService:
                 ORDER BY ap.start_date DESC
                 LIMIT 1
             """),
-            {"tid": str(self.user.tenant_id), "edate": entry_date_str}
+            {"tid": str(self.user.tenant_id), "edate": entry_date_obj}
         )
         row = result.fetchone()
 
         if not row:
             raise ValidationError(
-                f"لا توجد سنة/فترة مالية للتاريخ {entry_date_str}. "
+                f"لا توجد سنة/فترة مالية للتاريخ {entry_date_obj}. "
                 "أنشئ السنة المالية من صفحة الفترات المالية أولاً."
             )
 
