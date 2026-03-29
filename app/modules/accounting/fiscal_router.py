@@ -220,6 +220,33 @@ async def list_periods(fy_id: uuid.UUID, deps=Depends(_deps)):
     } for r in rows])
 
 
+@router.get("/current-period")
+async def get_current_period(entry_date: date, deps=Depends(_deps)):
+    """جلب الفترة المناسبة لتاريخ معين"""
+    db, user = deps
+    result = await db.execute(
+        text("""
+            SELECT ap.id, ap.period_name, ap.status, ap.period_number,
+                   fy.year_name
+            FROM accounting_periods ap
+            JOIN fiscal_years fy ON fy.id = ap.fiscal_year_id
+            WHERE ap.tenant_id = :tid
+              AND :edate BETWEEN ap.start_date AND ap.end_date
+            ORDER BY ap.start_date DESC
+            LIMIT 1
+        """),
+        {"tid": str(user.tenant_id), "edate": entry_date}  # date object — asyncpg handles correctly
+    )
+    row = result.fetchone()
+    if not row:
+        return ok(data=None, message="لا توجد فترة مالية لهذا التاريخ")
+    return ok(data={
+        "id": str(row[0]), "period_name": row[1],
+        "status": row[2], "period_number": row[3],
+        "year_name": row[4],
+    })
+
+
 @router.post("/periods/{period_id}/close")
 async def close_period(period_id: uuid.UUID, body: PeriodAction, deps=Depends(_deps)):
     db, user = deps
@@ -300,29 +327,3 @@ async def period_audit(period_id: uuid.UUID, deps=Depends(_deps)):
         "created_at": str(r[4])
     } for r in rows])
 
-
-@router.get("/current-period")
-async def get_current_period(entry_date: str, deps=Depends(_deps)):
-    """جلب الفترة المناسبة لتاريخ معين"""
-    db, user = deps
-    result = await db.execute(
-        text("""
-            SELECT ap.id, ap.period_name, ap.status, ap.period_number,
-                   fy.year_name
-            FROM accounting_periods ap
-            JOIN fiscal_years fy ON fy.id = ap.fiscal_year_id
-            WHERE ap.tenant_id = :tid
-              AND :edate BETWEEN ap.start_date AND ap.end_date
-            ORDER BY ap.start_date DESC
-            LIMIT 1
-        """),
-        {"tid": str(user.tenant_id), "edate": entry_date}
-    )
-    row = result.fetchone()
-    if not row:
-        return ok(data=None, message="لا توجد فترة مالية لهذا التاريخ")
-    return ok(data={
-        "id": str(row[0]), "period_name": row[1],
-        "status": row[2], "period_number": row[3],
-        "year_name": row[4],
-    })
