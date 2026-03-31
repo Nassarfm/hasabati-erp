@@ -5,7 +5,6 @@ API v1 router — aggregates all module routers.
 ══════════════════════════════════════════════════════════
 """
 from fastapi import APIRouter
-
 from app.api.v1 import health
 
 v1_router = APIRouter()
@@ -16,12 +15,19 @@ v1_router.include_router(health.router, tags=["النظام"])
 # ── Accounting (Module 1) ─────────────────────────────
 from app.modules.accounting.router import router as accounting_router
 v1_router.include_router(accounting_router)
+
 from app.modules.accounting.je_attachments_router import router as je_att_router
 v1_router.include_router(je_att_router)
+
 from app.modules.accounting.je_activity_router import router as je_activity_router
 v1_router.include_router(je_activity_router)
+
 from app.modules.accounting.fiscal_router import router as fiscal_router
 v1_router.include_router(fiscal_router)
+
+# ── AI ────────────────────────────────────────────────
+from app.api.v1.ai_narrative import router as ai_router
+v1_router.include_router(ai_router)
 
 # ── Notifications ────────────────────────────────────
 from app.modules.notifications.router import router as notifications_router
