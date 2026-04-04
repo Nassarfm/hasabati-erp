@@ -294,11 +294,17 @@ async def get_recurring_entry(
             RecurringEntry.id == entry_id,
             RecurringEntry.tenant_id == user.tenant_id,
         )
-        .options(selectinload(RecurringEntry.instances))
     )
     entry = result.scalar_one_or_none()
     if not entry:
         raise HTTPException(404, "القيد المتكرر غير موجود")
+    # جلب الأقساط بـ query منفصل
+    inst_result = await db.execute(
+        select(RecurringEntryInstance)
+        .where(RecurringEntryInstance.recurring_entry_id == entry_id)
+        .order_by(RecurringEntryInstance.installment_number)
+    )
+    instances = inst_result.scalars().all()
     return ok(data={
         "id":                      str(entry.id),
         "code":                    entry.code,
@@ -330,7 +336,7 @@ async def get_recurring_entry(
             "posted_at":            str(i.posted_at) if i.posted_at else None,
             "posted_by":            i.posted_by,
             "note":                 i.note,
-        } for i in sorted(entry.instances, key=lambda x: x.installment_number)],
+        } for i in instances],
     })
 
 
