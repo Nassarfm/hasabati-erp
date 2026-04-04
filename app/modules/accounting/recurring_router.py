@@ -403,14 +403,14 @@ async def post_pending_instances(
                     "expense_classification_name":lt.get("expense_classification_name"),
                 })
 
-            from app.modules.accounting.schemas import JournalEntryCreate, JournalEntryLineCreate
+            from app.modules.accounting.schemas import JournalEntryCreate, JELineCreate
 
             je_payload = JournalEntryCreate(
                 je_type=entry.je_type,
                 entry_date=inst.scheduled_date,
                 description=f"{entry.name} — قسط {inst.installment_number}/{entry.total_installments}",
                 reference=entry.code,
-                lines=[JournalEntryLineCreate(**l) for l in lines_data],
+                lines=[JELineCreate(**l) for l in lines_data],
             )
 
             # إنشاء وترحيل مباشر
