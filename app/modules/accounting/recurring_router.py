@@ -414,8 +414,8 @@ async def post_pending_instances(
             )
 
             # إنشاء وترحيل مباشر
-            je = await svc.create_journal_entry(je_payload)
-            await svc.post_journal_entry(je.id)
+            je = await svc.create_draft_je(je_payload)
+            await svc.post_je(je.id)
 
             # تحديث القسط
             inst.status               = "posted"
