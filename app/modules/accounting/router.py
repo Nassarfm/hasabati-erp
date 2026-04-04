@@ -1,38 +1,56 @@
 """
 app/modules/accounting/router.py
 ══════════════════════════════════════════════════════════
-Accounting Module API — 17 endpoints
+Accounting Module API
 
 Chart of Accounts:
-  GET    /accounting/coa              قائمة الحسابات
-  POST   /accounting/coa              إنشاء حساب
-  GET    /accounting/coa/{id}         تفاصيل حساب
-  PUT    /accounting/coa/{id}         تعديل حساب
+  GET    /accounting/coa
+  POST   /accounting/coa
+  GET    /accounting/coa/{id}
+  PUT    /accounting/coa/{id}
+  DELETE /accounting/coa/reset
+  POST   /accounting/coa/import
+  GET    /accounting/coa/template
+  POST   /accounting/coa/seed
 
 Journal Entries:
-  POST   /accounting/je               إنشاء قيد (draft)
-  GET    /accounting/je               قائمة القيود
-  GET    /accounting/je/{id}          تفاصيل قيد
-  POST   /accounting/je/{id}/post     ترحيل قيد
-  POST   /accounting/je/{id}/reverse  عكس قيد
+  POST   /accounting/je
+  GET    /accounting/je
+  GET    /accounting/je/{id}
+  PUT    /accounting/je/{id}
+  POST   /accounting/je/{id}/submit
+  POST   /accounting/je/{id}/approve
+  POST   /accounting/je/{id}/reject
+  POST   /accounting/je/{id}/post
+  POST   /accounting/je/{id}/reverse
+
+Recurring Entries:
+  POST   /accounting/recurring/preview
+  POST   /accounting/recurring
+  GET    /accounting/recurring
+  GET    /accounting/recurring/{id}
+  POST   /accounting/recurring/{id}/post-pending
+  POST   /accounting/recurring/instances/{id}/skip
+  PATCH  /accounting/recurring/{id}/status
+  DELETE /accounting/recurring/{id}
 
 Fiscal Periods:
-  GET    /accounting/fiscal-periods   قائمة الفترات
-  GET    /accounting/fiscal-locks     قائمة الأقفال
-  POST   /accounting/fiscal-locks     قفل فترة
-  DELETE /accounting/fiscal-locks/{id} فك قفل
+  GET    /accounting/fiscal-locks
+  POST   /accounting/fiscal-locks
+  DELETE /accounting/fiscal-locks/{id}
 
 Reports:
-  GET    /accounting/ledger/{code}    كشف حساب
-  GET    /accounting/trial-balance    ميزان المراجعة
-  POST   /accounting/rebuild-balances إعادة بناء الأرصدة
-  GET    /accounting/dashboard        ملخص محاسبي
+  GET    /accounting/ledger/{code}
+  GET    /accounting/trial-balance
+  POST   /accounting/rebuild-balances
+  GET    /accounting/dashboard
 ══════════════════════════════════════════════════════════
 """
 from __future__ import annotations
 
 import uuid
 from datetime import date
+from decimal import Decimal
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, File, Query, UploadFile
@@ -52,8 +70,8 @@ router = APIRouter(prefix="/accounting", tags=["المحاسبة"])
 
 
 def _svc(
-    db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+    user: CurrentUser  = Depends(get_current_user),
 ) -> AccountingService:
     return AccountingService(db, user)
 
@@ -64,26 +82,17 @@ def _svc(
 @router.get("/coa", summary="قائمة الحسابات")
 async def list_coa(svc: AccountingService = Depends(_svc)):
     accounts = await svc.list_accounts()
-    return ok(
-        data=[a.to_dict() for a in accounts],
-        message=f"{len(accounts)} حساب",
-    )
+    return ok(data=[a.to_dict() for a in accounts], message=f"{len(accounts)} حساب")
 
 
 @router.post("/coa", status_code=201, summary="إنشاء حساب جديد")
-async def create_account(
-    data: COAAccountCreate,
-    svc: AccountingService = Depends(_svc),
-):
+async def create_account(data: COAAccountCreate, svc: AccountingService = Depends(_svc)):
     acc = await svc.create_account(data)
     return created(data=acc.to_dict(), message=f"تم إنشاء الحساب {data.code}")
 
 
 @router.get("/coa/{account_id}", summary="تفاصيل حساب")
-async def get_account(
-    account_id: uuid.UUID,
-    svc: AccountingService = Depends(_svc),
-):
+async def get_account(account_id: uuid.UUID, svc: AccountingService = Depends(_svc)):
     acc = await svc._coa_repo.get_or_raise(account_id)
     return ok(data=acc.to_dict())
 
@@ -98,61 +107,165 @@ async def update_account(
     return ok(data=acc.to_dict(), message=f"تم تعديل الحساب {acc.code}")
 
 
+@router.delete("/coa/reset", summary="إعادة تهيئة دليل الحسابات")
+async def reset_coa(svc: AccountingService = Depends(_svc)):
+    result = await svc.reset_coa()
+    return ok(data=result, message=result["message"])
+
+
+@router.post("/coa/import", status_code=201, summary="استيراد دليل الحسابات", response_model=None)
+async def import_coa(
+    file:    UploadFile = File(...),
+    dry_run: bool       = Query(default=False),
+    db:      AsyncSession  = Depends(get_db),
+    user:    CurrentUser   = Depends(get_current_user),
+):
+    from app.modules.accounting.coa_import import COAImportService
+    content = await file.read()
+    if not content:
+        from app.core.exceptions import ValidationError
+        raise ValidationError("الملف فارغ")
+    svc = COAImportService(db, user)
+    result = await svc.import_file(content=content, filename=file.filename or "upload.xlsx", dry_run=dry_run)
+    if result.has_errors:
+        return ok(data=result.to_dict(), message=f"❌ يوجد {result.error_count} خطأ")
+    action = "معاينة" if dry_run else "استيراد"
+    return created(data=result.to_dict(), message=f"✅ {action} ناجح — {result.success_count} حساب")
+
+
+@router.get("/coa/template", summary="تحميل نموذج Excel", response_class=StreamingResponse)
+async def download_coa_template():
+    import io
+    try:
+        import openpyxl
+        from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
+        from openpyxl.worksheet.datavalidation import DataValidation
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        from app.core.exceptions import ValidationError
+        raise ValidationError("openpyxl غير مثبت على الخادم")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "دليل الحسابات"
+    ws.sheet_view.rightToLeft = True
+    H_FILL = PatternFill("solid", fgColor="1F3864")
+    EX_FILL = PatternFill("solid", fgColor="FFF2CC")
+    R_FILL = PatternFill("solid", fgColor="FCE4D6")
+    O_FILL = PatternFill("solid", fgColor="E2EFDA")
+    H_FONT = Font(bold=True, color="FFFFFF", size=11, name="Arial")
+    B_FONT = Font(size=10, name="Arial")
+    THIN = Side(style="thin", color="BFBFBF")
+    BRD = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+    CTR = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    COLS = [
+        ("code","كود الحساب *",12,True),("name_ar","اسم الحساب بالعربي *",30,True),
+        ("name_en","اسم الحساب بالإنجليزي",20,False),("account_type","نوع الحساب *",18,True),
+        ("account_nature","طبيعة الحساب *",16,True),("level","المستوى (1-4) *",12,True),
+        ("parent_code","كود الحساب الأب",14,False),("postable","قابل للترحيل (نعم/لا) *",18,True),
+        ("opening_balance","الرصيد الافتتاحي",16,False),("notes","ملاحظات",20,False),
+    ]
+    for i, (_, label, width, req) in enumerate(COLS, 1):
+        c = ws.cell(row=1, column=i, value=label)
+        c.font = H_FONT; c.fill = H_FILL; c.alignment = CTR; c.border = BRD
+        ws.column_dimensions[get_column_letter(i)].width = width
+    ws.row_dimensions[1].height = 35
+    ws.freeze_panes = "A2"
+    dv_type   = DataValidation(type="list", formula1='"asset,liability,equity,revenue,expense"', showDropDown=False)
+    dv_nature = DataValidation(type="list", formula1='"debit,credit"', showDropDown=False)
+    dv_post   = DataValidation(type="list", formula1='"نعم,لا"', showDropDown=False)
+    for dv in [dv_type, dv_nature, dv_post]: ws.add_data_validation(dv)
+    dv_type.sqref = "D2:D500"; dv_nature.sqref = "E2:E500"; dv_post.sqref = "H2:H500"
+    EXAMPLES = [
+        ("11","الأصول المتداولة","Current Assets","asset","debit",2,"1","لا",0,""),
+        ("1001","الصندوق الرئيسي","Main Cash","asset","debit",4,"11","نعم",5000,""),
+        ("2101","ذمم الموردين","Suppliers AP","liability","credit",4,"21","نعم",0,""),
+        ("4001","مبيعات بضاعة","Merchandise Sales","revenue","credit",4,"41","نعم",0,""),
+        ("5001","تكلفة البضاعة المباعة","COGS","expense","debit",4,"51","نعم",0,""),
+        ("6001","رواتب الموظفين","Employee Salaries","expense","debit",4,"6200","نعم",0,""),
+    ]
+    for ri, row in enumerate(EXAMPLES, 2):
+        for ci, val in enumerate(row, 1):
+            c = ws.cell(row=ri, column=ci, value=val)
+            c.fill = EX_FILL; c.font = B_FONT; c.border = BRD
+            c.alignment = Alignment(horizontal="right" if ci <= 2 else "center")
+    for ri in range(len(EXAMPLES) + 2, 102):
+        for ci, (_, _, _, req) in enumerate(COLS, 1):
+            c = ws.cell(row=ri, column=ci)
+            c.fill = R_FILL if req else O_FILL; c.border = BRD; c.font = B_FONT
+    buf = io.BytesIO()
+    wb.save(buf); buf.seek(0)
+    return StreamingResponse(buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="coa_template.xlsx"'})
+
+
+@router.post("/coa/seed", status_code=201, summary="تحميل دليل الحسابات الجاهز", response_model=None)
+async def seed_default_coa(db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(get_current_user)):
+    from app.modules.accounting.coa_import import COAImportService
+    from scripts.seed_coa import COA
+    user.require("can_manage_coa")
+    import csv, io
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=["code","name_ar","name_en","account_type","account_nature","level","parent_code","postable","opening_balance"])
+    writer.writeheader()
+    for acc in COA:
+        writer.writerow({"code":acc.code,"name_ar":acc.name_ar,"name_en":acc.name_en,"account_type":acc.account_type,"account_nature":acc.account_nature,"level":acc.level,"parent_code":acc.parent_code or "","postable":"نعم" if acc.postable else "لا","opening_balance":acc.opening_balance})
+    svc = COAImportService(db, user)
+    result = await svc.import_file(content=buf.getvalue().encode("utf-8"), filename="seed.csv", dry_run=False)
+    return created(data=result.to_dict(), message=f"✅ تم تحميل دليل الحسابات — {result.success_count} حساب جديد")
+
+
 # ══════════════════════════════════════════════════════════
 # Journal Entries
 # ══════════════════════════════════════════════════════════
 @router.post("/je", status_code=201, summary="إنشاء قيد محاسبي (draft)")
-async def create_je(
-    data: JournalEntryCreate,
-    svc: AccountingService = Depends(_svc),
-):
+async def create_je(data: JournalEntryCreate, svc: AccountingService = Depends(_svc)):
     je = await svc.create_draft_je(data)
-    return created(
-        data={
-            "id": str(je.id),
-            "serial": je.serial,
-            "status": je.status,
-            "total_debit": float(je.total_debit),
-            "total_credit": float(je.total_credit),
-        },
-        message=f"تم إنشاء القيد {je.serial} — في انتظار الترحيل",
-    )
+    return created(data={"id":str(je.id),"serial":je.serial,"status":je.status,"total_debit":float(je.total_debit),"total_credit":float(je.total_credit)},
+                   message=f"تم إنشاء القيد {je.serial}")
 
 
 @router.get("/je", summary="قائمة القيود المحاسبية")
 async def list_je(
-    status:      Optional[str]  = Query(None),
-    je_type:     Optional[str]  = Query(None),
-    date_from:   Optional[date] = Query(None),
-    date_to:     Optional[date] = Query(None),
-    fiscal_year: Optional[int]  = Query(None),
-    page:        int            = Query(1, ge=1),
-    page_size:   int            = Query(20, ge=1, le=100),
+    status:      Optional[str]     = Query(None),
+    je_type:     Optional[str]     = Query(None),
+    date_from:   Optional[date]    = Query(None),
+    date_to:     Optional[date]    = Query(None),
+    fiscal_year: Optional[int]     = Query(None),
+    search:      Optional[str]     = Query(None),   # بحث في الـ serial والبيان
+    created_by:  Optional[str]     = Query(None),   # فلتر المنشئ
+    min_amount:  Optional[Decimal] = Query(None),   # فلتر المبلغ الأدنى
+    max_amount:  Optional[Decimal] = Query(None),   # فلتر المبلغ الأقصى
+    limit:       int               = Query(20, ge=1, le=1000),
+    offset:      int               = Query(0, ge=0),
     svc: AccountingService = Depends(_svc),
 ):
-    offset = (page - 1) * page_size
     items, total = await svc.list_je(
         status=status,
         je_type=je_type,
         date_from=date_from,
         date_to=date_to,
         fiscal_year=fiscal_year,
+        search=search,
+        created_by=created_by,
+        min_amount=min_amount,
+        max_amount=max_amount,
         offset=offset,
-        limit=page_size,
+        limit=limit,
     )
-    return paginated(
-        items=[je.to_dict() for je in items],
-        total=total,
-        page=page,
-        page_size=page_size,
-    )
+    return {
+        "data":        [je.to_dict() for je in items],
+        "total_count": total,
+        "total":       total,
+        "count":       total,
+        "limit":       limit,
+        "offset":      offset,
+    }
 
 
 @router.get("/je/{je_id}", summary="تفاصيل قيد محاسبي")
-async def get_je(
-    je_id: uuid.UUID,
-    svc: AccountingService = Depends(_svc),
-):
+async def get_je(je_id: uuid.UUID, svc: AccountingService = Depends(_svc)):
     je = await svc.get_je(je_id)
     data = je.to_dict()
     data["lines"] = [l.to_dict() for l in je.lines]
@@ -160,72 +273,48 @@ async def get_je(
 
 
 @router.put("/je/{je_id}", summary="تعديل قيد مسودة")
-async def update_je(
-    je_id: uuid.UUID,
-    data: JournalEntryCreate,
-    svc: AccountingService = Depends(_svc),
-):
+async def update_je(je_id: uuid.UUID, data: JournalEntryCreate, svc: AccountingService = Depends(_svc)):
     je = await svc.update_draft_je(je_id, data)
-    return ok(
-        data={"id": str(je.id), "serial": je.serial, "status": je.status},
-        message=f"تم تعديل القيد {je.serial}",
-    )
+    return ok(data={"id":str(je.id),"serial":je.serial,"status":je.status}, message=f"تم تعديل القيد {je.serial}")
 
 
 @router.post("/je/{je_id}/submit", summary="إرسال للمراجعة")
 async def submit_je(je_id: uuid.UUID, svc: AccountingService = Depends(_svc)):
     je = await svc.submit_je(je_id)
-    return ok(data={"id": str(je.id), "status": je.status}, message="تم إرسال القيد للمراجعة")
+    return ok(data={"id":str(je.id),"status":je.status}, message="تم إرسال القيد للمراجعة")
 
 
 @router.post("/je/{je_id}/approve", summary="الموافقة على القيد")
 async def approve_je(je_id: uuid.UUID, svc: AccountingService = Depends(_svc)):
     je = await svc.approve_je(je_id)
-    return ok(data={"id": str(je.id), "status": je.status}, message="تمت الموافقة وترحيل القيد")
+    return ok(data={"id":str(je.id),"status":je.status}, message="تمت الموافقة وترحيل القيد")
 
 
 @router.post("/je/{je_id}/reject", summary="رفض القيد")
-async def reject_je(
-    je_id: uuid.UUID,
-    body: dict = Body(default={}),
-    svc: AccountingService = Depends(_svc)
-):
+async def reject_je(je_id: uuid.UUID, body: dict = Body(default={}), svc: AccountingService = Depends(_svc)):
     note = body.get("note", "")
     je = await svc.reject_je(je_id, note)
-    return ok(data={"id": str(je.id), "status": je.status}, message="تم رفض القيد وإعادته للمسودة")
+    return ok(data={"id":str(je.id),"status":je.status}, message="تم رفض القيد")
 
 
 @router.post("/je/{je_id}/post", summary="ترحيل قيد محاسبي")
-async def post_je(
-    je_id: uuid.UUID,
-    body: PostJERequest,
-    svc: AccountingService = Depends(_svc),
-):
+async def post_je(je_id: uuid.UUID, body: PostJERequest, svc: AccountingService = Depends(_svc)):
     je = await svc.post_je(je_id, force=body.force)
-    return ok(
-        data={
-            "id": str(je.id),
-            "serial": je.serial,
-            "status": je.status,
-            "posted_at": str(je.posted_at),
-            "total_debit": float(je.total_debit),
-            "total_credit": float(je.total_credit),
-        },
-        message=f"✅ تم ترحيل القيد {je.serial}",
-    )
+    return ok(data={"id":str(je.id),"serial":je.serial,"status":je.status,"posted_at":str(je.posted_at),"total_debit":float(je.total_debit),"total_credit":float(je.total_credit)},
+              message=f"✅ تم ترحيل القيد {je.serial}")
 
 
 @router.post("/je/{je_id}/reverse", summary="عكس قيد محاسبي")
-async def reverse_je(
-    je_id: uuid.UUID,
-    data: ReverseJERequest,
-    svc: AccountingService = Depends(_svc),
-):
+async def reverse_je(je_id: uuid.UUID, data: ReverseJERequest, svc: AccountingService = Depends(_svc)):
     result = await svc.reverse_je(je_id, data)
-    return ok(
-        data=result,
-        message=f"✅ تم عكس القيد — قيد العكس: {result.get('je_serial')}",
-    )
+    return ok(data=result, message=f"✅ تم عكس القيد — {result.get('je_serial')}")
+
+
+# ══════════════════════════════════════════════════════════
+# Recurring Entries — القيود المتكررة
+# ══════════════════════════════════════════════════════════
+from app.modules.accounting.recurring_router import router as recurring_router
+router.include_router(recurring_router)
 
 
 # ══════════════════════════════════════════════════════════
@@ -238,25 +327,14 @@ async def list_locks(svc: AccountingService = Depends(_svc)):
 
 
 @router.post("/fiscal-locks", status_code=201, summary="قفل فترة مالية")
-async def lock_period(
-    data: LockPeriodRequest,
-    svc: AccountingService = Depends(_svc),
-):
+async def lock_period(data: LockPeriodRequest, svc: AccountingService = Depends(_svc)):
     result = await svc.lock_period(data)
     lock_label = "صارم" if data.lock_type == "hard" else "ناعم"
-    return created(
-        data=result,
-        message=f"تم قفل الفترة {data.fiscal_year}"
-                + (f"/{data.fiscal_month:02d}" if data.fiscal_month else "")
-                + f" — قفل {lock_label}",
-    )
+    return created(data=result, message=f"تم قفل الفترة {data.fiscal_year}" + (f"/{data.fiscal_month:02d}" if data.fiscal_month else "") + f" — قفل {lock_label}")
 
 
 @router.delete("/fiscal-locks/{lock_id}", summary="فك قفل فترة مالية")
-async def unlock_period(
-    lock_id: uuid.UUID,
-    svc: AccountingService = Depends(_svc),
-):
+async def unlock_period(lock_id: uuid.UUID, svc: AccountingService = Depends(_svc)):
     result = await svc.unlock_period(lock_id)
     return ok(data=result, message="تم فك القفل")
 
@@ -283,7 +361,7 @@ async def rebuild_balances(
     return ok(data=result)
 
 
-@router.get("/ledger/{account_code}", summary="كشف حساب")
+@router.get("/ledger/{account_code}", summary="كشف حساب — الأستاذ العام")
 async def account_ledger(
     account_code: str,
     date_from:    Optional[date] = Query(None),
@@ -301,12 +379,10 @@ async def account_ledger(
         .where(JournalEntryLine.account_code == account_code)
         .where(JournalEntry.status == "posted")
     )
-    if date_from:
-        q = q.where(JournalEntry.entry_date >= date_from)
-    if date_to:
-        q = q.where(JournalEntry.entry_date <= date_to)
-
+    if date_from: q = q.where(JournalEntry.entry_date >= date_from)
+    if date_to:   q = q.where(JournalEntry.entry_date <= date_to)
     q = q.order_by(JournalEntry.entry_date, JournalEntry.serial)
+
     result = await svc.db.execute(q)
     rows = result.all()
 
@@ -315,21 +391,39 @@ async def account_ledger(
     for line, je in rows:
         running += line.debit - line.credit
         lines.append({
-            "je_serial": je.serial,
-            "entry_date": str(je.entry_date),
-            "description": line.description,
-            "debit": float(line.debit),
-            "credit": float(line.credit),
-            "running_balance": float(running),
+            "je_serial":        je.serial,
+            "entry_date":       str(je.entry_date),
+            "description":      line.description or je.description,
+            "debit":            float(line.debit),
+            "credit":           float(line.credit),
+            "running_balance":  float(running),
+            "je_type":          je.je_type,
+            "created_by":       je.created_by if hasattr(je, "created_by") else "",
             "source_doc_number": je.source_doc_number,
         })
 
+    # حساب رصيد الافتتاح (كل الحركات قبل date_from)
+    opening = Decimal("0")
+    if date_from:
+        q2 = (
+            select(JournalEntryLine, JournalEntry)
+            .join(JournalEntry, JournalEntryLine.journal_entry_id == JournalEntry.id)
+            .where(JournalEntryLine.tenant_id == svc.user.tenant_id)
+            .where(JournalEntryLine.account_code == account_code)
+            .where(JournalEntry.status == "posted")
+            .where(JournalEntry.entry_date < date_from)
+        )
+        r2 = await svc.db.execute(q2)
+        for line2, _ in r2.all():
+            opening += line2.debit - line2.credit
+
     return ok(data={
-        "account_code": account_code,
-        "lines": lines,
-        "total_debit": float(sum(l["debit"] for l in lines)),
-        "total_credit": float(sum(l["credit"] for l in lines)),
-        "closing_balance": float(running),
+        "account_code":    account_code,
+        "opening_balance": float(opening),
+        "closing_balance": float(opening + running),
+        "transactions":    lines,
+        "total_debit":     float(sum(l["debit"]  for l in lines)),
+        "total_credit":    float(sum(l["credit"] for l in lines)),
     })
 
 
@@ -340,7 +434,6 @@ async def accounting_dashboard(
 ):
     from sqlalchemy import func, select
     from app.modules.accounting.models import JournalEntry
-
     result = await svc.db.execute(
         select(JournalEntry.status, func.count())
         .where(JournalEntry.tenant_id == svc.user.tenant_id)
@@ -348,196 +441,10 @@ async def accounting_dashboard(
         .group_by(JournalEntry.status)
     )
     counts = {row[0]: row[1] for row in result.all()}
-
     return ok(data={
-        "fiscal_year": fiscal_year,
-        "je_draft": counts.get("draft", 0),
-        "je_posted": counts.get("posted", 0),
-        "je_reversed": counts.get("reversed", 0),
-        "active_locks": len(await svc._lock_repo.list_active_locks()),
+        "fiscal_year":   fiscal_year,
+        "je_draft":      counts.get("draft", 0),
+        "je_posted":     counts.get("posted", 0),
+        "je_reversed":   counts.get("reversed", 0),
+        "active_locks":  len(await svc._lock_repo.list_active_locks()),
     })
-
-
-# ══════════════════════════════════════════════════════════
-# COA Import — Excel / CSV
-# ══════════════════════════════════════════════════════════
-@router.delete("/coa/reset", summary="إعادة تهيئة دليل الحسابات")
-async def reset_coa(svc: AccountingService = Depends(_svc)):
-    result = await svc.reset_coa()
-    return ok(data=result, message=result["message"])
-
-
-@router.post("/coa/import", status_code=201, summary="استيراد دليل الحسابات من Excel أو CSV",
-             response_model=None)
-async def import_coa(
-    file: UploadFile = File(..., description="ملف Excel (.xlsx) أو CSV"),
-    dry_run: bool = Query(default=False, description="تحقق بدون حفظ"),
-    db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),
-):
-    from app.modules.accounting.coa_import import COAImportService
-
-    content = await file.read()
-    if not content:
-        from app.core.exceptions import ValidationError
-        raise ValidationError("الملف فارغ")
-
-    svc = COAImportService(db, user)
-    result = await svc.import_file(
-        content=content,
-        filename=file.filename or "upload.xlsx",
-        dry_run=dry_run,
-    )
-
-    if result.has_errors:
-        return ok(
-            data=result.to_dict(),
-            message=f"❌ يوجد {result.error_count} خطأ — لم يتم الحفظ. راجع error_details.",
-        )
-
-    action = "معاينة" if dry_run else "استيراد"
-    return created(
-        data=result.to_dict(),
-        message=(
-            f"✅ {action} ناجح — "
-            f"تم إدراج {result.success_count} حساب | "
-            f"تخطي {len(result.skipped)} (مكرر)"
-        ),
-    )
-
-
-@router.get("/coa/template", summary="تحميل نموذج Excel لاستيراد الحسابات",
-            response_class=StreamingResponse)
-async def download_coa_template():
-    import io
-
-    try:
-        import openpyxl
-        from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
-        from openpyxl.worksheet.datavalidation import DataValidation
-        from openpyxl.utils import get_column_letter
-    except ImportError:
-        from app.core.exceptions import ValidationError
-        raise ValidationError("openpyxl غير مثبت على الخادم")
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "دليل الحسابات"
-    ws.sheet_view.rightToLeft = True
-
-    H_FILL   = PatternFill("solid", fgColor="1F3864")
-    EX_FILL  = PatternFill("solid", fgColor="FFF2CC")
-    R_FILL   = PatternFill("solid", fgColor="FCE4D6")
-    O_FILL   = PatternFill("solid", fgColor="E2EFDA")
-    H_FONT   = Font(bold=True, color="FFFFFF", size=11, name="Arial")
-    B_FONT   = Font(size=10, name="Arial")
-    THIN     = Side(style="thin", color="BFBFBF")
-    BRD      = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-    CTR      = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-    COLS = [
-        ("code",            "كود الحساب *",              12, True),
-        ("name_ar",         "اسم الحساب بالعربي *",      30, True),
-        ("name_en",         "اسم الحساب بالإنجليزي",     20, False),
-        ("account_type",    "نوع الحساب *",              18, True),
-        ("account_nature",  "طبيعة الحساب *",            16, True),
-        ("level",           "المستوى (1-4) *",           12, True),
-        ("parent_code",     "كود الحساب الأب",           14, False),
-        ("postable",        "قابل للترحيل (نعم/لا) *",  18, True),
-        ("opening_balance", "الرصيد الافتتاحي",          16, False),
-        ("notes",           "ملاحظات",                   20, False),
-    ]
-
-    for i, (_, label, width, req) in enumerate(COLS, 1):
-        c = ws.cell(row=1, column=i, value=label)
-        c.font = H_FONT; c.fill = H_FILL; c.alignment = CTR; c.border = BRD
-        ws.column_dimensions[get_column_letter(i)].width = width
-    ws.row_dimensions[1].height = 35
-    ws.freeze_panes = "A2"
-
-    dv_type = DataValidation(type="list",
-        formula1='"asset,liability,equity,revenue,expense"', showDropDown=False)
-    dv_nature = DataValidation(type="list",
-        formula1='"debit,credit"', showDropDown=False)
-    dv_post = DataValidation(type="list",
-        formula1='"نعم,لا"', showDropDown=False)
-    for dv in [dv_type, dv_nature, dv_post]:
-        ws.add_data_validation(dv)
-    dv_type.sqref = "D2:D500"; dv_nature.sqref = "E2:E500"; dv_post.sqref = "H2:H500"
-
-    EXAMPLES = [
-        ("11",   "الأصول المتداولة",      "Current Assets",    "asset",     "debit",  2, "1",   "لا",  0,    ""),
-        ("1001", "الصندوق الرئيسي",       "Main Cash",          "asset",     "debit",  4, "11",  "نعم", 5000, ""),
-        ("2101", "ذمم الموردين",          "Suppliers AP",       "liability", "credit", 4, "21",  "نعم", 0,    ""),
-        ("4001", "مبيعات بضاعة",          "Merchandise Sales",  "revenue",   "credit", 4, "41",  "نعم", 0,    ""),
-        ("5001", "تكلفة البضاعة المباعة", "COGS",              "expense",   "debit",  4, "51",  "نعم", 0,    ""),
-        ("6001", "رواتب الموظفين",        "Employee Salaries",  "expense",   "debit",  4, "6200","نعم", 0,    ""),
-    ]
-    for ri, row in enumerate(EXAMPLES, 2):
-        for ci, val in enumerate(row, 1):
-            c = ws.cell(row=ri, column=ci, value=val)
-            c.fill = EX_FILL; c.font = B_FONT; c.border = BRD
-            c.alignment = Alignment(horizontal="right" if ci <= 2 else "center")
-
-    for ri in range(len(EXAMPLES) + 2, 102):
-        for ci, (_, _, _, req) in enumerate(COLS, 1):
-            c = ws.cell(row=ri, column=ci)
-            c.fill = R_FILL if req else O_FILL; c.border = BRD; c.font = B_FONT
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-
-    return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="coa_template.xlsx"'},
-    )
-
-
-@router.post("/coa/seed", status_code=201, summary="تحميل دليل الحسابات الجاهز",
-             response_model=None)
-async def seed_default_coa(
-    db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),
-):
-    from app.modules.accounting.coa_import import COAImportService
-    from scripts.seed_coa import COA
-
-    user.require("can_manage_coa")
-
-    import csv, io
-    buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=[
-        "code", "name_ar", "name_en", "account_type", "account_nature",
-        "level", "parent_code", "postable", "opening_balance",
-    ])
-    writer.writeheader()
-    for acc in COA:
-        writer.writerow({
-            "code":            acc.code,
-            "name_ar":         acc.name_ar,
-            "name_en":         acc.name_en,
-            "account_type":    acc.account_type,
-            "account_nature":  acc.account_nature,
-            "level":           acc.level,
-            "parent_code":     acc.parent_code or "",
-            "postable":        "نعم" if acc.postable else "لا",
-            "opening_balance": acc.opening_balance,
-        })
-
-    svc = COAImportService(db, user)
-    result = await svc.import_file(
-        content=buf.getvalue().encode("utf-8"),
-        filename="seed.csv",
-        dry_run=False,
-    )
-
-    return created(
-        data=result.to_dict(),
-        message=(
-            f"✅ تم تحميل دليل الحسابات الجاهز — "
-            f"{result.success_count} حساب جديد | "
-            f"{len(result.skipped)} موجود مسبقاً"
-        ),
-    )
