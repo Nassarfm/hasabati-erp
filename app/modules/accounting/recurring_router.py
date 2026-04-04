@@ -247,7 +247,7 @@ async def create_recurring_entry(
 # ══════════════════════════════════════════════════════════
 # 3. قائمة القيود المتكررة
 # ══════════════════════════════════════════════════════════
-@router.get("", response_model=List[RecurringEntryListItem])
+@router.get("")
 async def list_recurring_entries(
     status:   Optional[str] = None,
     db:       AsyncSession  = Depends(get_db),
@@ -258,7 +258,25 @@ async def list_recurring_entries(
         q = q.where(RecurringEntry.status == status)
     q = q.order_by(RecurringEntry.created_at.desc())
     result = await db.execute(q)
-    return result.scalars().all()
+    entries = result.scalars().all()
+    return ok(data=[{
+        "id":                 str(e.id),
+        "code":               e.code,
+        "name":               e.name,
+        "description":        e.description,
+        "total_amount":       float(e.total_amount),
+        "installment_amount": float(e.installment_amount),
+        "total_installments": e.total_installments,
+        "frequency":          e.frequency,
+        "post_day":           e.post_day,
+        "start_date":         str(e.start_date),
+        "end_date":           str(e.end_date),
+        "status":             e.status,
+        "posted_count":       e.posted_count or 0,
+        "pending_count":      e.pending_count or 0,
+        "skipped_count":      e.skipped_count or 0,
+        "notes":              e.notes,
+    } for e in entries])
 
 
 # ══════════════════════════════════════════════════════════
