@@ -282,7 +282,7 @@ async def list_recurring_entries(
 # ══════════════════════════════════════════════════════════
 # 4. تفاصيل قيد متكرر مع كل الأقساط
 # ══════════════════════════════════════════════════════════
-@router.get("/{entry_id}", response_model=RecurringEntryOut)
+@router.get("/{entry_id}")
 async def get_recurring_entry(
     entry_id: uuid.UUID,
     db:       AsyncSession = Depends(get_db),
@@ -299,7 +299,39 @@ async def get_recurring_entry(
     entry = result.scalar_one_or_none()
     if not entry:
         raise HTTPException(404, "القيد المتكرر غير موجود")
-    return entry
+    return ok(data={
+        "id":                      str(entry.id),
+        "code":                    entry.code,
+        "name":                    entry.name,
+        "description":             entry.description,
+        "total_amount":            float(entry.total_amount),
+        "installment_amount":      float(entry.installment_amount),
+        "last_installment_amount": float(entry.last_installment_amount),
+        "total_installments":      entry.total_installments,
+        "frequency":               entry.frequency,
+        "post_day":                entry.post_day,
+        "start_date":              str(entry.start_date),
+        "end_date":                str(entry.end_date),
+        "je_type":                 entry.je_type,
+        "status":                  entry.status,
+        "posted_count":            entry.posted_count or 0,
+        "pending_count":           entry.pending_count or 0,
+        "skipped_count":           entry.skipped_count or 0,
+        "notes":                   entry.notes,
+        "lines_template":          entry.lines_template or [],
+        "instances": [{
+            "id":                   str(i.id),
+            "installment_number":   i.installment_number,
+            "scheduled_date":       str(i.scheduled_date),
+            "amount":               float(i.amount),
+            "status":               i.status,
+            "journal_entry_id":     str(i.journal_entry_id) if i.journal_entry_id else None,
+            "journal_entry_serial": i.journal_entry_serial,
+            "posted_at":            str(i.posted_at) if i.posted_at else None,
+            "posted_by":            i.posted_by,
+            "note":                 i.note,
+        } for i in sorted(entry.instances, key=lambda x: x.installment_number)],
+    })
 
 
 # ══════════════════════════════════════════════════════════
