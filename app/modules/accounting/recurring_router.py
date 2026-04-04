@@ -26,7 +26,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.response import success_response
+from app.core.response import ok
 from app.core.tenant import CurrentUser, get_current_user
 from app.db.session import get_db
 from app.modules.accounting.recurring_models import (
@@ -317,7 +317,7 @@ async def post_pending_instances(
     ]
 
     if not due_instances:
-        return success_response({"posted": 0, "message": "لا توجد أقساط مستحقة اليوم"})
+        return ok({"posted": 0, "message": "لا توجد أقساط مستحقة اليوم"})
 
     svc = AccountingService(db, user)
     posted = []
@@ -386,7 +386,7 @@ async def post_pending_instances(
 
     await db.commit()
 
-    return success_response({
+    return ok({
         "posted":  len(posted),
         "failed":  len(failed),
         "details": failed,
@@ -427,7 +427,7 @@ async def skip_instance(
         entry.status = "completed"
 
     await db.commit()
-    return success_response({"message": "تم تخطي القسط"})
+    return ok({"message": "تم تخطي القسط"})
 
 
 # ══════════════════════════════════════════════════════════
@@ -462,7 +462,7 @@ async def update_recurring_status(
 
     entry.status = payload.status
     await db.commit()
-    return success_response({"status": entry.status, "message": f"تم تغيير الحالة إلى {payload.status}"})
+    return ok({"status": entry.status, "message": f"تم تغيير الحالة إلى {payload.status}"})
 
 
 # ══════════════════════════════════════════════════════════
