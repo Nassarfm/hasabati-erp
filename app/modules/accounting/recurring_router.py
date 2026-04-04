@@ -521,6 +521,71 @@ async def update_recurring_status(
     return ok({"status": entry.status, "message": f"تم تغيير الحالة إلى {payload.status}"})
 
 
+
+# ══════════════════════════════════════════════════════════
+# 9. تحقق من الأقساط المستحقة وأرسل إشعارات
+# ══════════════════════════════════════════════════════════
+@router.post("/check-due-notifications")
+async def check_due_and_notify(
+    db:   AsyncSession = Depends(get_db),
+    user: CurrentUser  = Depends(get_current_user),
+):
+    """
+    يتحقق من جميع الأقساط المستحقة اليوم أو قبله
+    ويرسل إشعاراً واحداً إذا كان هناك أقساط مستحقة
+    """
+    today = date.today()
+
+    # جلب الأقساط المستحقة
+    result = await db.execute(
+        select(RecurringEntryInstance, RecurringEntry)
+        .join(RecurringEntry, RecurringEntryInstance.recurring_entry_id == RecurringEntry.id)
+        .where(
+            RecurringEntry.tenant_id == user.tenant_id,
+            RecurringEntry.status == "active",
+            RecurringEntryInstance.status == "pending",
+            RecurringEntryInstance.scheduled_date <= today,
+        )
+        .order_by(RecurringEntryInstance.scheduled_date)
+    )
+    due = result.all()
+
+    if not due:
+        return ok({"due_count": 0, "message": "لا توجد أقساط مستحقة"})
+
+    # إرسال إشعار واحد يجمع كل الأقساط المستحقة
+    try:
+        from app.modules.notifications.router import create_notification
+
+        entries_summary = []
+        for inst, entry in due:
+            entries_summary.append(
+                f"• {entry.name} — قسط {inst.installment_number}/{entry.total_installments} "
+                f"({float(inst.amount):,.2f} ريال) — {inst.scheduled_date}"
+            )
+
+        title   = f"⚡ {len(due)} قسط متكرر مستحق للترحيل"
+        message = "الأقساط المستحقة:
+" + "
+".join(entries_summary[:5])
+        if len(due) > 5:
+            message += f"\n... و{len(due)-5} أقساط أخرى"
+
+        await create_notification(
+            db, user.tenant_id,
+            title=title,
+            message=message,
+            notif_type="pending_review",
+            created_by=user.email,
+        )
+    except Exception as e:
+        logger.warning("notify_due_failed", error=str(e))
+
+    return ok({
+        "due_count": len(due),
+        "message":   f"تم إرسال إشعار بـ {len(due)} قسط مستحق",
+    })
+
 # ══════════════════════════════════════════════════════════
 # 8. حذف (فقط إذا لم يُرحَّل أي قسط)
 # ══════════════════════════════════════════════════════════
