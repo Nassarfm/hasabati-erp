@@ -247,13 +247,19 @@ async def list_je(
         date_from=date_from,
         date_to=date_to,
         fiscal_year=fiscal_year,
-        search=search,
-        created_by=created_by,
-        min_amount=min_amount,
-        max_amount=max_amount,
         offset=offset,
         limit=limit,
     )
+    # فلترة إضافية client-side للحقول غير المدعومة في الـ repository
+    if search:
+        s = search.lower()
+        items = [j for j in items if s in (j.serial or '').lower() or s in (j.description or '').lower()]
+    if created_by:
+        items = [j for j in items if created_by.lower() in (j.created_by or '').lower()]
+    if min_amount is not None:
+        items = [j for j in items if float(j.total_debit or 0) >= float(min_amount) or float(j.total_credit or 0) >= float(min_amount)]
+    if max_amount is not None:
+        items = [j for j in items if float(j.total_debit or 0) <= float(max_amount) or float(j.total_credit or 0) <= float(max_amount)]
     return {
         "data":        [je.to_dict() for je in items],
         "total_count": total,
