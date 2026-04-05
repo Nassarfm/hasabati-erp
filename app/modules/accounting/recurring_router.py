@@ -564,12 +564,11 @@ async def check_due_and_notify(
                 f"({float(inst.amount):,.2f} ريال) — {inst.scheduled_date}"
             )
 
-        title   = f"⚡ {len(due)} قسط متكرر مستحق للترحيل"
-        message = "الأقساط المستحقة:
-" + "
-".join(entries_summary[:5])
+        title   = f"قسط متكرر مستحق للترحيل ({len(due)})"
+        lines   = ["الاقساط المستحقة:"] + entries_summary[:5]
         if len(due) > 5:
-            message += f"\n... و{len(due)-5} أقساط أخرى"
+            lines.append(f"... و{len(due)-5} اقساط اخرى")
+        message = " | ".join(lines)
 
         await create_notification(
             db, user.tenant_id,
