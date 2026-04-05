@@ -2,11 +2,6 @@
 app/modules/dimensions/models.py
 ══════════════════════════════════════════════════════════
 Dimensions Module — الأبعاد المحاسبية
-
-Tables:
-  dimensions        — تعريف الأبعاد (branch, cost_center...)
-  dimension_values  — قيم كل بُعد
-  je_line_dimensions — ربط الأبعاد بسطور القيود
 ══════════════════════════════════════════════════════════
 """
 from __future__ import annotations
@@ -26,12 +21,6 @@ from app.db.mixins import ERPModel, TenantMixin, TimestampMixin
 
 
 class Dimension(ERPModel, Base):
-    """
-    تعريف بُعد محاسبي.
-    is_system = True  → لا يمكن حذفه
-    is_required = True → إجباري عند ترحيل القيد
-    classification: where | who | why | expense_only
-    """
     __tablename__ = "dimensions"
 
     code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
@@ -39,11 +28,11 @@ class Dimension(ERPModel, Base):
     name_en: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     classification: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     is_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    is_visible:  Mapped[bool] = mapped_column(Boolean, default=True,  nullable=False)
+    is_system:   Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_active:   Mapped[bool] = mapped_column(Boolean, default=True,  nullable=False)
+    sort_order:  Mapped[int]  = mapped_column(Integer, default=0,     nullable=False)
 
-    # Relationships
     values: Mapped[List["DimensionValue"]] = relationship(
         "DimensionValue",
         back_populates="dimension",
@@ -58,10 +47,6 @@ class Dimension(ERPModel, Base):
 
 
 class DimensionValue(ERPModel, Base):
-    """
-    قيمة بُعد محاسبي.
-    مثال: branch → الرياض، جدة، الدمام
-    """
     __tablename__ = "dimension_values"
 
     dimension_id: Mapped[uuid.UUID] = mapped_column(
@@ -75,7 +60,6 @@ class DimensionValue(ERPModel, Base):
     name_en: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
-    # Relationships
     dimension: Mapped["Dimension"] = relationship(
         "Dimension", back_populates="values"
     )
@@ -90,10 +74,6 @@ class DimensionValue(ERPModel, Base):
 
 
 class JELineDimension(TenantMixin, TimestampMixin, Base):
-    """
-    ربط سطر القيد بقيم الأبعاد.
-    One row per (je_line_id, dimension_id).
-    """
     __tablename__ = "je_line_dimensions"
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -117,9 +97,6 @@ class JELineDimension(TenantMixin, TimestampMixin, Base):
     )
 
     __table_args__ = (
-        UniqueConstraint(
-            "je_line_id", "dimension_id",
-            name="uq_jeline_dim",
-        ),
+        UniqueConstraint("je_line_id", "dimension_id", name="uq_jeline_dim"),
         Index("ix_jeline_dim_line", "je_line_id"),
     )

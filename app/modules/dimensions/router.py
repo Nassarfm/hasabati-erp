@@ -1,18 +1,7 @@
 """
 app/modules/dimensions/router.py
 ══════════════════════════════════════════════════════════
-Dimensions API — 9 endpoints
-
-GET    /dimensions              قائمة الأبعاد
-POST   /dimensions              إنشاء بُعد جديد
-GET    /dimensions/{id}         تفاصيل بُعد
-PUT    /dimensions/{id}         تعديل بُعد
-DELETE /dimensions/{id}         حذف بُعد
-
-GET    /dimensions/{id}/values         قائمة القيم
-POST   /dimensions/{id}/values         إضافة قيمة
-PUT    /dimensions/{id}/values/{vid}   تعديل قيمة
-DELETE /dimensions/{id}/values/{vid}   حذف قيمة
+Dimensions API
 ══════════════════════════════════════════════════════════
 """
 from __future__ import annotations
@@ -29,6 +18,7 @@ from app.db.session import get_db
 from app.modules.dimensions.schemas import (
     DimensionCreate, DimensionUpdate,
     DimensionValueCreate, DimensionValueUpdate,
+    DimensionVisibilityUpdate,
 )
 from app.modules.dimensions.service import DimensionService
 
@@ -47,7 +37,7 @@ def _svc(
 # ══════════════════════════════════════════════
 @router.get("", summary="قائمة الأبعاد")
 async def list_dimensions(
-    active_only: bool = Query(default=True),
+    active_only: bool = Query(default=False),  # نعرض الكل افتراضياً
     svc: DimensionService = Depends(_svc),
 ):
     dims = await svc.list_dimensions(active_only=active_only)
@@ -59,15 +49,16 @@ async def list_dimensions(
             "name_en":        d.name_en,
             "classification": d.classification,
             "is_required":    d.is_required,
+            "is_visible":     getattr(d, 'is_visible', True),
             "is_system":      d.is_system,
             "is_active":      d.is_active,
             "sort_order":     d.sort_order,
             "values_count":   len(d.values),
             "values": [{
-                "id":       str(v.id),
-                "code":     v.code,
-                "name_ar":  v.name_ar,
-                "name_en":  v.name_en,
+                "id":        str(v.id),
+                "code":      v.code,
+                "name_ar":   v.name_ar,
+                "name_en":   v.name_en,
                 "is_active": v.is_active,
             } for v in d.values],
         } for d in dims],
@@ -100,14 +91,15 @@ async def get_dimension(
         "name_en":        dim.name_en,
         "classification": dim.classification,
         "is_required":    dim.is_required,
+        "is_visible":     getattr(dim, 'is_visible', True),
         "is_system":      dim.is_system,
         "is_active":      dim.is_active,
         "sort_order":     dim.sort_order,
         "values": [{
-            "id":       str(v.id),
-            "code":     v.code,
-            "name_ar":  v.name_ar,
-            "name_en":  v.name_en,
+            "id":        str(v.id),
+            "code":      v.code,
+            "name_ar":   v.name_ar,
+            "name_en":   v.name_en,
             "is_active": v.is_active,
         } for v in dim.values],
     })
@@ -123,6 +115,51 @@ async def update_dimension(
     return ok(
         data={"id": str(dim.id), "code": dim.code, "name_ar": dim.name_ar},
         message=f"تم تعديل البُعد {dim.name_ar}",
+    )
+
+
+@router.patch("/{dim_id}/visibility", summary="تحديث إعدادات ظهور البُعد")
+async def update_visibility(
+    dim_id: uuid.UUID,
+    data: DimensionVisibilityUpdate,
+    svc: DimensionService = Depends(_svc),
+):
+    """
+    تحكم في إظهار/إخفاء البُعد في القيود المحاسبية.
+    is_visible = true  → يظهر في القيود اليومية والتوزيع والمتكررة
+    is_visible = false → مخفي تماماً من جميع الواجهات
+    is_required = true → يجب تعبئته قبل الترحيل
+    """
+    dim = await svc.get_dimension(dim_id)
+
+    if data.is_visible  is not None:
+        # is_visible غير موجودة في الموديل القديم — نضيفها بأمان
+        try:
+            dim.is_visible = data.is_visible
+        except Exception:
+            pass
+    if data.is_required is not None:
+        dim.is_required = data.is_required
+    if data.is_active   is not None:
+        dim.is_active = data.is_active
+
+    try:
+        dim.updated_by = svc.user.email
+    except Exception:
+        pass
+
+    await svc.db.flush()
+
+    return ok(
+        data={
+            "id":          str(dim.id),
+            "code":        dim.code,
+            "name_ar":     dim.name_ar,
+            "is_visible":  getattr(dim, 'is_visible',  True),
+            "is_required": dim.is_required,
+            "is_active":   dim.is_active,
+        },
+        message=f"تم تحديث إعدادات البُعد {dim.name_ar}",
     )
 
 
@@ -146,10 +183,10 @@ async def list_values(
     values = await svc.list_values(dim_id)
     return ok(
         data=[{
-            "id":       str(v.id),
-            "code":     v.code,
-            "name_ar":  v.name_ar,
-            "name_en":  v.name_en,
+            "id":        str(v.id),
+            "code":      v.code,
+            "name_ar":   v.name_ar,
+            "name_en":   v.name_en,
             "is_active": v.is_active,
         } for v in values],
         message=f"{len(values)} قيمة",

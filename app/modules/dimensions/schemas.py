@@ -2,7 +2,6 @@
 app/modules/dimensions/schemas.py
 """
 from __future__ import annotations
-
 import uuid
 from typing import List, Optional
 from pydantic import BaseModel, Field
@@ -37,6 +36,7 @@ class DimensionCreate(BaseModel):
         None, pattern="^(where|who|why|expense_only)?$"
     )
     is_required: bool = False
+    is_visible:  bool = True
     sort_order: int   = 0
 
 
@@ -45,8 +45,16 @@ class DimensionUpdate(BaseModel):
     name_en: Optional[str]        = Field(None, max_length=255)
     classification: Optional[str] = None
     is_required: Optional[bool]   = None
-    is_active: Optional[bool]     = None
+    is_visible:  Optional[bool]   = None
+    is_active:   Optional[bool]   = None
     sort_order: Optional[int]     = None
+
+
+class DimensionVisibilityUpdate(BaseModel):
+    """تحديث إعدادات الظهور والإلزامية للبُعد"""
+    is_visible:  Optional[bool] = None
+    is_required: Optional[bool] = None
+    is_active:   Optional[bool] = None
 
 
 class DimensionResponse(BaseModel):
@@ -56,6 +64,7 @@ class DimensionResponse(BaseModel):
     name_en: Optional[str]
     classification: Optional[str]
     is_required: bool
+    is_visible:  bool
     is_system: bool
     is_active: bool
     sort_order: int
@@ -70,6 +79,7 @@ class DimensionListItem(BaseModel):
     name_en: Optional[str]
     classification: Optional[str]
     is_required: bool
+    is_visible:  bool
     is_system: bool
     is_active: bool
     sort_order: int
