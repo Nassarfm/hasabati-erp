@@ -74,31 +74,41 @@ async def get_dashboard(ctx=Depends(_ctx)):
     db, user = ctx
     tid = str(user.tenant_id)
 
-    stats = await db.execute(text("""
-        SELECT
-            COUNT(*)                                           AS total,
-            COUNT(*) FILTER (WHERE status='active')           AS active,
-            COUNT(*) FILTER (WHERE status='inactive')         AS inactive,
-            COUNT(*) FILTER (WHERE status='locked')           AS locked,
-            COUNT(*) FILTER (WHERE account_expiry < NOW()
-                             AND account_expiry IS NOT NULL)   AS expired
-        FROM user_profiles WHERE tenant_id = :tid
-    """), {"tid": tid})
-    s = stats.fetchone()
+    try:
+        stats_result = await db.execute(text("""
+            SELECT
+                COUNT(*)                                           AS total,
+                COUNT(*) FILTER (WHERE status='active')           AS active,
+                COUNT(*) FILTER (WHERE status='inactive')         AS inactive,
+                COUNT(*) FILTER (WHERE status='locked')           AS locked,
+                COUNT(*) FILTER (WHERE account_expiry < NOW()
+                                 AND account_expiry IS NOT NULL)   AS expired
+            FROM user_profiles WHERE tenant_id = :tid
+        """), {"tid": tid})
+        s = stats_result.fetchone()
+    except Exception:
+        s = type('obj', (object,), {'total':0,'active':0,'inactive':0,'locked':0,'expired':0})()
 
-    roles_count = await db.execute(text(
-        "SELECT COUNT(*) FROM roles WHERE tenant_id = :tid AND is_active = true"
-    ), {"tid": tid})
-    rc = roles_count.scalar()
+
+    try:
+        roles_count = await db.execute(text(
+            "SELECT COUNT(*) FROM roles WHERE tenant_id = :tid AND is_active = true"
+        ), {"tid": tid})
+        rc = roles_count.scalar() or 0
+    except Exception:
+        rc = 0
 
     # آخر 5 عمليات
-    logs = await db.execute(text("""
-        SELECT user_email, action, module, ip_address, created_at
-        FROM audit_log
-        WHERE tenant_id = :tid
-        ORDER BY created_at DESC LIMIT 5
-    """), {"tid": tid})
-    recent = [dict(r._mapping) for r in logs.fetchall()]
+    try:
+        logs = await db.execute(text("""
+            SELECT user_email, action, module, ip_address, created_at
+            FROM audit_log
+            WHERE tenant_id = :tid
+            ORDER BY created_at DESC LIMIT 5
+        """), {"tid": tid})
+        recent = [dict(r._mapping) for r in logs.fetchall()]
+    except Exception:
+        recent = []
 
     return ok(data={
         "total":    s.total,
@@ -154,7 +164,7 @@ async def list_users(
             ) AS branches
         FROM user_profiles up
         LEFT JOIN user_roles ur ON ur.user_id = up.id AND ur.tenant_id = :tid
-        LEFT JOIN roles r ON r.id = COALESCE(ur.role_id, ur.role::uuid)
+        LEFT JOIN roles r ON (r.id = ur.role_id OR r.id::text = ur.role)
         LEFT JOIN user_branches ub ON ub.user_id = up.id AND ub.tenant_id = :tid
         WHERE {' AND '.join(where)}
         GROUP BY up.id
@@ -324,11 +334,10 @@ async def list_roles(ctx=Depends(_ctx)):
             COUNT(DISTINCT ur.user_id) AS users_count,
             COUNT(DISTINCT rp.permission_id) AS permissions_count
         FROM roles r
-        LEFT JOIN user_roles ur ON (
-            COALESCE(ur.role_id, ur.role::uuid) = r.id
-            AND ur.tenant_id = r.tenant_id
-        )
-        LEFT JOIN role_permissions rp ON rp.role_id = r.id AND rp.tenant_id = r.tenant_id
+        LEFT JOIN user_roles ur ON ur.tenant_id = r.tenant_id
+            AND (ur.role_id = r.id OR ur.role = r.id::text)
+        LEFT JOIN role_permissions rp ON rp.role_id = r.id
+            AND rp.tenant_id = r.tenant_id
         WHERE r.tenant_id = :tid
         GROUP BY r.id
         ORDER BY r.sort_order, r.name
