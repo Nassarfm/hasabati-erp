@@ -25,6 +25,10 @@ v1_router.include_router(je_activity_router)
 from app.modules.accounting.fiscal_router import router as fiscal_router
 v1_router.include_router(fiscal_router)
 
+# ── VAT / Tax Types ───────────────────────────────────
+from app.modules.accounting.tax_router import router as tax_router
+v1_router.include_router(tax_router)
+
 # ── AI ────────────────────────────────────────────────
 from app.api.v1.ai_narrative import router as ai_router
 v1_router.include_router(ai_router)

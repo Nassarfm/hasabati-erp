@@ -43,7 +43,6 @@ def create_app() -> FastAPI:
         openapi_url="/openapi.json" if not settings.is_production else None,
         lifespan=lifespan,
     )
-
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -53,12 +52,10 @@ def create_app() -> FastAPI:
         expose_headers=["*"],
         max_age=600,
     )
-
     app.add_exception_handler(ERPException, erp_exception_handler)
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
-
     app.include_router(v1_router, prefix=settings.API_V1_PREFIX)
     return app
 
