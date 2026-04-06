@@ -154,7 +154,7 @@ async def list_users(
             ) AS branches
         FROM user_profiles up
         LEFT JOIN user_roles ur ON ur.user_id = up.id AND ur.tenant_id = :tid
-        LEFT JOIN roles r ON r.id = ur.role_id
+        LEFT JOIN roles r ON r.id = COALESCE(ur.role_id, ur.role::uuid)
         LEFT JOIN user_branches ub ON ub.user_id = up.id AND ub.tenant_id = :tid
         WHERE {' AND '.join(where)}
         GROUP BY up.id
@@ -206,7 +206,7 @@ async def create_user(data: UserCreate, ctx=Depends(_ctx)):
     for role_id in data.role_ids:
         await db.execute(text("""
             INSERT INTO user_roles (id, tenant_id, user_id, role_id)
-            VALUES (gen_random_uuid(), :tid, :uid, :rid)
+            VALUES (gen_random_uuid(), :tid, :uid, :rid::uuid)
             ON CONFLICT DO NOTHING
         """), {"tid": tid, "uid": uid, "rid": role_id})
 
@@ -324,7 +324,10 @@ async def list_roles(ctx=Depends(_ctx)):
             COUNT(DISTINCT ur.user_id) AS users_count,
             COUNT(DISTINCT rp.permission_id) AS permissions_count
         FROM roles r
-        LEFT JOIN user_roles ur ON ur.role_id = r.id AND ur.tenant_id = r.tenant_id
+        LEFT JOIN user_roles ur ON (
+            COALESCE(ur.role_id, ur.role::uuid) = r.id
+            AND ur.tenant_id = r.tenant_id
+        )
         LEFT JOIN role_permissions rp ON rp.role_id = r.id AND rp.tenant_id = r.tenant_id
         WHERE r.tenant_id = :tid
         GROUP BY r.id
