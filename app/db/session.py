@@ -17,18 +17,18 @@ from app.core.config import settings
 
 logger = structlog.get_logger(__name__)
 
-# ── Supabase free tier: max 5 direct connections ──────────
-# pool_size=2 + max_overflow=2 + 2 workers = 8 max → آمن
+# ── Supabase connection pooler (port 6543 Transaction mode) ──
+# pool_size=5, max_overflow=10 → max 15 اتصال متزامن آمن
 engine = create_async_engine(
     settings.DATABASE_URL,
-    pool_size=2,                 # خُفِّض من 5 إلى 2
-    max_overflow=2,              # خُفِّض من 10 إلى 2
-    pool_timeout=settings.DATABASE_POOL_TIMEOUT,
-    pool_recycle=300,            # خُفِّض من 1800 إلى 300
+    pool_size=5,          # رُفع من 2 إلى 5
+    max_overflow=10,      # رُفع من 2 إلى 10
+    pool_timeout=30,
+    pool_recycle=600,
     pool_pre_ping=True,
     echo=settings.DEBUG,
     connect_args={
-        "prepared_statement_cache_size": 0,   # مطلوب مع Supabase pooler
+        "prepared_statement_cache_size": 0,
         "statement_cache_size": 0,
     },
 )
