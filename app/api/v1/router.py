@@ -41,6 +41,10 @@ v1_router.include_router(notifications_router)
 from app.modules.settings.router import router as settings_router
 v1_router.include_router(settings_router)
 
+# ── User Management ──────────────────────────────────
+from app.modules.users.router import router as users_router
+v1_router.include_router(users_router)
+
 # ── Company Settings ──────────────────────────────────
 from app.modules.settings.company_router import router as company_router
 v1_router.include_router(company_router)
