@@ -286,6 +286,9 @@ class AccountingService:
                 project_name=getattr(line, 'project_name', None),
                 expense_classification_code=getattr(line, 'expense_classification_code', None),
                 expense_classification_name=getattr(line, 'expense_classification_name', None),
+                tax_type_code=getattr(line, 'tax_type_code', None),
+                vat_amount=getattr(line, 'vat_amount', None) or Decimal('0'),
+                net_amount=getattr(line, 'net_amount', None) or Decimal('0'),
                 created_by=self.user.email,
             )
             self.db.add(je_line)
@@ -360,6 +363,9 @@ class AccountingService:
                 project_name=getattr(line, 'project_name', None),
                 expense_classification_code=getattr(line, 'expense_classification_code', None),
                 expense_classification_name=getattr(line, 'expense_classification_name', None),
+                tax_type_code=getattr(line, 'tax_type_code', None),
+                vat_amount=getattr(line, 'vat_amount', None) or Decimal('0'),
+                net_amount=getattr(line, 'net_amount', None) or Decimal('0'),
                 created_by=self.user.email,
             )
             self.db.add(je_line)
