@@ -28,7 +28,6 @@ class COAAccountBase(BaseModel):
     postable: bool         = True
     is_active: bool        = True
     opening_balance: Decimal = Decimal("0")
-    # حقول القوائم المالية
     function_type: Optional[str] = Field(None, pattern="^(BS|PL|BS/PL)?$")
     grp: Optional[str]           = Field(None, max_length=100)
     sub_group: Optional[str]     = Field(None, max_length=100)
@@ -100,6 +99,10 @@ class JELineCreate(BaseModel):
     project_name: Optional[str]                   = None
     expense_classification_code: Optional[str]    = None
     expense_classification_name: Optional[str]    = None
+    # ── حقول ضريبة القيمة المضافة ──
+    tax_type_code: Optional[str]     = None
+    vat_amount:    Optional[Decimal] = Decimal("0")
+    net_amount:    Optional[Decimal] = Decimal("0")
 
     @model_validator(mode="after")
     def validate_one_side_only(self) -> "JELineCreate":
@@ -126,11 +129,15 @@ class JELineResponse(BaseModel):
     project_name: Optional[str]                = None
     expense_classification_code: Optional[str] = None
     expense_classification_name: Optional[str] = None
+    # ── حقول ضريبة القيمة المضافة ──
+    tax_type_code: Optional[str]     = None
+    vat_amount:    Optional[Decimal] = None
+    net_amount:    Optional[Decimal] = None
     model_config = {"from_attributes": True}
 
 
 class JournalEntryCreate(BaseModel):
-    je_type: str        = Field(default="JV")  # JV|PV|RV|SV|PRV|PRJ|ACR|EXP|PET|REC|ADJ|CLS|INT
+    je_type: str        = Field(default="JV")
     entry_date: date
     description: str    = Field(..., min_length=1, max_length=500)
     reference: Optional[str]        = Field(None, max_length=100)
@@ -196,10 +203,7 @@ class JournalEntryListItem(BaseModel):
 
 
 class PostJERequest(BaseModel):
-    force: bool = Field(
-        default=False,
-        description="تجاوز تحذير الفترة المغلقة — يحتاج صلاحية مدير",
-    )
+    force: bool = Field(default=False)
 
 
 class ReverseJERequest(BaseModel):
