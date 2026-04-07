@@ -10,16 +10,23 @@ Reports Engine — يولّد القوائم المالية من جداول GL.
   → يستعلم من journal_entry_lines مباشرة
 عند عدم وجود فلتر:
   → يستعلم من account_balances (أسرع)
+
+[vat_return] — المنطق المحدَّث:
+  Primary  : يقرأ من journal_entry_lines حقلَي vat_amount + tax_type_code
+             سطر مدين  + tax_type_code → ضريبة مدخلات  (input_vat)
+             سطر دائن  + tax_type_code → ضريبة مخرجات (output_vat)
+  Fallback : إذا لم توجد أسطر ضريبية فعلية → يرجع لطريقة account_balances
 ══════════════════════════════════════════════════════════
 """
 from __future__ import annotations
 
+import calendar
 import uuid
 from datetime import date
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.accounting.models import (
@@ -69,6 +76,17 @@ def _sign(nature: str, debit: Decimal, credit: Decimal) -> Decimal:
     if nature == AccountNature.DEBIT:
         return (debit - credit).quantize(PREC)
     return (credit - debit).quantize(PREC)
+
+
+def _month_range_to_dates(
+    year_from: int, month_from: int,
+    year_to:   int, month_to:   int,
+) -> Tuple[date, date]:
+    """تحويل نطاق السنة/الشهر إلى تاريخَي بداية ونهاية."""
+    date_from = date(year_from, month_from, 1)
+    last_day  = calendar.monthrange(year_to, month_to)[1]
+    date_to   = date(year_to, month_to, last_day)
+    return date_from, date_to
 
 
 async def _get_coa(db: AsyncSession, tenant_id: uuid.UUID) -> Dict[str, ChartOfAccount]:
@@ -136,12 +154,7 @@ async def _period_balances_dim(
     استعلام من journal_entry_lines مع فلتر الأبعاد.
     أبطأ لكن يدعم التحليل على مستوى الفرع/مركز التكلفة/المشروع.
     """
-    from datetime import date as _date
-    date_from = _date(year_from, month_from, 1)
-    # آخر يوم في month_to
-    import calendar
-    last_day = calendar.monthrange(year_to, month_to)[1]
-    date_to = _date(year_to, month_to, last_day)
+    date_from, date_to = _month_range_to_dates(year_from, month_from, year_to, month_to)
 
     conditions = [
         JournalEntryLine.tenant_id == tenant_id,
@@ -500,15 +513,109 @@ async def cash_flow(
 
 
 # ══════════════════════════════════════════════════════════
-# 5. VAT Return
+# 5. VAT Return  ← محدَّث بالكامل
 # ══════════════════════════════════════════════════════════
-async def vat_return(
+async def _vat_from_je_lines(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    date_from: date,
+    date_to:   date,
+) -> Optional[Dict[str, Any]]:
+    """
+    [Primary Method]
+    يقرأ ضريبة القيمة المضافة مباشرةً من journal_entry_lines
+    عبر حقلَي vat_amount و tax_type_code.
+
+    المنطق:
+      سطر مدين  + tax_type_code موجود → ضريبة مدخلات  (input_vat)
+      سطر دائن  + tax_type_code موجود → ضريبة مخرجات (output_vat)
+
+    يُعيد None إذا لم توجد أسطر ضريبية أصلاً (trigger الـ fallback).
+    """
+    result = await db.execute(
+        select(
+            JournalEntryLine.tax_type_code,
+            func.sum(JournalEntryLine.debit).label("total_debit"),
+            func.sum(JournalEntryLine.credit).label("total_credit"),
+            func.sum(JournalEntryLine.vat_amount).label("total_vat"),
+            func.sum(JournalEntryLine.net_amount).label("total_net"),
+        )
+        .join(JournalEntry, JournalEntryLine.journal_entry_id == JournalEntry.id)
+        .where(
+            and_(
+                JournalEntryLine.tenant_id  == tenant_id,
+                JournalEntry.tenant_id      == tenant_id,
+                JournalEntry.status         == "posted",
+                JournalEntry.entry_date     >= date_from,
+                JournalEntry.entry_date     <= date_to,
+                JournalEntryLine.tax_type_code.isnot(None),
+                JournalEntryLine.vat_amount  > 0,
+            )
+        )
+        .group_by(JournalEntryLine.tax_type_code)
+    )
+
+    rows = result.all()
+    if not rows:
+        return None  # لا توجد أسطر ضريبية → trigger fallback
+
+    input_vat      = ZERO
+    output_vat     = ZERO
+    taxable_sales  = ZERO
+    taxable_purch  = ZERO
+    breakdown: List[Dict[str, Any]] = []
+
+    for row in rows:
+        total_debit  = Decimal(str(row.total_debit  or 0))
+        total_credit = Decimal(str(row.total_credit or 0))
+        total_vat    = Decimal(str(row.total_vat    or 0))
+        total_net    = Decimal(str(row.total_net    or 0))
+
+        # سطر مدين → ضريبة مدخلات (مشتريات)
+        if total_debit >= total_credit:
+            input_vat    += total_vat
+            taxable_purch += total_net
+            direction = "input"
+        # سطر دائن → ضريبة مخرجات (مبيعات)
+        else:
+            output_vat   += total_vat
+            taxable_sales += total_net
+            direction = "output"
+
+        breakdown.append({
+            "tax_type_code": row.tax_type_code,
+            "direction":     direction,
+            "vat_amount":    float(total_vat.quantize(PREC)),
+            "net_amount":    float(total_net.quantize(PREC)),
+        })
+
+    input_vat     = input_vat.quantize(PREC)
+    output_vat    = output_vat.quantize(PREC)
+    taxable_sales = taxable_sales.quantize(PREC)
+    taxable_purch = taxable_purch.quantize(PREC)
+
+    return {
+        "input_vat":      input_vat,
+        "output_vat":     output_vat,
+        "taxable_sales":  taxable_sales,
+        "taxable_purch":  taxable_purch,
+        "breakdown":      breakdown,
+        "source":         "je_lines",
+    }
+
+
+async def _vat_from_account_balances(
     db: AsyncSession,
     tenant_id: uuid.UUID,
     year: int,
     month_from: int,
     month_to:   int,
 ) -> Dict[str, Any]:
+    """
+    [Fallback Method]
+    الطريقة القديمة: تقرأ من account_balances حسابَي 2201 و1401.
+    تُستخدم فقط عند غياب أسطر ضريبية في je_lines.
+    """
     bals = await _period_balances(db, tenant_id, year, month_from, year, month_to)
 
     vat_out_b  = bals.get("2201", {"debit": ZERO, "credit": ZERO})
@@ -517,33 +624,80 @@ async def vat_return(
     vat_in_b  = bals.get("1401", {"debit": ZERO, "credit": ZERO})
     input_vat = (vat_in_b["debit"] - vat_in_b["credit"]).quantize(PREC)
 
+    # حسابات ضريبة المدخلات الأخرى (14xx ما عدا 1401)
     for code, b in bals.items():
         if code.startswith("14") and code != "1401":
             input_vat += (b["debit"] - b["credit"]).quantize(PREC)
 
-    net_vat = (output_vat - input_vat).quantize(PREC)
-
     coa = await _get_coa(db, tenant_id)
     taxable_sales = ZERO
     for code, acc in coa.items():
-        if not acc.postable: continue
+        if not acc.postable:
+            continue
         b   = bals.get(code, {"debit": ZERO, "credit": ZERO})
         amt = _sign(acc.account_nature, b["debit"], b["credit"])
         if acc.account_type == AccountType.REVENUE:
             taxable_sales += amt
 
-    taxable_purchases = (input_vat / Decimal("0.15")).quantize(PREC) if input_vat > 0 else ZERO
+    taxable_purch = (input_vat / Decimal("0.15")).quantize(PREC) if input_vat > 0 else ZERO
+
+    return {
+        "input_vat":      input_vat,
+        "output_vat":     output_vat,
+        "taxable_sales":  taxable_sales,
+        "taxable_purch":  taxable_purch,
+        "breakdown":      [],
+        "source":         "account_balances",
+    }
+
+
+async def vat_return(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    year: int,
+    month_from: int,
+    month_to:   int,
+) -> Dict[str, Any]:
+    """
+    تقرير ضريبة القيمة المضافة.
+
+    الاستراتيجية:
+      1. يحاول أولاً قراءة vat_amount من journal_entry_lines مباشرةً.
+      2. إذا لم توجد أسطر ضريبية (بيانات قديمة أو لم يُدخَل vat_amount)
+         → Fallback: يقرأ من account_balances (الطريقة القديمة).
+    """
+    date_from, date_to = _month_range_to_dates(year, month_from, year, month_to)
+
+    # ── Primary: je_lines ────────────────────────────────
+    vat_data = await _vat_from_je_lines(db, tenant_id, date_from, date_to)
+
+    # ── Fallback: account_balances ────────────────────────
+    if vat_data is None:
+        vat_data = await _vat_from_account_balances(
+            db, tenant_id, year, month_from, month_to
+        )
+
+    input_vat     = vat_data["input_vat"]
+    output_vat    = vat_data["output_vat"]
+    taxable_sales = vat_data["taxable_sales"]
+    taxable_purch = vat_data["taxable_purch"]
+    source        = vat_data["source"]
+    breakdown     = vat_data["breakdown"]
+
+    net_vat = (output_vat - input_vat).quantize(PREC)
 
     return {
         "report":  "vat_return",
         "period":  f"{year}/{month_from:02d}–{month_to:02d}",
+        "source":  source,   # "je_lines" | "account_balances"
         "zatca": {
             "box_1_taxable_sales":     float(taxable_sales),
             "box_2_output_vat":        float(output_vat),
-            "box_3_taxable_purchases": float(taxable_purchases),
+            "box_3_taxable_purchases": float(taxable_purch),
             "box_4_input_vat":         float(input_vat),
             "box_5_net_vat_due":       float(net_vat),
         },
+        "breakdown":        breakdown,          # تفصيل per tax_type_code
         "status":           "payable" if net_vat > 0 else ("refundable" if net_vat < 0 else "nil"),
         "payment_required": net_vat > 0,
         "refund_due":       net_vat < 0,
