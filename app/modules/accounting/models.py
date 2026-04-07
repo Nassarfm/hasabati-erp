@@ -218,6 +218,11 @@ class JournalEntryLine(ERPModel, Base):
     future_1: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     future_2: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
+    # ── ضريبة القيمة المضافة ──
+    tax_type_code: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    vat_amount:    Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 3), nullable=True)
+    net_amount:    Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 3), nullable=True)
+
     journal_entry: Mapped["JournalEntry"] = relationship("JournalEntry", back_populates="lines")
 
     __table_args__ = (
