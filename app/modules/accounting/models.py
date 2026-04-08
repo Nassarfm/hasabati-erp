@@ -223,6 +223,15 @@ class JournalEntryLine(ERPModel, Base):
     vat_amount:    Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 3), nullable=True)
     net_amount:    Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 3), nullable=True)
 
+    # ── العملة الأجنبية ──
+    # currency_code  : رمز العملة (SAR, USD, EUR...)
+    # exchange_rate  : سعر الصرف — 1 وحدة أجنبية = X وحدة أساسية
+    # amount_foreign : المبلغ بالعملة الأجنبية قبل التحويل
+    # debit/credit   : تبقى دائماً بالعملة الأساسية (amount_foreign × exchange_rate)
+    currency_code:   Mapped[Optional[str]]     = mapped_column(String(10),     nullable=True,  default="SAR")
+    exchange_rate:   Mapped[Optional[Decimal]]  = mapped_column(Numeric(18, 6), nullable=True,  default=Decimal("1.0"))
+    amount_foreign:  Mapped[Optional[Decimal]]  = mapped_column(Numeric(18, 3), nullable=True,  default=Decimal("0"))
+
     journal_entry: Mapped["JournalEntry"] = relationship("JournalEntry", back_populates="lines")
 
     __table_args__ = (

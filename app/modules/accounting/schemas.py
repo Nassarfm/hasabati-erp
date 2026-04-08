@@ -103,6 +103,13 @@ class JELineCreate(BaseModel):
     tax_type_code: Optional[str]     = None
     vat_amount:    Optional[Decimal] = Decimal("0")
     net_amount:    Optional[Decimal] = Decimal("0")
+    # ── حقول العملة الأجنبية ──
+    # إذا كانت العملة هي العملة الأساسية → exchange_rate=1, amount_foreign=debit/credit
+    # إذا كانت عملة أجنبية → amount_foreign هو ما يُدخله المستخدم
+    #   والنظام يحسب: debit/credit = amount_foreign × exchange_rate
+    currency_code:  Optional[str]     = "SAR"
+    exchange_rate:  Optional[Decimal] = Decimal("1.0")
+    amount_foreign: Optional[Decimal] = Decimal("0")
 
     @model_validator(mode="after")
     def validate_one_side_only(self) -> "JELineCreate":
@@ -133,6 +140,10 @@ class JELineResponse(BaseModel):
     tax_type_code: Optional[str]     = None
     vat_amount:    Optional[Decimal] = None
     net_amount:    Optional[Decimal] = None
+    # ── حقول العملة الأجنبية ──
+    currency_code:  Optional[str]     = "SAR"
+    exchange_rate:  Optional[Decimal] = Decimal("1.0")
+    amount_foreign: Optional[Decimal] = Decimal("0")
     model_config = {"from_attributes": True}
 
 

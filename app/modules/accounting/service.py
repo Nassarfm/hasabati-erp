@@ -269,6 +269,26 @@ class AccountingService:
 
         for idx, line in enumerate(data.lines):
             from app.modules.accounting.models import JournalEntryLine
+            # ── حساب المدين/الدائن بالعملة الأساسية ──────────────────
+            currency_code  = getattr(line, 'currency_code',  None) or 'SAR'
+            exchange_rate  = Decimal(str(getattr(line, 'exchange_rate',  None) or '1.0'))
+            amount_foreign = Decimal(str(getattr(line, 'amount_foreign', None) or '0'))
+
+            # إذا كانت العملة أجنبية وأُدخل amount_foreign:
+            # نحسب debit/credit = amount_foreign × exchange_rate
+            debit_base  = line.debit
+            credit_base = line.credit
+            if currency_code != 'SAR' and exchange_rate != Decimal('1') and amount_foreign > 0:
+                if line.debit > 0:
+                    debit_base  = (amount_foreign * exchange_rate).quantize(Decimal('0.001'))
+                    credit_base = Decimal('0')
+                else:
+                    credit_base = (amount_foreign * exchange_rate).quantize(Decimal('0.001'))
+                    debit_base  = Decimal('0')
+            elif amount_foreign == 0:
+                # لم يُدخل amount_foreign → نحسبه من debit/credit
+                amount_foreign = (line.debit + line.credit).quantize(Decimal('0.001'))
+
             je_line = JournalEntryLine(
                 tenant_id=self.user.tenant_id,
                 journal_entry_id=je.id,
@@ -276,8 +296,8 @@ class AccountingService:
                 account_code=line.account_code,
                 account_name=_acct_map.get(line.account_code, line.account_code),
                 description=line.description,
-                debit=line.debit,
-                credit=line.credit,
+                debit=debit_base,
+                credit=credit_base,
                 branch_code=line.branch_code,
                 branch_name=getattr(line, 'branch_name', None),
                 cost_center=line.cost_center,
@@ -289,10 +309,25 @@ class AccountingService:
                 tax_type_code=getattr(line, 'tax_type_code', None),
                 vat_amount=getattr(line, 'vat_amount', None) or Decimal('0'),
                 net_amount=getattr(line, 'net_amount', None) or Decimal('0'),
+                currency_code=currency_code,
+                exchange_rate=exchange_rate,
+                amount_foreign=amount_foreign,
                 created_by=self.user.email,
             )
             self.db.add(je_line)
 
+        await self.db.flush()
+        # إعادة حساب إجمالي القيد بالعملة الأساسية بعد تحويل العملات
+        lines_result = await self.db.execute(
+            __import__('sqlalchemy', fromlist=['select']).select(
+                __import__('app.modules.accounting.models', fromlist=['JournalEntryLine']).JournalEntryLine
+            ).where(
+                __import__('app.modules.accounting.models', fromlist=['JournalEntryLine']).JournalEntryLine.journal_entry_id == je.id
+            )
+        )
+        saved_lines = lines_result.scalars().all()
+        je.total_debit  = sum(l.debit  or Decimal('0') for l in saved_lines)
+        je.total_credit = sum(l.credit or Decimal('0') for l in saved_lines)
         await self.db.flush()
         logger.info("je_draft_created", serial=serial)
         # سجل الحدث
@@ -346,6 +381,23 @@ class AccountingService:
 
         total_dr = total_cr = 0
         for idx, line in enumerate(data.lines):
+            # ── حساب المدين/الدائن بالعملة الأساسية ──────────────────
+            currency_code  = getattr(line, 'currency_code',  None) or 'SAR'
+            exchange_rate  = Decimal(str(getattr(line, 'exchange_rate',  None) or '1.0'))
+            amount_foreign = Decimal(str(getattr(line, 'amount_foreign', None) or '0'))
+
+            debit_base  = line.debit
+            credit_base = line.credit
+            if currency_code != 'SAR' and exchange_rate != Decimal('1') and amount_foreign > 0:
+                if line.debit > 0:
+                    debit_base  = (amount_foreign * exchange_rate).quantize(Decimal('0.001'))
+                    credit_base = Decimal('0')
+                else:
+                    credit_base = (amount_foreign * exchange_rate).quantize(Decimal('0.001'))
+                    debit_base  = Decimal('0')
+            elif amount_foreign == 0:
+                amount_foreign = (line.debit + line.credit).quantize(Decimal('0.001'))
+
             je_line = JournalEntryLine(
                 tenant_id=self.user.tenant_id,
                 journal_entry_id=je_id,
@@ -353,8 +405,8 @@ class AccountingService:
                 account_code=line.account_code,
                 account_name=_acct_map.get(line.account_code, line.account_code),
                 description=line.description,
-                debit=line.debit,
-                credit=line.credit,
+                debit=debit_base,
+                credit=credit_base,
                 branch_code=line.branch_code,
                 branch_name=getattr(line, 'branch_name', None),
                 cost_center=line.cost_center,
@@ -366,11 +418,14 @@ class AccountingService:
                 tax_type_code=getattr(line, 'tax_type_code', None),
                 vat_amount=getattr(line, 'vat_amount', None) or Decimal('0'),
                 net_amount=getattr(line, 'net_amount', None) or Decimal('0'),
+                currency_code=currency_code,
+                exchange_rate=exchange_rate,
+                amount_foreign=amount_foreign,
                 created_by=self.user.email,
             )
             self.db.add(je_line)
-            total_dr += float(line.debit)
-            total_cr += float(line.credit)
+            total_dr += float(debit_base)
+            total_cr += float(credit_base)
 
         je.total_debit  = total_dr
         je.total_credit = total_cr
