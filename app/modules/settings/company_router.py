@@ -69,10 +69,19 @@ class CompanySettingsUpdate(BaseModel):
     currency:               Optional[str]     = None
     fiscal_year_start:      Optional[int]     = None
     decimal_places:         Optional[int]     = None
+    # ✅ الإقليمية والتوطين
+    default_language:       Optional[str]     = None  # ar | en
+    date_format:            Optional[str]     = None  # DD/MM/YYYY | MM/DD/YYYY | YYYY/MM/DD | YYYY-MM-DD
+    time_format:            Optional[str]     = None  # 12h | 24h
+    timezone:               Optional[str]     = None  # Asia/Riyadh | UTC | ...
+    calendar_type:          Optional[str]     = None  # gregorian | hijri | both
+    number_format:          Optional[str]     = None  # western | arabic
+    currency_display:       Optional[str]     = None  # code | symbol | name
+    currency_position:      Optional[str]     = None  # before | after
+    first_day_of_week:      Optional[int]     = None  # 0=الأحد | 1=الاثنين | 6=السبت
 
 
 def _row_to_dict(row) -> dict:
-    """Convert SQLAlchemy Row to dict"""
     if row is None:
         return {}
     return dict(row._mapping)
@@ -90,7 +99,6 @@ async def get_company_settings(
     row = result.fetchone()
     data = _row_to_dict(row) if row else {}
 
-    # تحويل UUID و Decimal لـ JSON
     for k, v in data.items():
         if isinstance(v, uuid.UUID):
             data[k] = str(v)
@@ -108,7 +116,6 @@ async def update_company_settings(
 ):
     tid = str(user.tenant_id)
 
-    # تحقق إذا موجود
     exists = await db.execute(
         text("SELECT id FROM company_settings WHERE tenant_id = :tid"),
         {"tid": tid}
@@ -120,7 +127,6 @@ async def update_company_settings(
         return ok(data={}, message="لا توجد تغييرات")
 
     if existing:
-        # UPDATE
         set_clauses = ", ".join([f"{k} = :{k}" for k in fields])
         set_clauses += ", updated_at = NOW()"
         fields["tid"] = tid
@@ -129,7 +135,6 @@ async def update_company_settings(
             fields
         )
     else:
-        # INSERT
         fields["tenant_id"] = tid
         cols = ", ".join(fields.keys())
         vals = ", ".join([f":{k}" for k in fields.keys()])
@@ -140,7 +145,6 @@ async def update_company_settings(
 
     await db.commit()
 
-    # جلب البيانات المحدّثة
     result = await db.execute(
         text("SELECT * FROM company_settings WHERE tenant_id = :tid LIMIT 1"),
         {"tid": tid}
