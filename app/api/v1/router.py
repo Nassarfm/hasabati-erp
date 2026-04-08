@@ -53,6 +53,10 @@ v1_router.include_router(users_router)
 from app.modules.settings.company_router import router as company_router
 v1_router.include_router(company_router)
 
+# ── Multi Currency ────────────────────────────────────
+from app.modules.settings.currency_router import router as currency_router
+v1_router.include_router(currency_router)
+
 # ── Dimensions ────────────────────────────────────────
 from app.modules.dimensions.router import router as dimensions_router
 v1_router.include_router(dimensions_router)
