@@ -85,6 +85,10 @@ v1_router.include_router(assets_router)
 from app.modules.treasury.router import router as treasury_router
 v1_router.include_router(treasury_router)
 
+# ── Audit Trail ───────────────────────────────────────
+from app.modules.audit.router import router as audit_router
+v1_router.include_router(audit_router)
+
 # ── Reports (Module 7) ────────────────────────────────
 from app.modules.reports.router import router as reports_router
 v1_router.include_router(reports_router)
