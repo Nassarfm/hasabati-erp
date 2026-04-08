@@ -25,6 +25,10 @@ v1_router.include_router(je_activity_router)
 from app.modules.accounting.fiscal_router import router as fiscal_router
 v1_router.include_router(fiscal_router)
 
+# ── Opening Balances ──────────────────────────────────
+from app.modules.accounting.opening_balances_router import router as ob_router
+v1_router.include_router(ob_router)
+
 # ── VAT / Tax Types ───────────────────────────────────
 from app.modules.accounting.tax_router import router as tax_router
 v1_router.include_router(tax_router)
