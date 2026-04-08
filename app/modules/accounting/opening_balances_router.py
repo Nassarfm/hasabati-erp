@@ -23,7 +23,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.core.auth import get_current_tenant_id
+# from app.core.auth import get_current_tenant_id
 
 router = APIRouter(prefix="/opening-balances", tags=["Opening Balances"])
 
