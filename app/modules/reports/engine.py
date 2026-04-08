@@ -513,8 +513,63 @@ async def cash_flow(
 
 
 # ══════════════════════════════════════════════════════════
-# 5. VAT Return  ← محدَّث بالكامل
+# 5. VAT Return
 # ══════════════════════════════════════════════════════════
+
+async def _get_tax_settings(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+) -> Dict[str, Any]:
+    """
+    يجلب إعدادات الضريبة من جدول tax_types:
+    - output_accounts: مجموعة حسابات ضريبة المخرجات
+    - input_accounts:  مجموعة حسابات ضريبة المدخلات
+    - types_map:       { code → { is_input, is_output, rate } }
+    - avg_rate:        متوسط نسبة الضريبة (للحسابات التقريبية)
+    """
+    result = await db.execute(text("""
+        SELECT code, is_input, is_output, rate,
+               output_account_code, input_account_code
+        FROM tax_types
+        WHERE tenant_id = :tid AND is_active = true
+    """), {"tid": str(tenant_id)})
+
+    rows = result.mappings().all()
+
+    output_accounts: set = set()
+    input_accounts:  set = set()
+    types_map: Dict[str, Any] = {}
+    rates = []
+
+    for r in rows:
+        if r["output_account_code"]:
+            output_accounts.add(r["output_account_code"])
+        if r["input_account_code"]:
+            input_accounts.add(r["input_account_code"])
+        types_map[r["code"]] = {
+            "is_input":  r["is_input"],
+            "is_output": r["is_output"],
+            "rate":      float(r["rate"] or 15),
+        }
+        if r["rate"]:
+            rates.append(float(r["rate"]))
+
+    # fallback إذا لم توجد إعدادات ضريبية → استخدم الحسابات الافتراضية
+    if not output_accounts:
+        output_accounts = {"2201"}
+    if not input_accounts:
+        input_accounts = {"1401"}
+
+    avg_rate = (sum(rates) / len(rates)) if rates else 15.0
+
+    return {
+        "output_accounts": output_accounts,
+        "input_accounts":  input_accounts,
+        "types_map":       types_map,
+        "avg_rate":        avg_rate,
+    }
+
+
 async def _vat_from_je_lines(
     db: AsyncSession,
     tenant_id: uuid.UUID,
@@ -523,15 +578,13 @@ async def _vat_from_je_lines(
 ) -> Optional[Dict[str, Any]]:
     """
     [Primary Method]
-    يقرأ ضريبة القيمة المضافة مباشرةً من journal_entry_lines
-    عبر حقلَي vat_amount و tax_type_code.
-
-    المنطق:
-      سطر مدين  + tax_type_code موجود → ضريبة مدخلات  (input_vat)
-      سطر دائن  + tax_type_code موجود → ضريبة مخرجات (output_vat)
-
-    يُعيد None إذا لم توجد أسطر ضريبية أصلاً (trigger الـ fallback).
+    يقرأ ضريبة القيمة المضافة من journal_entry_lines عبر vat_amount + tax_type_code.
+    يستخدم إعدادات tax_types (is_input / is_output) لتحديد الاتجاه.
+    يُعيد None إذا لم توجد أسطر ضريبية → trigger الـ fallback.
     """
+    tax_cfg = await _get_tax_settings(db, tenant_id)
+    types_map = tax_cfg["types_map"]
+
     result = await db.execute(
         select(
             JournalEntryLine.tax_type_code,
@@ -557,12 +610,12 @@ async def _vat_from_je_lines(
 
     rows = result.all()
     if not rows:
-        return None  # لا توجد أسطر ضريبية → trigger fallback
+        return None
 
-    input_vat      = ZERO
-    output_vat     = ZERO
-    taxable_sales  = ZERO
-    taxable_purch  = ZERO
+    input_vat     = ZERO
+    output_vat    = ZERO
+    taxable_sales = ZERO
+    taxable_purch = ZERO
     breakdown: List[Dict[str, Any]] = []
 
     for row in rows:
@@ -571,16 +624,24 @@ async def _vat_from_je_lines(
         total_vat    = Decimal(str(row.total_vat    or 0))
         total_net    = Decimal(str(row.total_net    or 0))
 
-        # سطر مدين → ضريبة مدخلات (مشتريات)
-        if total_debit >= total_credit:
+        # تحديد الاتجاه من إعدادات tax_types أولاً
+        tax_type = types_map.get(row.tax_type_code, {})
+        is_input  = tax_type.get("is_input",  False)
+        is_output = tax_type.get("is_output", False)
+
+        # إذا لم توجد إعدادات → نرجع لاتجاه المدين/الدائن
+        if not is_input and not is_output:
+            is_input  = total_debit >= total_credit
+            is_output = not is_input
+
+        if is_input and not is_output:
+            direction = "input"
             input_vat    += total_vat
             taxable_purch += total_net
-            direction = "input"
-        # سطر دائن → ضريبة مخرجات (مبيعات)
         else:
-            output_vat   += total_vat
-            taxable_sales += total_net
             direction = "output"
+            output_vat    += total_vat
+            taxable_sales += total_net
 
         breakdown.append({
             "tax_type_code": row.tax_type_code,
@@ -589,16 +650,11 @@ async def _vat_from_je_lines(
             "net_amount":    float(total_net.quantize(PREC)),
         })
 
-    input_vat     = input_vat.quantize(PREC)
-    output_vat    = output_vat.quantize(PREC)
-    taxable_sales = taxable_sales.quantize(PREC)
-    taxable_purch = taxable_purch.quantize(PREC)
-
     return {
-        "input_vat":      input_vat,
-        "output_vat":     output_vat,
-        "taxable_sales":  taxable_sales,
-        "taxable_purch":  taxable_purch,
+        "input_vat":      input_vat.quantize(PREC),
+        "output_vat":     output_vat.quantize(PREC),
+        "taxable_sales":  taxable_sales.quantize(PREC),
+        "taxable_purch":  taxable_purch.quantize(PREC),
         "breakdown":      breakdown,
         "source":         "je_lines",
     }
@@ -613,22 +669,29 @@ async def _vat_from_account_balances(
 ) -> Dict[str, Any]:
     """
     [Fallback Method]
-    الطريقة القديمة: تقرأ من account_balances حسابَي 2201 و1401.
-    تُستخدم فقط عند غياب أسطر ضريبية في je_lines.
+    يقرأ من account_balances باستخدام حسابات الضريبة المُعرَّفة في tax_types.
+    ديناميكي — لا يعتمد على أرقام حسابات ثابتة.
     """
+    tax_cfg = await _get_tax_settings(db, tenant_id)
+    output_accounts = tax_cfg["output_accounts"]
+    input_accounts  = tax_cfg["input_accounts"]
+    avg_rate        = Decimal(str(tax_cfg["avg_rate"])) / Decimal("100")
+
     bals = await _period_balances(db, tenant_id, year, month_from, year, month_to)
 
-    vat_out_b  = bals.get("2201", {"debit": ZERO, "credit": ZERO})
-    output_vat = (vat_out_b["credit"] - vat_out_b["debit"]).quantize(PREC)
+    # ضريبة المخرجات — جمع كل حسابات output المعرَّفة في الإعدادات
+    output_vat = ZERO
+    for code in output_accounts:
+        b = bals.get(code, {"debit": ZERO, "credit": ZERO})
+        output_vat += (b["credit"] - b["debit"]).quantize(PREC)
 
-    vat_in_b  = bals.get("1401", {"debit": ZERO, "credit": ZERO})
-    input_vat = (vat_in_b["debit"] - vat_in_b["credit"]).quantize(PREC)
+    # ضريبة المدخلات — جمع كل حسابات input المعرَّفة في الإعدادات
+    input_vat = ZERO
+    for code in input_accounts:
+        b = bals.get(code, {"debit": ZERO, "credit": ZERO})
+        input_vat += (b["debit"] - b["credit"]).quantize(PREC)
 
-    # حسابات ضريبة المدخلات الأخرى (14xx ما عدا 1401)
-    for code, b in bals.items():
-        if code.startswith("14") and code != "1401":
-            input_vat += (b["debit"] - b["credit"]).quantize(PREC)
-
+    # وعاء المبيعات من حسابات الإيرادات
     coa = await _get_coa(db, tenant_id)
     taxable_sales = ZERO
     for code, acc in coa.items():
@@ -639,15 +702,24 @@ async def _vat_from_account_balances(
         if acc.account_type == AccountType.REVENUE:
             taxable_sales += amt
 
-    taxable_purch = (input_vat / Decimal("0.15")).quantize(PREC) if input_vat > 0 else ZERO
+    # وعاء المشتريات — نحسبه من الضريبة / النسبة
+    taxable_purch = (
+        (input_vat / avg_rate).quantize(PREC)
+        if input_vat > 0 and avg_rate > 0
+        else ZERO
+    )
 
     return {
-        "input_vat":      input_vat,
-        "output_vat":     output_vat,
-        "taxable_sales":  taxable_sales,
-        "taxable_purch":  taxable_purch,
-        "breakdown":      [],
-        "source":         "account_balances",
+        "input_vat":       input_vat.quantize(PREC),
+        "output_vat":      output_vat.quantize(PREC),
+        "taxable_sales":   taxable_sales.quantize(PREC),
+        "taxable_purch":   taxable_purch.quantize(PREC),
+        "breakdown":       [],
+        "source":          "account_balances",
+        "vat_accounts":    {
+            "output": list(output_accounts),
+            "input":  list(input_accounts),
+        },
     }
 
 
