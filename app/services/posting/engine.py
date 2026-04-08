@@ -55,6 +55,10 @@ class PostingLine:
     branch_code: Optional[str] = None
     cost_center: Optional[str] = None
     project_code: Optional[str] = None
+    # ── حقول العملة الأجنبية ──
+    currency_code:  Optional[str]     = "SAR"
+    exchange_rate:  Optional[Decimal] = Decimal("1.0")
+    amount_foreign: Optional[Decimal] = Decimal("0")
 
 
 @dataclass
@@ -309,6 +313,9 @@ class PostingEngine:
                     branch_code=line.branch_code,
                     cost_center=line.cost_center,
                     project_code=line.project_code,
+                    currency_code=getattr(line, "currency_code",  None) or "SAR",
+                    exchange_rate=getattr(line, "exchange_rate",  None) or Decimal("1.0"),
+                    amount_foreign=getattr(line, "amount_foreign", None) or (line.debit + line.credit),
                     created_by=request.created_by_email,
                 )
                 self.db.add(je_line)
@@ -393,6 +400,11 @@ class PostingEngine:
                 credit=line.debit,
                 branch_code=line.branch_code,
                 cost_center=line.cost_center,
+                project_code=getattr(line, "project_code", None),
+                # ── نسخ حقول العملة من القيد الأصلي ──
+                currency_code=getattr(line, "currency_code",  None) or "SAR",
+                exchange_rate=getattr(line, "exchange_rate",  None) or Decimal("1.0"),
+                amount_foreign=getattr(line, "amount_foreign", None) or Decimal("0"),
             )
             for line in original.lines
         ]
