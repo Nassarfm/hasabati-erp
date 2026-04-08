@@ -45,7 +45,6 @@ class ReopenPeriod(BaseModel):
 # Helper: توليد الفترات تلقائياً
 # ══════════════════════════════════════════════
 def generate_periods(start_year: int, start_month: int, has_adj: bool):
-    """يولّد 12 فترة (أو 13 مع التسوية) بتواريخ صحيحة"""
     from calendar import monthrange
     periods = []
     year = start_year
@@ -69,7 +68,6 @@ def generate_periods(start_year: int, start_month: int, has_adj: bool):
             year += 1
 
     if has_adj:
-        # فترة التسوية = آخر يوم من آخر فترة
         last = periods[-1]
         periods.append({
             "period_number":       13,
@@ -119,7 +117,6 @@ async def list_fiscal_years(deps=Depends(_deps)):
 async def create_fiscal_year(data: FiscalYearCreate, deps=Depends(_deps)):
     db, user = deps
 
-    # التحقق من عدم التكرار
     exists = await db.execute(
         text("SELECT id FROM fiscal_years WHERE tenant_id=:tid AND start_year=:yr AND start_month=:mo"),
         {"tid": str(user.tenant_id), "yr": data.start_year, "mo": data.start_month}
@@ -127,7 +124,6 @@ async def create_fiscal_year(data: FiscalYearCreate, deps=Depends(_deps)):
     if exists.fetchone():
         raise HTTPException(400, "السنة المالية موجودة مسبقاً")
 
-    # حساب تواريخ السنة
     from calendar import monthrange
     start_date = date(data.start_year, data.start_month, 1)
     end_month  = data.start_month - 1 or 12
@@ -140,8 +136,6 @@ async def create_fiscal_year(data: FiscalYearCreate, deps=Depends(_deps)):
         year_name = f"السنة المالية {data.start_year}/{data.start_year+1}"
 
     fy_id = uuid.uuid4()
-
-    # هل هي السنة الحالية؟
     today = date.today()
     is_current = start_date <= today <= end_date
 
@@ -164,7 +158,6 @@ async def create_fiscal_year(data: FiscalYearCreate, deps=Depends(_deps)):
         }
     )
 
-    # توليد الفترات تلقائياً
     periods = generate_periods(data.start_year, data.start_month, data.has_adjustment_period)
     for p in periods:
         await db.execute(
@@ -222,7 +215,6 @@ async def list_periods(fy_id: uuid.UUID, deps=Depends(_deps)):
 
 @router.get("/current-period")
 async def get_current_period(entry_date: date, deps=Depends(_deps)):
-    """جلب الفترة المناسبة لتاريخ معين"""
     db, user = deps
     result = await db.execute(
         text("""
@@ -235,7 +227,7 @@ async def get_current_period(entry_date: date, deps=Depends(_deps)):
             ORDER BY ap.start_date DESC
             LIMIT 1
         """),
-        {"tid": str(user.tenant_id), "edate": entry_date}  # date object — asyncpg handles correctly
+        {"tid": str(user.tenant_id), "edate": entry_date}
     )
     row = result.fetchone()
     if not row:
@@ -247,6 +239,105 @@ async def get_current_period(entry_date: date, deps=Depends(_deps)):
     })
 
 
+# ══════════════════════════════════════════════
+# ✅ جديد: Pre-Close Check — فحص قبل الإغلاق
+# ══════════════════════════════════════════════
+@router.get("/periods/{period_id}/pre-close-check")
+async def pre_close_check(period_id: uuid.UUID, deps=Depends(_deps)):
+    """
+    يفحص الفترة قبل إغلاقها ويُعيد:
+    - عدد القيود المعلقة (draft/pending)
+    - عدد القيود المرحّلة
+    - مجموع المدين والدائن للقيود المرحّلة
+    - هل يمكن الإغلاق أم لا
+    """
+    db, user = deps
+    tid = str(user.tenant_id)
+    pid = str(period_id)
+
+    # جلب بيانات الفترة
+    period_res = await db.execute(
+        text("""
+            SELECT ap.period_name_ar, ap.start_date, ap.end_date, ap.status
+            FROM accounting_periods ap
+            WHERE ap.id = :pid AND ap.tenant_id = :tid
+        """),
+        {"pid": pid, "tid": tid}
+    )
+    period = period_res.fetchone()
+    if not period:
+        raise HTTPException(404, "الفترة غير موجودة")
+    if period[3] == 'closed':
+        raise HTTPException(400, "الفترة مغلقة مسبقاً")
+
+    # عدد القيود حسب الحالة في نطاق الفترة
+    je_res = await db.execute(
+        text("""
+            SELECT
+                status,
+                COUNT(*)            AS cnt,
+                COALESCE(SUM(total_debit),  0) AS total_dr,
+                COALESCE(SUM(total_credit), 0) AS total_cr
+            FROM journal_entries
+            WHERE tenant_id  = :tid
+              AND entry_date BETWEEN :sd AND :ed
+            GROUP BY status
+        """),
+        {"tid": tid, "sd": period[1], "ed": period[2]}
+    )
+    je_rows = je_res.fetchall()
+
+    posted_count  = 0
+    draft_count   = 0
+    pending_count = 0
+    total_debit   = 0.0
+    total_credit  = 0.0
+
+    for row in je_rows:
+        status = row[0]
+        cnt    = int(row[1])
+        dr     = float(row[2])
+        cr     = float(row[3])
+        if status == 'posted':
+            posted_count += cnt
+            total_debit  += dr
+            total_credit += cr
+        elif status in ('draft',):
+            draft_count += cnt
+        elif status in ('pending_review', 'approved'):
+            pending_count += cnt
+
+    unposted_count = draft_count + pending_count
+    is_balanced    = abs(total_debit - total_credit) < 0.01
+    can_close      = unposted_count == 0
+
+    warnings = []
+    if draft_count > 0:
+        warnings.append(f"يوجد {draft_count} قيد في حالة مسودة — يجب ترحيلها أو حذفها")
+    if pending_count > 0:
+        warnings.append(f"يوجد {pending_count} قيد في انتظار الموافقة — يجب إتمام الموافقة أولاً")
+    if not is_balanced and posted_count > 0:
+        warnings.append(f"الفترة غير متوازنة — مدين: {total_debit:.3f} | دائن: {total_credit:.3f}")
+
+    return ok(data={
+        "period_name":     period[0],
+        "start_date":      str(period[1]),
+        "end_date":        str(period[2]),
+        "posted_count":    posted_count,
+        "draft_count":     draft_count,
+        "pending_count":   pending_count,
+        "unposted_count":  unposted_count,
+        "total_debit":     round(total_debit,  3),
+        "total_credit":    round(total_credit, 3),
+        "is_balanced":     is_balanced,
+        "can_close":       can_close,
+        "warnings":        warnings,
+    })
+
+
+# ══════════════════════════════════════════════
+# إغلاق فترة
+# ══════════════════════════════════════════════
 @router.post("/periods/{period_id}/close")
 async def close_period(period_id: uuid.UUID, body: PeriodAction, deps=Depends(_deps)):
     db, user = deps
@@ -266,7 +357,6 @@ async def close_period(period_id: uuid.UUID, body: PeriodAction, deps=Depends(_d
                 WHERE id=:id AND tenant_id=:tid"""),
         {"id": str(period_id), "tid": str(user.tenant_id), "by": user.email}
     )
-    # سجل الحدث
     await db.execute(
         text("""INSERT INTO period_audit_log
                 (id,tenant_id,period_id,action,action_ar,performed_by,notes)
@@ -277,10 +367,100 @@ async def close_period(period_id: uuid.UUID, body: PeriodAction, deps=Depends(_d
     return ok(data={"status":"closed"}, message=f"تم إغلاق {period[2]}")
 
 
+# ══════════════════════════════════════════════
+# ✅ جديد: إغلاق السنة كاملة
+# ══════════════════════════════════════════════
+@router.post("/years/{fy_id}/close-all")
+async def close_all_periods(fy_id: uuid.UUID, body: PeriodAction, deps=Depends(_deps)):
+    """
+    يغلق كل الفترات المفتوحة في السنة المالية دفعة واحدة.
+    يتحقق أولاً من عدم وجود قيود معلقة في أي فترة.
+    """
+    db, user = deps
+    tid = str(user.tenant_id)
+    fid = str(fy_id)
+    now = datetime.now(timezone.utc)
+
+    # جلب الفترات المفتوحة
+    open_res = await db.execute(
+        text("""
+            SELECT id, period_name_ar, start_date, end_date
+            FROM accounting_periods
+            WHERE fiscal_year_id = :fid AND tenant_id = :tid AND status = 'open'
+            ORDER BY period_number
+        """),
+        {"fid": fid, "tid": tid}
+    )
+    open_periods = open_res.fetchall()
+
+    if not open_periods:
+        raise HTTPException(400, "لا توجد فترات مفتوحة في هذه السنة")
+
+    # التحقق من عدم وجود قيود معلقة في أي فترة
+    total_unposted = 0
+    for p in open_periods:
+        je_res = await db.execute(
+            text("""
+                SELECT COUNT(*) FROM journal_entries
+                WHERE tenant_id  = :tid
+                  AND entry_date BETWEEN :sd AND :ed
+                  AND status IN ('draft','pending_review','approved')
+            """),
+            {"tid": tid, "sd": p[2], "ed": p[3]}
+        )
+        count = je_res.scalar() or 0
+        total_unposted += count
+
+    if total_unposted > 0:
+        raise HTTPException(400,
+            f"يوجد {total_unposted} قيد غير مرحَّل في فترات هذه السنة — يجب ترحيل أو حذف كل القيود المعلقة أولاً"
+        )
+
+    # إغلاق كل الفترات
+    closed = 0
+    for p in open_periods:
+        await db.execute(
+            text("""
+                UPDATE accounting_periods
+                SET status='closed', locked_at=:now, locked_by=:by
+                WHERE id=:id AND tenant_id=:tid
+            """),
+            {"id": str(p[0]), "tid": tid, "by": user.email, "now": now}
+        )
+        await db.execute(
+            text("""
+                INSERT INTO period_audit_log
+                    (id,tenant_id,period_id,action,action_ar,performed_by,notes)
+                VALUES
+                    (gen_random_uuid(),:tid,:pid,'closed','إغلاق الفترة (إغلاق السنة)',:by,:notes)
+            """),
+            {"tid": tid, "pid": str(p[0]), "by": user.email, "notes": body.notes or "إغلاق السنة المالية"}
+        )
+        closed += 1
+
+    # تحديث حالة السنة
+    await db.execute(
+        text("""
+            UPDATE fiscal_years
+            SET status='closed', closed_at=:now, closed_by=:by
+            WHERE id=:fid AND tenant_id=:tid
+        """),
+        {"fid": fid, "tid": tid, "by": user.email, "now": now}
+    )
+
+    await db.commit()
+    return ok(
+        data={"closed_periods": closed},
+        message=f"تم إغلاق {closed} فترة وإغلاق السنة المالية بنجاح"
+    )
+
+
+# ══════════════════════════════════════════════
+# إعادة فتح فترة
+# ══════════════════════════════════════════════
 @router.post("/periods/{period_id}/reopen")
 async def reopen_period(period_id: uuid.UUID, body: ReopenPeriod, deps=Depends(_deps)):
     db, user = deps
-    # فقط owner/admin يستطيع إعادة الفتح
     if user.role not in ('owner', 'admin'):
         raise HTTPException(403, "فقط مدير النظام يستطيع إعادة فتح الفترة")
 
@@ -310,6 +490,9 @@ async def reopen_period(period_id: uuid.UUID, body: ReopenPeriod, deps=Depends(_
     return ok(data={"status":"open"}, message=f"تم إعادة فتح {period[2]}")
 
 
+# ══════════════════════════════════════════════
+# سجل أحداث الفترة
+# ══════════════════════════════════════════════
 @router.get("/periods/{period_id}/audit")
 async def period_audit(period_id: uuid.UUID, deps=Depends(_deps)):
     db, user = deps
@@ -326,4 +509,3 @@ async def period_audit(period_id: uuid.UUID, deps=Depends(_deps)):
         "performed_by": r[2], "notes": r[3],
         "created_at": str(r[4])
     } for r in rows])
-
