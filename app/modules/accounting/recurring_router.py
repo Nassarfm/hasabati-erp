@@ -388,6 +388,23 @@ async def post_pending_instances(
                 credit_pct = Decimal(str(lt.get("credit_pct", 0)))
                 debit  = (inst.amount * debit_pct  / 100).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
                 credit = (inst.amount * credit_pct / 100).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+                # حساب مبالغ الضريبة إذا كان السطر يحتوي tax_type_code
+                tax_type_code = lt.get("tax_type_code") or None
+                vat_amount    = Decimal("0")
+                net_amount    = Decimal("0")
+                if tax_type_code:
+                    # احسب النسبة من القالب الأصلي
+                    orig_vat = Decimal(str(lt.get("vat_amount") or 0))
+                    orig_net = Decimal(str(lt.get("net_amount") or 0))
+                    orig_dr  = Decimal(str(lt.get("debit")  or 0))
+                    orig_cr  = Decimal(str(lt.get("credit") or 0))
+                    orig_base = orig_dr + orig_cr  # المبلغ الأصلي في القالب
+                    current   = debit + credit      # المبلغ الحالي للقسط
+                    if orig_base > 0:
+                        ratio     = current / orig_base
+                        vat_amount = (orig_vat * ratio).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+                        net_amount = (orig_net * ratio).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+
                 lines_data.append({
                     "account_code":               lt["account_code"],
                     "description":                lt.get("description") or entry.description,
@@ -401,6 +418,9 @@ async def post_pending_instances(
                     "project_name":               lt.get("project_name"),
                     "expense_classification_code":lt.get("expense_classification_code"),
                     "expense_classification_name":lt.get("expense_classification_name"),
+                    "tax_type_code":              tax_type_code,
+                    "vat_amount":                 float(vat_amount),
+                    "net_amount":                 float(net_amount),
                 })
 
             from app.modules.accounting.schemas import JournalEntryCreate, JELineCreate
