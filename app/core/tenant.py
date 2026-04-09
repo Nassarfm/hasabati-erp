@@ -22,7 +22,7 @@ from typing import Optional
 from uuid import UUID
 
 import structlog
-from fastapi import Depends
+from fastapi import Depends, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -131,6 +131,7 @@ async def _load_user_tenant(
 
 
 async def get_current_user(
+    request: Request,
     claims: RawTokenClaims = Depends(get_raw_claims),
     db: AsyncSession = Depends(get_db),
 ) -> CurrentUser:
@@ -160,5 +161,12 @@ async def get_current_user(
         tenant_id=str(user.tenant_id),
         role=user.role,
     )
+
+    # ── حفظ بيانات المستخدم في request.state للـ AuditMiddleware ──
+    try:
+        from app.middleware.request_state import set_user_state
+        set_user_state(request, user)
+    except Exception:
+        pass
 
     return user

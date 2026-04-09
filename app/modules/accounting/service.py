@@ -229,7 +229,7 @@ class AccountingService:
 
         from app.services.numbering.series_service import NumberSeriesService
         num_svc = NumberSeriesService(self.db, self.user.tenant_id)
-        serial = await num_svc.next_je(data.je_type)
+        serial = await num_svc.next_je(data.je_type, entry_date=data.entry_date)
 
         je = JournalEntry(
             tenant_id=self.user.tenant_id,

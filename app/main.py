@@ -18,6 +18,7 @@ from app.core.errors import (
 from app.core.exceptions import ERPException
 from app.core.logging import configure_logging
 from app.tasks.scheduler import start_scheduler, stop_scheduler
+from app.middleware.audit_middleware import AuditMiddleware
 from app.api.v1.router import v1_router
 
 logger = structlog.get_logger(__name__)
@@ -52,6 +53,8 @@ def create_app() -> FastAPI:
         expose_headers=["*"],
         max_age=600,
     )
+    # ── Audit Middleware — يسجّل نشاط المستخدمين تلقائياً ──
+    app.add_middleware(AuditMiddleware)
     app.add_exception_handler(ERPException, erp_exception_handler)
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
