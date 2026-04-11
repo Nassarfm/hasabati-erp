@@ -153,21 +153,29 @@ class AuditMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next) -> Response:
-        path   = request.url.path
-        method = request.method
+        # ── الـ Middleware لا يكسر أي طلب أبداً ──
+        # إذا فشل أي شيء → نكمل بدون تسجيل
+        try:
+            path   = request.url.path
+            method = request.method
 
-        # تخطي المسارات غير المهمة
-        if _should_skip(method, path):
-            return await call_next(request)
+            if _should_skip(method, path):
+                return await call_next(request)
 
-        # تنفيذ الطلب
-        start_time = time.time()
-        response   = await call_next(request)
-        duration   = round((time.time() - start_time) * 1000)  # ms
+            start_time = time.time()
+            response   = await call_next(request)
+            duration   = round((time.time() - start_time) * 1000)
 
-        # لا نسجّل إلا الطلبات الناجحة (2xx) والمهمة
-        if response.status_code < 200 or response.status_code >= 400:
-            return response
+            if response.status_code < 200 or response.status_code >= 400:
+                return response
+
+        except Exception:
+            # أي خطأ في الـ middleware → نُكمل الطلب بشكل طبيعي
+            try:
+                return await call_next(request)
+            except Exception:
+                pass
+            return Response(status_code=500)
 
         try:
             # استخراج بيانات المستخدم من state (يُعبَّأ بواسطة get_current_user)
@@ -230,4 +238,4 @@ class AuditMiddleware(BaseHTTPMiddleware):
         except Exception as e:
             logger.warning("audit_middleware_error", error=str(e))
 
-        return response
+        return response  # دائماً أعد الـ response حتى لو فشل التسجيل

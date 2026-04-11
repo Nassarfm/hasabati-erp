@@ -126,6 +126,16 @@ async def update_company_settings(
     if not fields:
         return ok(data={}, message="لا توجد تغييرات")
 
+    # ── تحويل حقول التاريخ من string إلى date object ──────
+    from datetime import date as _date
+    _date_fields = ['cr_issue_date', 'founded_date']
+    for _f in _date_fields:
+        if _f in fields and fields[_f] and isinstance(fields[_f], str):
+            try:
+                fields[_f] = _date.fromisoformat(fields[_f])
+            except (ValueError, TypeError):
+                fields[_f] = None
+
     if existing:
         set_clauses = ", ".join([f"{k} = :{k}" for k in fields])
         set_clauses += ", updated_at = NOW()"
