@@ -473,21 +473,33 @@ async def post_invoice(inv_id: uuid.UUID, db: AsyncSession=Depends(get_db), user
         invoice_hash=inv["invoice_hash"] or "",
     )
 
-    # جلب حسابات الترحيل
-    # DR ذمم عملاء / CR إيرادات + CR ضريبة
+    # ── جلب الحسابات من gl_account_mappings ──────────────
+    async def _get_gl(db, tid, key, default):
+        r = await db.execute(text("""
+            SELECT account_code FROM gl_account_mappings
+            WHERE tenant_id=:tid AND mapping_key=:key LIMIT 1
+        """), {"tid":tid,"key":key})
+        row = r.fetchone()
+        return row[0] if row else default
+
+    ar_default  = await _get_gl(db, tid, "ar_default",    "120101")
+    revenue_acc = await _get_gl(db, tid, "ar_revenue",    "410101")
+    vat_acc     = await _get_gl(db, tid, "ar_vat_output", "240101")
+
+    # حساب العميل من بطاقة العميل (أو الافتراضي)
     r3 = await db.execute(text("SELECT gl_account_code FROM ar_customers WHERE id=:cid AND tenant_id=:tid"),
                            {"cid":str(inv["customer_id"]),"tid":tid})
     cust_row = r3.fetchone()
-    ar_account = cust_row[0] if cust_row else "120101"
+    ar_account = (cust_row[0] if cust_row and cust_row[0] else None) or ar_default
 
     total = Decimal(str(inv["total_amount"]))
     vat   = Decimal(str(inv["vat_amount"]))
     net   = Decimal(str(inv["subtotal"]))
 
     je_lines = [
-        {"account_code": ar_account,  "debit": total, "credit": 0,   "description": f"فاتورة {inv['serial']}"},
-        {"account_code": "410101",    "debit": 0,     "credit": net,  "description": f"إيراد — {inv['serial']}"},
-        {"account_code": "240101",    "debit": 0,     "credit": vat,  "description": f"ضريبة — {inv['serial']}"},
+        {"account_code": ar_account,   "debit": total, "credit": 0,   "description": f"فاتورة {inv['serial']}"},
+        {"account_code": revenue_acc,  "debit": 0,     "credit": net,  "description": f"إيراد — {inv['serial']}"},
+        {"account_code": vat_acc,      "debit": 0,     "credit": vat,  "description": f"ضريبة مخرجات — {inv['serial']}"},
     ]
     if inv["invoice_type"] in ("credit_note","debit_note"):
         je_lines = [{"account_code":l["account_code"],"debit":l["credit"],"credit":l["debit"],"description":l["description"]} for l in je_lines]

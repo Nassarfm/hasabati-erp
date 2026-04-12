@@ -545,10 +545,37 @@ async def post_receipt(rec_id: uuid.UUID, db: AsyncSession=Depends(get_db), user
     if rec["status"] != "draft": raise HTTPException(400,"مُرحَّل مسبقاً")
 
     total = Decimal(str(rec["total_cost"] or 0))
-    je_lines = [
-        {"account_code":"130101","debit":total,"credit":0,"description":f"استلام {rec['serial']}"},
-        {"account_code":"210201","debit":0,"credit":total,"description":f"استلام {rec['serial']}"},
-    ]
+
+    # جلب حسابات من إعدادات GL
+    grni_account = "210201"  # بضاعة بالطريق (GRNI)
+    r_grni = await db.execute(text("""
+        SELECT account_code FROM gl_account_mappings
+        WHERE tenant_id=:tid AND mapping_key='ap_grni' LIMIT 1
+    """), {"tid":tid})
+    grni_row = r_grni.fetchone()
+    if grni_row: grni_account = grni_row[0]
+
+    # جمع حسابات الأصناف من أسطر الاستلام
+    r_lines = await db.execute(text("""
+        SELECT rl.total_cost, COALESCE(i.gl_account_code,'130101') AS gl_acc
+        FROM ap_receipt_lines rl
+        LEFT JOIN inv_items i ON i.item_code=rl.item_code AND i.tenant_id=:tid
+        WHERE rl.receipt_id=:rec_id
+    """), {"tid":tid,"rec_id":str(rec_id)})
+    item_lines = r_lines.fetchall()
+
+    # بناء أسطر القيد — DR لكل حساب مخزون
+    je_lines = []
+    from collections import defaultdict
+    grouped = defaultdict(Decimal)
+    for il in item_lines:
+        grouped[il[1]] += Decimal(str(il[0] or 0))
+    for acc, amt in grouped.items():
+        je_lines.append({"account_code":acc,"debit":amt,"credit":0,"description":f"استلام {rec['serial']}"})
+    if not je_lines:  # fallback
+        je_lines.append({"account_code":"130101","debit":total,"credit":0,"description":f"استلام {rec['serial']}"})
+    # CR بضاعة بالطريق (GRNI)
+    je_lines.append({"account_code":grni_account,"debit":0,"credit":total,"description":f"استلام {rec['serial']}"})
     je = await _post_je(db, tid, user.email, "GRN", rec["receipt_date"],
                         f"استلام بضاعة {rec['serial']}", je_lines, rec["serial"])
 
@@ -676,8 +703,20 @@ async def post_invoice(inv_id: uuid.UUID, db: AsyncSession=Depends(get_db), user
     if not inv: raise HTTPException(404)
     if inv["status"] != "draft": raise HTTPException(400,"مُرحَّلة مسبقاً")
 
-    # حساب GL للمورد
-    ap_account = "210101"
+    # ── جلب الحسابات من gl_account_mappings ──────────────
+    async def _get_mapping(db, tid, key, default):
+        r = await db.execute(text("""
+            SELECT account_code FROM gl_account_mappings
+            WHERE tenant_id=:tid AND mapping_key=:key LIMIT 1
+        """), {"tid":tid,"key":key})
+        row = r.fetchone()
+        return row[0] if row else default
+
+    ap_account   = "210101"
+    grni_account = await _get_mapping(db, tid, "ap_grni", "210201")
+    vat_account  = await _get_mapping(db, tid, "ap_vat_input", "240201")
+    expense_acc  = await _get_mapping(db, tid, "ap_purchase_expense", "510101")
+
     if inv["vendor_id"]:
         r2 = await db.execute(text("SELECT gl_account_code FROM ap_vendors WHERE id=:vid"),{"vid":str(inv["vendor_id"])})
         vrow = r2.fetchone()
@@ -687,11 +726,20 @@ async def post_invoice(inv_id: uuid.UUID, db: AsyncSession=Depends(get_db), user
     vat   = Decimal(str(inv["vat_amount"]))
     net   = Decimal(str(inv["subtotal"]))
 
-    je_lines = [
-        {"account_code":"510101","debit":net,  "credit":0,    "description":f"مشتريات {inv['serial']}"},
-        {"account_code":"240201","debit":vat,  "credit":0,    "description":f"ضريبة مدخلات {inv['serial']}"},
-        {"account_code":ap_account,"debit":0,  "credit":total,"description":f"فاتورة مورد {inv['serial']}"},
-    ]
+    # ── 3-Way Match: مرتبطة بـ GRN → تصفير GRNI ─────────
+    if inv.get("receipt_id"):
+        je_lines = [
+            {"account_code": grni_account, "debit": net,  "credit": 0,    "description": f"إغلاق GRNI {inv['serial']}"},
+            {"account_code": vat_account,  "debit": vat,  "credit": 0,    "description": f"ضريبة مدخلات {inv['serial']}"},
+            {"account_code": ap_account,   "debit": 0,    "credit": total, "description": f"فاتورة مورد {inv['serial']}"},
+        ]
+    # ── 2-Way Match: مشتريات مباشرة (خدمات / مصاريف) ────
+    else:
+        je_lines = [
+            {"account_code": expense_acc,  "debit": net,  "credit": 0,    "description": f"مشتريات {inv['serial']}"},
+            {"account_code": vat_account,  "debit": vat,  "credit": 0,    "description": f"ضريبة مدخلات {inv['serial']}"},
+            {"account_code": ap_account,   "debit": 0,    "credit": total, "description": f"فاتورة مورد {inv['serial']}"},
+        ]
 
     je = await _post_je(db, tid, user.email, "APINV", inv["invoice_date"],
                         f"فاتورة مورد {inv['serial']}", je_lines, inv["serial"])
