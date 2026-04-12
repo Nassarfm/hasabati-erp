@@ -11,7 +11,6 @@ Endpoints:
 ══════════════════════════════════════════════════════════
 """
 from __future__ import annotations
-import json
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
@@ -181,7 +180,7 @@ async def dashboard(
           (SELECT COUNT(*) FROM tr_bank_accounts WHERE tenant_id=:tid AND account_type='cash_fund' AND is_active=true) AS funds,
           (SELECT COUNT(*) FROM tr_petty_cash_funds WHERE tenant_id=:tid AND is_active=true) AS petty_funds,
           (SELECT COUNT(*) FROM tr_petty_cash_expenses WHERE tenant_id=:tid AND status='draft') AS pending_expenses,
-          (SELECT COALESCE(SUM(amount),0) FROM tr_petty_cash_expenses WHERE tenant_id=:tid AND status='draft') AS pending_amount,
+          (SELECT COALESCE(SUM(total_amount),0) FROM tr_petty_cash_expenses WHERE tenant_id=:tid AND status='draft') AS pending_amount,
           (SELECT COUNT(*) FROM tr_cash_transactions WHERE tenant_id=:tid AND status='draft') AS pending_vouchers,
           (SELECT COUNT(*) FROM tr_bank_transactions WHERE tenant_id=:tid AND status='draft') AS pending_bank_tx
     """), {"tid": tid})
