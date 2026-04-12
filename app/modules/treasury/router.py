@@ -1,8 +1,9 @@
 """
 app/modules/treasury/router.py
 ══════════════════════════════════════════════════════════
-Treasury & Banking Module — Complete API
+Treasury & Banking Module — Complete API v2
 الخزينة والبنوك — واجهة برمجية كاملة
+آخر تحديث: 2026-04-13 — إصلاح حفظ الحسابات البنكية
 
 Endpoints:
   Dashboard, Bank Accounts, Cash Transactions (PV/RV),
