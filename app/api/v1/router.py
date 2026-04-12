@@ -72,7 +72,9 @@ v1_router.include_router(inventory_router)
 # ── Sales (Module 2B) ──────────────────────────────────
 from app.modules.sales.router import router as sales_router
 v1_router.include_router(sales_router)
-
+# ── AR (Module 8) ────────────────────────────────
+from app.modules.ar.router import router as ar_router
+v1_router.include_router(ar_router)
 # ── Purchases (Module 3) ───────────────────────────────
 from app.modules.purchases.router import router as purchases_router
 v1_router.include_router(purchases_router)
