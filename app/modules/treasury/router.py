@@ -239,33 +239,66 @@ async def create_bank_account(
 ):
     tid = str(user.tenant_id)
 
-    # الحقول المسموح بها فقط — تجنب SQL error من حقول غير موجودة
-    ALLOWED = {
-        "account_code","account_name","account_name_en","account_type",
-        "bank_name","bank_branch","account_number","iban","swift_code",
-        "currency_code","gl_account_code","opening_balance",
-        "low_balance_alert","credit_limit","notes",
-    }
-    safe = {k:v for k,v in data.items() if k in ALLOWED and v is not None and v != ""}
+    # التحقق من الحقول المطلوبة
+    if not data.get("account_code"):
+        raise HTTPException(400, "كود الحساب مطلوب")
+    if not data.get("account_name"):
+        raise HTTPException(400, "اسم الحساب مطلوب")
+    if not data.get("gl_account_code"):
+        raise HTTPException(400, "حساب الأستاذ العام مطلوب")
 
     ba_id = str(uuid.uuid4())
-    safe["id"]              = ba_id
-    safe["tenant_id"]       = tid
-    safe["current_balance"] = safe.get("opening_balance", 0)
-    safe["created_by"]      = user.email
 
-    cols = ", ".join(safe.keys())
-    vals = ", ".join([f":{k}" for k in safe.keys()])
+    # تحويل آمن للأرقام
+    def to_decimal(v, default=0):
+        try: return Decimal(str(v)) if v not in (None, "", "null") else Decimal(default)
+        except: return Decimal(default)
 
     try:
-        await db.execute(text(f"INSERT INTO tr_bank_accounts ({cols}) VALUES ({vals})"), safe)
+        await db.execute(text("""
+            INSERT INTO tr_bank_accounts (
+                id, tenant_id, account_code, account_name, account_name_en,
+                account_type, bank_name, bank_branch, account_number,
+                iban, swift_code, currency_code, gl_account_code,
+                opening_balance, current_balance, low_balance_alert,
+                is_active, created_by
+            ) VALUES (
+                :id, :tid, :account_code, :account_name, :account_name_en,
+                :account_type, :bank_name, :bank_branch, :account_number,
+                :iban, :swift_code, :currency_code, :gl_account_code,
+                :opening_balance, :current_balance, :low_balance_alert,
+                true, :created_by
+            )
+        """), {
+            "id":               ba_id,
+            "tid":              tid,
+            "account_code":     str(data["account_code"]).strip(),
+            "account_name":     str(data["account_name"]).strip(),
+            "account_name_en":  data.get("account_name_en") or None,
+            "account_type":     data.get("account_type") or "bank",
+            "bank_name":        data.get("bank_name") or None,
+            "bank_branch":      data.get("bank_branch") or None,
+            "account_number":   data.get("account_number") or None,
+            "iban":             data.get("iban") or None,
+            "swift_code":       data.get("swift_code") or None,
+            "currency_code":    data.get("currency_code") or "SAR",
+            "gl_account_code":  str(data["gl_account_code"]).strip(),
+            "opening_balance":  to_decimal(data.get("opening_balance"), 0),
+            "current_balance":  to_decimal(data.get("opening_balance"), 0),
+            "low_balance_alert":to_decimal(data.get("low_balance_alert"), 0),
+            "created_by":       user.email,
+        })
         await db.commit()
+    except HTTPException:
+        raise
     except Exception as e:
         await db.rollback()
-        raise HTTPException(status_code=400, detail=f"خطأ في الحفظ: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"خطأ في قاعدة البيانات: {str(e)}")
 
-    return created(data={"id": ba_id, "account_code": safe.get("account_code")},
-                   message="تم تعريف الحساب ✅")
+    return created(
+        data={"id": ba_id, "account_code": data["account_code"]},
+        message=f"تم إنشاء الحساب {data['account_code']} ✅"
+    )
 
 
 @router.put("/bank-accounts/{ba_id}")
