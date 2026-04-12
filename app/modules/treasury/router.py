@@ -238,15 +238,34 @@ async def create_bank_account(
     user: CurrentUser = Depends(get_current_user),
 ):
     tid = str(user.tenant_id)
-    data["id"] = str(uuid.uuid4())
-    data["tenant_id"] = tid
-    data["current_balance"] = data.get("opening_balance", 0)
-    data["created_by"] = user.email
-    cols = ", ".join(data.keys())
-    vals = ", ".join([f":{k}" for k in data.keys()])
-    await db.execute(text(f"INSERT INTO tr_bank_accounts ({cols}) VALUES ({vals})"), data)
-    await db.commit()
-    return created(data=data, message="تم تعريف الحساب ✅")
+
+    # الحقول المسموح بها فقط — تجنب SQL error من حقول غير موجودة
+    ALLOWED = {
+        "account_code","account_name","account_name_en","account_type",
+        "bank_name","bank_branch","account_number","iban","swift_code",
+        "currency_code","gl_account_code","opening_balance",
+        "low_balance_alert","credit_limit","notes",
+    }
+    safe = {k:v for k,v in data.items() if k in ALLOWED and v is not None and v != ""}
+
+    ba_id = str(uuid.uuid4())
+    safe["id"]              = ba_id
+    safe["tenant_id"]       = tid
+    safe["current_balance"] = safe.get("opening_balance", 0)
+    safe["created_by"]      = user.email
+
+    cols = ", ".join(safe.keys())
+    vals = ", ".join([f":{k}" for k in safe.keys()])
+
+    try:
+        await db.execute(text(f"INSERT INTO tr_bank_accounts ({cols}) VALUES ({vals})"), safe)
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=f"خطأ في الحفظ: {str(e)}")
+
+    return created(data={"id": ba_id, "account_code": safe.get("account_code")},
+                   message="تم تعريف الحساب ✅")
 
 
 @router.put("/bank-accounts/{ba_id}")
@@ -257,12 +276,28 @@ async def update_bank_account(
     user: CurrentUser = Depends(get_current_user),
 ):
     tid = str(user.tenant_id)
-    data.pop("id", None); data.pop("tenant_id", None); data.pop("current_balance", None)
-    data["updated_at"] = datetime.utcnow()
-    set_clause = ", ".join([f"{k}=:{k}" for k in data.keys()])
-    data.update({"id": str(ba_id), "tid": tid})
-    await db.execute(text(f"UPDATE tr_bank_accounts SET {set_clause} WHERE id=:id AND tenant_id=:tid"), data)
-    await db.commit()
+
+    ALLOWED = {
+        "account_code","account_name","account_name_en","account_type",
+        "bank_name","bank_branch","account_number","iban","swift_code",
+        "currency_code","gl_account_code","opening_balance",
+        "low_balance_alert","credit_limit","notes","is_active",
+    }
+    safe = {k:v for k,v in data.items() if k in ALLOWED}
+    if not safe:
+        raise HTTPException(status_code=400, detail="لا توجد بيانات للتعديل")
+
+    safe["updated_at"] = datetime.utcnow()
+    set_clause = ", ".join([f"{k}=:{k}" for k in safe.keys()])
+    safe.update({"id": str(ba_id), "tid": tid})
+
+    try:
+        await db.execute(text(f"UPDATE tr_bank_accounts SET {set_clause} WHERE id=:id AND tenant_id=:tid"), safe)
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=f"خطأ في التعديل: {str(e)}")
+
     return ok(data={"id": str(ba_id)}, message="تم التعديل ✅")
 
 
@@ -335,31 +370,35 @@ async def create_cash_transaction(
     amt = Decimal(str(data["amount"]))
     amt_sar = amt * Decimal(str(data.get("exchange_rate", 1)))
 
-    await db.execute(text("""
-        INSERT INTO tr_cash_transactions
-          (id,tenant_id,serial,tx_type,tx_date,bank_account_id,amount,
-           currency_code,exchange_rate,amount_sar,counterpart_account,
-           description,party_name,reference,payment_method,check_number,
-           branch_code,cost_center,project_code,notes,status,created_by)
-        VALUES
-          (:id,:tid,:serial,:tx_type,:tx_date,:ba_id,:amount,
-           :cur,:rate,:amt_sar,:cp_acc,
-           :desc,:party,:ref,:method,:check_no,
-           :branch,:cc,:proj,:notes,'draft',:by)
-    """), {
-        "id": tx_id, "tid": tid, "serial": serial,
-        "tx_type": tx_type, "tx_date": tx_date,
-        "ba_id": str(data["bank_account_id"]) if data.get("bank_account_id") else None,
-        "amount": amt, "cur": data.get("currency_code","SAR"),
-        "rate": data.get("exchange_rate",1), "amt_sar": amt_sar,
-        "cp_acc": data["counterpart_account"],
-        "desc": data["description"], "party": data.get("party_name"),
-        "ref": data.get("reference"), "method": data.get("payment_method","cash"),
-        "check_no": data.get("check_number"), "branch": data.get("branch_code"),
-        "cc": data.get("cost_center"), "proj": data.get("project_code"),
-        "notes": data.get("notes"), "by": user.email,
-    })
-    await db.commit()
+    try:
+        await db.execute(text("""
+            INSERT INTO tr_cash_transactions
+              (id,tenant_id,serial,tx_type,tx_date,bank_account_id,amount,
+               currency_code,exchange_rate,amount_sar,counterpart_account,
+               description,party_name,reference,payment_method,check_number,
+               branch_code,cost_center,project_code,notes,status,created_by)
+            VALUES
+              (:id,:tid,:serial,:tx_type,:tx_date,:ba_id,:amount,
+               :cur,:rate,:amt_sar,:cp_acc,
+               :desc,:party,:ref,:method,:check_no,
+               :branch,:cc,:proj,:notes,'draft',:by)
+        """), {
+            "id": tx_id, "tid": tid, "serial": serial,
+            "tx_type": tx_type, "tx_date": tx_date,
+            "ba_id": str(data["bank_account_id"]) if data.get("bank_account_id") else None,
+            "amount": amt, "cur": data.get("currency_code","SAR"),
+            "rate": data.get("exchange_rate",1), "amt_sar": amt_sar,
+            "cp_acc": data["counterpart_account"],
+            "desc": data["description"], "party": data.get("party_name"),
+            "ref": data.get("reference"), "method": data.get("payment_method","cash"),
+            "check_no": data.get("check_number"), "branch": data.get("branch_code"),
+            "cc": data.get("cost_center"), "proj": data.get("project_code"),
+            "notes": data.get("notes"), "by": user.email,
+        })
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=f"خطأ في الحفظ: {str(e)}")
     return created(data={"id": tx_id, "serial": serial}, message=f"تم إنشاء {serial} ✅")
 
 
