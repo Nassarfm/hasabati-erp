@@ -1,5 +1,5 @@
 """
-app/modules/treasury/router.py
+app/modules/treasury/router.py  # v3-fixed
 ══════════════════════════════════════════════════════════
 Treasury & Banking Module — Complete API
 الخزينة والبنوك — واجهة برمجية كاملة
