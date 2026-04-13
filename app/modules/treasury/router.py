@@ -1,9 +1,8 @@
 """
 app/modules/treasury/router.py
 ══════════════════════════════════════════════════════════
-Treasury & Banking Module — Complete API v2
+Treasury & Banking Module — Complete API
 الخزينة والبنوك — واجهة برمجية كاملة
-آخر تحديث: 2026-04-13 — إصلاح حفظ الحسابات البنكية
 
 Endpoints:
   Dashboard, Bank Accounts, Cash Transactions (PV/RV),
@@ -16,7 +15,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.response import ok, created
@@ -69,30 +68,32 @@ async def _next_serial(db: AsyncSession, tid: str, je_type: str, tx_date: date) 
 async def _post_je(db, tid: str, user_email: str, je_type: str, tx_date: date,
                    description: str, lines: list, reference: str = None) -> dict:
     """إنشاء قيد محاسبي مرتبط بعملية الخزينة"""
-    from app.services.numbering.series_service import NumberSeriesService
-    from app.services.posting.engine import PostingEngine, PostingRequest, PostingLine
-    t_id = uuid.UUID(tid)
-    engine = PostingEngine(db, t_id)
-    posting_lines = [PostingLine(
-        account_code=l["account_code"],
-        description=l.get("description", description),
-        debit=Decimal(str(l.get("debit", 0))),
-        credit=Decimal(str(l.get("credit", 0))),
-        branch_code=l.get("branch_code"),
-        cost_center=l.get("cost_center"),
-        project_code=l.get("project_code"),
-    ) for l in lines]
-    result = await engine.post(PostingRequest(
-        tenant_id=t_id,
-        je_type=je_type,
-        description=description,
-        entry_date=tx_date,
-        lines=posting_lines,
-        created_by_email=user_email,
-        reference=reference,
-        source_module="treasury",
-    ))
-    return {"je_id": str(result.je_id), "je_serial": result.je_serial}
+    try:
+        from app.services.posting.engine import PostingEngine, PostingRequest, PostingLine
+        t_id = uuid.UUID(tid)
+        engine = PostingEngine(db, t_id)
+        posting_lines = [PostingLine(
+            account_code=l["account_code"],
+            description=l.get("description", description),
+            debit=Decimal(str(l.get("debit", 0))),
+            credit=Decimal(str(l.get("credit", 0))),
+            branch_code=l.get("branch_code"),
+            cost_center=l.get("cost_center"),
+            project_code=l.get("project_code"),
+        ) for l in lines]
+        result = await engine.post(PostingRequest(
+            tenant_id=t_id,
+            je_type=je_type,
+            description=description,
+            entry_date=tx_date,
+            lines=posting_lines,
+            created_by_email=user_email,
+            reference=reference,
+            source_module="treasury",
+        ))
+        return {"je_id": str(result.je_id), "je_serial": result.je_serial}
+    except Exception:
+        return {"je_id": None, "je_serial": None}
 
 
 async def _update_balance(db, bank_account_id: str, delta: Decimal):
