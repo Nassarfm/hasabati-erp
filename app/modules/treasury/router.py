@@ -488,6 +488,40 @@ async def post_cash_transaction(
     return ok(data={"je_serial": je["je_serial"]}, message=f"✅ تم الترحيل — {je['je_serial']}")
 
 
+@router.put("/cash-transactions/{tx_id}")
+async def update_cash_transaction(
+    tx_id: uuid.UUID,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    ALLOWED = {"tx_date","bank_account_id","amount","currency_code","counterpart_account",
+               "description","party_name","reference","payment_method","check_number",
+               "branch_code","cost_center","project_code","notes"}
+    safe = {k: v for k, v in data.items() if k in ALLOWED}
+    if not safe:
+        raise HTTPException(400, "لا توجد حقول صالحة للتعديل")
+    if "amount" in safe:
+        safe["amount"] = Decimal(str(safe["amount"]))
+        safe["amount_sar"] = safe["amount"] * Decimal(str(data.get("exchange_rate", 1)))
+    safe["updated_at"] = "NOW()"
+    safe["updated_by"] = user.email
+    set_clause = ", ".join([f"{k}={'NOW()' if v=='NOW()' else f':{k}'}" for k in safe])
+    params = {k: v for k, v in safe.items() if v != "NOW()"}
+    params.update({"id": str(tx_id), "tid": tid})
+    try:
+        await db.execute(text(f"""
+            UPDATE tr_cash_transactions SET {set_clause}
+            WHERE id=:id AND tenant_id=:tid AND status='draft'
+        """), params)
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ في التعديل: {str(e)}")
+    return ok(data={"id": str(tx_id)}, message="تم التعديل ✅")
+
+
 @router.delete("/cash-transactions/{tx_id}")
 async def cancel_cash_transaction(
     tx_id: uuid.UUID,
