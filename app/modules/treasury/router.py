@@ -68,32 +68,32 @@ async def _next_serial(db: AsyncSession, tid: str, je_type: str, tx_date: date) 
 async def _post_je(db, tid: str, user_email: str, je_type: str, tx_date: date,
                    description: str, lines: list, reference: str = None) -> dict:
     """إنشاء قيد محاسبي مرتبط بعملية الخزينة"""
-    try:
-        from app.services.posting.engine import PostingEngine, PostingRequest, PostingLine
-        t_id = uuid.UUID(tid)
-        engine = PostingEngine(db, t_id)
-        posting_lines = [PostingLine(
-            account_code=l["account_code"],
-            description=l.get("description", description),
-            debit=Decimal(str(l.get("debit", 0))),
-            credit=Decimal(str(l.get("credit", 0))),
-            branch_code=l.get("branch_code"),
-            cost_center=l.get("cost_center"),
-            project_code=l.get("project_code"),
-        ) for l in lines]
-        result = await engine.post(PostingRequest(
-            tenant_id=t_id,
-            je_type=je_type,
-            description=description,
-            entry_date=tx_date,
-            lines=posting_lines,
-            created_by_email=user_email,
-            reference=reference,
-            source_module="treasury",
-        ))
-        return {"je_id": str(result.je_id), "je_serial": result.je_serial}
-    except Exception:
-        return {"je_id": None, "je_serial": None}
+    from app.services.posting.engine import PostingEngine, PostingRequest, PostingLine
+    t_id = uuid.UUID(tid)
+    engine = PostingEngine(db, t_id)
+    posting_lines = [PostingLine(
+        account_code=l["account_code"],
+        description=l.get("description", description),
+        debit=Decimal(str(l.get("debit", 0))),
+        credit=Decimal(str(l.get("credit", 0))),
+        branch_code=l.get("branch_code"),
+        cost_center=l.get("cost_center"),
+        project_code=l.get("project_code"),
+        expense_classification_code=l.get("expense_classification_code"),
+    ) for l in lines]
+    result = await engine.post(PostingRequest(
+        tenant_id=t_id,
+        je_type=je_type,
+        description=description,
+        entry_date=tx_date,
+        lines=posting_lines,
+        created_by_email=user_email,
+        reference=reference,
+        source_module="treasury",
+    ))
+    if not result or not result.je_id:
+        raise HTTPException(400, "فشل إنشاء القيد المحاسبي — تحقق من أكواد الحسابات")
+    return {"je_id": str(result.je_id), "je_serial": result.je_serial}
 
 
 async def _update_balance(db, bank_account_id: str, delta: Decimal):
@@ -410,12 +410,12 @@ async def create_cash_transaction(
               (id,tenant_id,serial,tx_type,tx_date,bank_account_id,amount,
                currency_code,exchange_rate,amount_sar,counterpart_account,
                description,party_name,reference,payment_method,check_number,
-               branch_code,cost_center,project_code,notes,status,created_by)
+               branch_code,cost_center,project_code,expense_classification_code,notes,status,created_by)
             VALUES
               (:id,:tid,:serial,:tx_type,:tx_date,:ba_id,:amount,
                :cur,:rate,:amt_sar,:cp_acc,
                :desc,:party,:ref,:method,:check_no,
-               :branch,:cc,:proj,:notes,'draft',:by)
+               :branch,:cc,:proj,:exp_cls,:notes,'draft',:by)
         """), {
             "id": tx_id, "tid": tid, "serial": serial,
             "tx_type": tx_type, "tx_date": tx_date,
@@ -427,6 +427,7 @@ async def create_cash_transaction(
             "ref": data.get("reference"), "method": data.get("payment_method","cash"),
             "check_no": data.get("check_number"), "branch": data.get("branch_code"),
             "cc": data.get("cost_center"), "proj": data.get("project_code"),
+            "exp_cls": data.get("expense_classification_code"),
             "notes": data.get("notes"), "by": user.email,
         })
         await db.commit()
@@ -461,14 +462,20 @@ async def post_cash_transaction(
 
     # PV = صرف → CR صندوق/بنك, DR الطرف المقابل
     # RV = قبض → DR صندوق/بنك, CR الطرف المقابل
+    dims = {
+        "branch_code": tx.get("branch_code"),
+        "cost_center": tx.get("cost_center"),
+        "project_code": tx.get("project_code"),
+        "expense_classification_code": tx.get("expense_classification_code"),
+    }
     if tx["tx_type"] == "RV":
         lines = [
             {"account_code": gl, "debit": amt, "credit": 0, "description": desc},
-            {"account_code": cp, "debit": 0, "credit": amt, "description": desc},
+            {"account_code": cp, "debit": 0, "credit": amt, "description": desc, **dims},
         ]
     else:
         lines = [
-            {"account_code": cp, "debit": amt, "credit": 0, "description": desc},
+            {"account_code": cp, "debit": amt, "credit": 0, "description": desc, **dims},
             {"account_code": gl, "debit": 0, "credit": amt, "description": desc},
         ]
 
@@ -498,7 +505,7 @@ async def update_cash_transaction(
     tid = str(user.tenant_id)
     ALLOWED = {"tx_date","bank_account_id","amount","currency_code","counterpart_account",
                "description","party_name","reference","payment_method","check_number",
-               "branch_code","cost_center","project_code","notes"}
+               "branch_code","cost_center","project_code","expense_classification_code","notes"}
     safe = {k: v for k, v in data.items() if k in ALLOWED}
     if not safe:
         raise HTTPException(400, "لا توجد حقول صالحة للتعديل")
@@ -597,13 +604,13 @@ async def create_bank_transaction(
            currency_code,exchange_rate,amount_sar,counterpart_account,
            beneficiary_name,beneficiary_iban,beneficiary_bank,
            description,reference,payment_method,check_number,
-           branch_code,cost_center,project_code,notes,status,created_by)
+           branch_code,cost_center,project_code,expense_classification_code,notes,status,created_by)
         VALUES
           (:id,:tid,:serial,:tx_type,:tx_date,:ba_id,:amount,
            :cur,:rate,:amt_sar,:cp_acc,
            :ben_name,:ben_iban,:ben_bank,
            :desc,:ref,:method,:check_no,
-           :branch,:cc,:proj,:notes,'draft',:by)
+           :branch,:cc,:proj,:exp_cls,:notes,'draft',:by)
     """), {
         "id": tx_id, "tid": tid, "serial": serial,
         "tx_type": tx_type, "tx_date": tx_date,
@@ -617,6 +624,7 @@ async def create_bank_transaction(
         "method": data.get("payment_method","wire"),
         "check_no": data.get("check_number"), "branch": data.get("branch_code"),
         "cc": data.get("cost_center"), "proj": data.get("project_code"),
+        "exp_cls": data.get("expense_classification_code"),
         "notes": data.get("notes"), "by": user.email,
     })
     await db.commit()
@@ -649,15 +657,21 @@ async def post_bank_transaction(
     # BP = دفعة → DR مورد/مصروف, CR بنك
     # BR = قبض  → DR بنك, CR عميل/إيراد
     # BT = تحويل → DR مستفيد, CR بنك
+    dims = {
+        "branch_code": tx.get("branch_code"),
+        "cost_center": tx.get("cost_center"),
+        "project_code": tx.get("project_code"),
+        "expense_classification_code": tx.get("expense_classification_code"),
+    }
     if tx["tx_type"] == "BR":
         lines = [
             {"account_code": gl, "debit": amt, "credit": 0, "description": desc},
-            {"account_code": cp, "debit": 0, "credit": amt, "description": desc},
+            {"account_code": cp, "debit": 0, "credit": amt, "description": desc, **dims},
         ]
         delta = amt
     else:  # BP, BT
         lines = [
-            {"account_code": cp, "debit": amt, "credit": 0, "description": desc},
+            {"account_code": cp, "debit": amt, "credit": 0, "description": desc, **dims},
             {"account_code": gl, "debit": 0, "credit": amt, "description": desc},
         ]
         delta = -amt

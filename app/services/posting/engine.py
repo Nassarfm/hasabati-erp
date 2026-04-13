@@ -55,6 +55,7 @@ class PostingLine:
     branch_code: Optional[str] = None
     cost_center: Optional[str] = None
     project_code: Optional[str] = None
+    expense_classification_code: Optional[str] = None
     # ── حقول العملة الأجنبية ──
     currency_code:  Optional[str]     = "SAR"
     exchange_rate:  Optional[Decimal] = Decimal("1.0")
@@ -313,6 +314,7 @@ class PostingEngine:
                     branch_code=line.branch_code,
                     cost_center=line.cost_center,
                     project_code=line.project_code,
+                    expense_classification_code=getattr(line, "expense_classification_code", None),
                     currency_code=getattr(line, "currency_code",  None) or "SAR",
                     exchange_rate=getattr(line, "exchange_rate",  None) or Decimal("1.0"),
                     amount_foreign=getattr(line, "amount_foreign", None) or (line.debit + line.credit),
