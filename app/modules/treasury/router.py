@@ -259,13 +259,13 @@ async def create_bank_account(
     try:
         await db.execute(text("""
             INSERT INTO tr_bank_accounts (
-                id, tenant_id, account_code, account_name, account_name_en,
+                id, tenant_id, account_code, account_name,
                 account_type, bank_name, bank_branch, account_number,
                 iban, swift_code, currency_code, gl_account_code,
                 opening_balance, current_balance, low_balance_alert,
                 is_active, created_by
             ) VALUES (
-                :id, :tid, :account_code, :account_name, :account_name_en,
+                :id, :tid, :account_code, :account_name,
                 :account_type, :bank_name, :bank_branch, :account_number,
                 :iban, :swift_code, :currency_code, :gl_account_code,
                 :opening_balance, :current_balance, :low_balance_alert,
@@ -276,7 +276,6 @@ async def create_bank_account(
             "tid":              tid,
             "account_code":     str(data["account_code"]).strip(),
             "account_name":     str(data["account_name"]).strip(),
-            "account_name_en":  data.get("account_name_en") or None,
             "account_type":     data.get("account_type") or "bank",
             "bank_name":        data.get("bank_name") or None,
             "bank_branch":      data.get("bank_branch") or None,
