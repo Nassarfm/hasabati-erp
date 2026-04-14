@@ -700,6 +700,342 @@ async def post_bank_transaction(
 
 
 # ══════════════════════════════════════════════════════════
+# REVERSE POSTED TRANSACTION
+# ══════════════════════════════════════════════════════════
+
+@router.post("/cash-transactions/{tx_id}/reverse")
+async def reverse_cash_transaction(
+    tx_id: uuid.UUID,
+    data: dict = {},
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT ct.*, ba.gl_account_code
+        FROM tr_cash_transactions ct
+        LEFT JOIN tr_bank_accounts ba ON ba.id=ct.bank_account_id
+        WHERE ct.id=:id AND ct.tenant_id=:tid
+    """), {"id": str(tx_id), "tid": tid})
+    tx = r.mappings().fetchone()
+    if not tx: raise HTTPException(404, "السند غير موجود")
+    if tx["status"] != "posted": raise HTTPException(400, "يمكن عكس السندات المُرحَّلة فقط")
+
+    gl = tx["gl_account_code"]
+    cp = tx["counterpart_account"]
+    amt = Decimal(str(tx["amount_sar"] or tx["amount"]))
+    tx_date = tx["tx_date"]
+    note = data.get("note", f"عكس السند {tx['serial']}")
+    dims = {"branch_code": tx.get("branch_code"), "cost_center": tx.get("cost_center"),
+            "project_code": tx.get("project_code"), "expense_classification_code": tx.get("expense_classification_code")}
+
+    rev_type = "PV" if tx["tx_type"] == "RV" else "RV"
+    if tx["tx_type"] == "RV":
+        lines = [{"account_code": cp, "debit": amt, "credit": 0, "description": note, **dims},
+                 {"account_code": gl, "debit": 0, "credit": amt, "description": note}]
+        delta = -amt
+    else:
+        lines = [{"account_code": gl, "debit": amt, "credit": 0, "description": note},
+                 {"account_code": cp, "debit": 0, "credit": amt, "description": note, **dims}]
+        delta = amt
+
+    try:
+        je = await _post_je(db, tid, user.email, rev_type, tx_date, note, lines, tx["reference"])
+        if tx["bank_account_id"]:
+            await _update_balance(db, str(tx["bank_account_id"]), delta)
+        rev_serial = await _next_serial(db, tid, rev_type, tx_date)
+        rev_id = str(uuid.uuid4())
+        await db.execute(text("""
+            INSERT INTO tr_cash_transactions
+              (id,tenant_id,serial,tx_type,tx_date,bank_account_id,amount,currency_code,
+               exchange_rate,amount_sar,counterpart_account,description,reference,
+               payment_method,branch_code,cost_center,project_code,expense_classification_code,
+               status,je_id,je_serial,posted_by,posted_at,created_by)
+            VALUES
+              (:id,:tid,:serial,:tx_type,:tx_date,:ba_id,:amount,:cur,
+               :rate,:amt_sar,:cp,:desc,:ref,
+               :method,:branch,:cc,:proj,:exp_cls,
+               'posted',:je_id,:je_serial,:by,NOW(),:by)
+        """), {
+            "id": rev_id, "tid": tid, "serial": rev_serial,
+            "tx_type": rev_type, "tx_date": tx_date,
+            "ba_id": str(tx["bank_account_id"]) if tx["bank_account_id"] else None,
+            "amount": amt, "cur": tx["currency_code"] or "SAR",
+            "rate": tx["exchange_rate"] or 1, "amt_sar": amt,
+            "cp": cp, "desc": note, "ref": tx["reference"],
+            "method": tx["payment_method"] or "cash",
+            "branch": tx.get("branch_code"), "cc": tx.get("cost_center"),
+            "proj": tx.get("project_code"), "exp_cls": tx.get("expense_classification_code"),
+            "je_id": je["je_id"], "je_serial": je["je_serial"], "by": user.email,
+        })
+        await db.execute(text("""
+            UPDATE tr_cash_transactions SET status='reversed', reversed_by=:by, reversed_at=NOW()
+            WHERE id=:id AND tenant_id=:tid
+        """), {"by": user.email, "id": str(tx_id), "tid": tid})
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ في العكس: {str(e)}")
+    return ok(data={"reversal_serial": rev_serial, "je_serial": je["je_serial"]},
+              message=f"✅ تم إنشاء قيد عكسي — {rev_serial}")
+
+
+@router.post("/bank-transactions/{tx_id}/reverse")
+async def reverse_bank_transaction(
+    tx_id: uuid.UUID,
+    data: dict = {},
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT bt.*, ba.gl_account_code
+        FROM tr_bank_transactions bt
+        LEFT JOIN tr_bank_accounts ba ON ba.id=bt.bank_account_id
+        WHERE bt.id=:id AND bt.tenant_id=:tid
+    """), {"id": str(tx_id), "tid": tid})
+    tx = r.mappings().fetchone()
+    if not tx: raise HTTPException(404, "السند غير موجود")
+    if tx["status"] != "posted": raise HTTPException(400, "يمكن عكس السندات المُرحَّلة فقط")
+
+    gl = tx["gl_account_code"]
+    cp = tx["counterpart_account"] or "9999"
+    amt = Decimal(str(tx["amount_sar"] or tx["amount"]))
+    tx_date = tx["tx_date"]
+    note = data.get("note", f"عكس السند {tx['serial']}")
+    dims = {"branch_code": tx.get("branch_code"), "cost_center": tx.get("cost_center"),
+            "project_code": tx.get("project_code"), "expense_classification_code": tx.get("expense_classification_code")}
+
+    if tx["tx_type"] == "BR":
+        rev_type = "BP"
+        lines = [{"account_code": cp, "debit": amt, "credit": 0, "description": note, **dims},
+                 {"account_code": gl, "debit": 0, "credit": amt, "description": note}]
+        delta = -amt
+    else:
+        rev_type = "BR"
+        lines = [{"account_code": gl, "debit": amt, "credit": 0, "description": note},
+                 {"account_code": cp, "debit": 0, "credit": amt, "description": note, **dims}]
+        delta = amt
+
+    try:
+        je = await _post_je(db, tid, user.email, rev_type, tx_date, note, lines, tx["reference"])
+        if tx["bank_account_id"]:
+            await _update_balance(db, str(tx["bank_account_id"]), delta)
+        rev_serial = await _next_serial(db, tid, rev_type, tx_date)
+        rev_id = str(uuid.uuid4())
+        await db.execute(text("""
+            INSERT INTO tr_bank_transactions
+              (id,tenant_id,serial,tx_type,tx_date,bank_account_id,amount,currency_code,
+               exchange_rate,amount_sar,counterpart_account,description,reference,
+               payment_method,branch_code,cost_center,project_code,expense_classification_code,
+               status,je_id,je_serial,posted_by,posted_at,created_by)
+            VALUES
+              (:id,:tid,:serial,:tx_type,:tx_date,:ba_id,:amount,:cur,
+               :rate,:amt_sar,:cp,:desc,:ref,
+               :method,:branch,:cc,:proj,:exp_cls,
+               'posted',:je_id,:je_serial,:by,NOW(),:by)
+        """), {
+            "id": rev_id, "tid": tid, "serial": rev_serial,
+            "tx_type": rev_type, "tx_date": tx_date,
+            "ba_id": str(tx["bank_account_id"]) if tx["bank_account_id"] else None,
+            "amount": amt, "cur": tx["currency_code"] or "SAR",
+            "rate": tx["exchange_rate"] or 1, "amt_sar": amt,
+            "cp": cp, "desc": note, "ref": tx["reference"],
+            "method": tx["payment_method"] or "wire",
+            "branch": tx.get("branch_code"), "cc": tx.get("cost_center"),
+            "proj": tx.get("project_code"), "exp_cls": tx.get("expense_classification_code"),
+            "je_id": je["je_id"], "je_serial": je["je_serial"], "by": user.email,
+        })
+        await db.execute(text("""
+            UPDATE tr_bank_transactions SET status='reversed', reversed_by=:by, reversed_at=NOW()
+            WHERE id=:id AND tenant_id=:tid
+        """), {"by": user.email, "id": str(tx_id), "tid": tid})
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ في العكس: {str(e)}")
+    return ok(data={"reversal_serial": rev_serial, "je_serial": je["je_serial"]},
+              message=f"✅ تم إنشاء قيد عكسي — {rev_serial}")
+
+
+# ══════════════════════════════════════════════════════════
+# WORKFLOW — submit / approve / reject
+# ══════════════════════════════════════════════════════════
+
+@router.post("/cash-transactions/{tx_id}/submit")
+async def submit_cash_transaction(
+    tx_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        UPDATE tr_cash_transactions
+        SET status='pending_approval', submitted_by=:by, submitted_at=NOW()
+        WHERE id=:id AND tenant_id=:tid AND status='draft'
+        RETURNING id
+    """), {"id": str(tx_id), "tid": tid, "by": user.email})
+    if not r.fetchone(): raise HTTPException(400, "السند غير موجود أو ليس مسودة")
+    await db.commit()
+    return ok(data={}, message="تم إرسال السند للاعتماد ✅")
+
+
+@router.post("/cash-transactions/{tx_id}/approve")
+async def approve_cash_transaction(
+    tx_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """اعتماد السند ثم ترحيله مباشرة"""
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT ct.*, ba.gl_account_code
+        FROM tr_cash_transactions ct
+        LEFT JOIN tr_bank_accounts ba ON ba.id=ct.bank_account_id
+        WHERE ct.id=:id AND ct.tenant_id=:tid
+    """), {"id": str(tx_id), "tid": tid})
+    tx = r.mappings().fetchone()
+    if not tx: raise HTTPException(404, "السند غير موجود")
+    if tx["status"] != "pending_approval": raise HTTPException(400, "السند ليس في انتظار الاعتماد")
+
+    gl = tx["gl_account_code"]
+    cp = tx["counterpart_account"]
+    amt = Decimal(str(tx["amount_sar"] or tx["amount"]))
+    dims = {"branch_code": tx.get("branch_code"), "cost_center": tx.get("cost_center"),
+            "project_code": tx.get("project_code"), "expense_classification_code": tx.get("expense_classification_code")}
+    if tx["tx_type"] == "RV":
+        lines = [{"account_code": gl, "debit": amt, "credit": 0, "description": tx["description"]},
+                 {"account_code": cp, "debit": 0, "credit": amt, "description": tx["description"], **dims}]
+        delta = amt
+    else:
+        lines = [{"account_code": cp, "debit": amt, "credit": 0, "description": tx["description"], **dims},
+                 {"account_code": gl, "debit": 0, "credit": amt, "description": tx["description"]}]
+        delta = -amt
+    try:
+        je = await _post_je(db, tid, user.email, tx["tx_type"], tx["tx_date"], tx["description"], lines, tx["reference"])
+        if tx["bank_account_id"]:
+            await _update_balance(db, str(tx["bank_account_id"]), delta)
+        await db.execute(text("""
+            UPDATE tr_cash_transactions
+            SET status='posted', approved_by=:by, approved_at=NOW(),
+                je_id=:je_id, je_serial=:je_serial, posted_by=:by, posted_at=NOW()
+            WHERE id=:id AND tenant_id=:tid
+        """), {"by": user.email, "je_id": je["je_id"], "je_serial": je["je_serial"],
+               "id": str(tx_id), "tid": tid})
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ في الاعتماد: {str(e)}")
+    return ok(data={"je_serial": je["je_serial"]}, message=f"✅ تم الاعتماد والترحيل — {je['je_serial']}")
+
+
+@router.post("/cash-transactions/{tx_id}/reject")
+async def reject_cash_transaction(
+    tx_id: uuid.UUID,
+    data: dict = {},
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    note = data.get("note", "مرفوض")
+    r = await db.execute(text("""
+        UPDATE tr_cash_transactions
+        SET status='draft', rejected_by=:by, rejected_at=NOW(), rejection_note=:note
+        WHERE id=:id AND tenant_id=:tid AND status='pending_approval'
+        RETURNING id
+    """), {"id": str(tx_id), "tid": tid, "by": user.email, "note": note})
+    if not r.fetchone(): raise HTTPException(400, "السند غير موجود أو ليس في انتظار الاعتماد")
+    await db.commit()
+    return ok(data={}, message="تم رفض السند وإعادته للمسودة")
+
+
+@router.post("/bank-transactions/{tx_id}/submit")
+async def submit_bank_transaction(
+    tx_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        UPDATE tr_bank_transactions
+        SET status='pending_approval', submitted_by=:by, submitted_at=NOW()
+        WHERE id=:id AND tenant_id=:tid AND status='draft'
+        RETURNING id
+    """), {"id": str(tx_id), "tid": tid, "by": user.email})
+    if not r.fetchone(): raise HTTPException(400, "السند غير موجود أو ليس مسودة")
+    await db.commit()
+    return ok(data={}, message="تم إرسال السند للاعتماد ✅")
+
+
+@router.post("/bank-transactions/{tx_id}/approve")
+async def approve_bank_transaction(
+    tx_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT bt.*, ba.gl_account_code
+        FROM tr_bank_transactions bt
+        LEFT JOIN tr_bank_accounts ba ON ba.id=bt.bank_account_id
+        WHERE bt.id=:id AND bt.tenant_id=:tid
+    """), {"id": str(tx_id), "tid": tid})
+    tx = r.mappings().fetchone()
+    if not tx: raise HTTPException(404, "السند غير موجود")
+    if tx["status"] != "pending_approval": raise HTTPException(400, "السند ليس في انتظار الاعتماد")
+
+    gl = tx["gl_account_code"]
+    cp = tx["counterpart_account"] or "9999"
+    amt = Decimal(str(tx["amount_sar"] or tx["amount"]))
+    dims = {"branch_code": tx.get("branch_code"), "cost_center": tx.get("cost_center"),
+            "project_code": tx.get("project_code"), "expense_classification_code": tx.get("expense_classification_code")}
+    if tx["tx_type"] == "BR":
+        lines = [{"account_code": gl, "debit": amt, "credit": 0, "description": tx["description"]},
+                 {"account_code": cp, "debit": 0, "credit": amt, "description": tx["description"], **dims}]
+        delta = amt
+    else:
+        lines = [{"account_code": cp, "debit": amt, "credit": 0, "description": tx["description"], **dims},
+                 {"account_code": gl, "debit": 0, "credit": amt, "description": tx["description"]}]
+        delta = -amt
+    try:
+        je = await _post_je(db, tid, user.email, tx["tx_type"], tx["tx_date"], tx["description"], lines, tx["reference"])
+        if tx["bank_account_id"]:
+            await _update_balance(db, str(tx["bank_account_id"]), delta)
+        await db.execute(text("""
+            UPDATE tr_bank_transactions
+            SET status='posted', approved_by=:by, approved_at=NOW(),
+                je_id=:je_id, je_serial=:je_serial, posted_by=:by, posted_at=NOW()
+            WHERE id=:id AND tenant_id=:tid
+        """), {"by": user.email, "je_id": je["je_id"], "je_serial": je["je_serial"],
+               "id": str(tx_id), "tid": tid})
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ في الاعتماد: {str(e)}")
+    return ok(data={"je_serial": je["je_serial"]}, message=f"✅ تم الاعتماد والترحيل — {je['je_serial']}")
+
+
+@router.post("/bank-transactions/{tx_id}/reject")
+async def reject_bank_transaction(
+    tx_id: uuid.UUID,
+    data: dict = {},
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    note = data.get("note", "مرفوض")
+    r = await db.execute(text("""
+        UPDATE tr_bank_transactions
+        SET status='draft', rejected_by=:by, rejected_at=NOW(), rejection_note=:note
+        WHERE id=:id AND tenant_id=:tid AND status='pending_approval'
+        RETURNING id
+    """), {"id": str(tx_id), "tid": tid, "by": user.email, "note": note})
+    if not r.fetchone(): raise HTTPException(400, "السند غير موجود أو ليس في انتظار الاعتماد")
+    await db.commit()
+    return ok(data={}, message="تم رفض السند وإعادته للمسودة")
+
+
+# ══════════════════════════════════════════════════════════
 # BULK POST
 # ══════════════════════════════════════════════════════════
 
@@ -1852,6 +2188,137 @@ async def petty_cash_statement(
     items = [dict(row._mapping) for row in r.fetchall()]
     total = sum(float(i["total_amount"]) for i in items)
     return ok(data={"total": total, "count": len(items), "items": items})
+
+
+@router.get("/reports/account-statement")
+async def account_statement(
+    account_id: uuid.UUID = Query(...),
+    date_from:  Optional[date] = Query(None),
+    date_to:    Optional[date] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """كشف حساب بنكي مع رصيد متراكم"""
+    tid = str(user.tenant_id)
+    acc_r = await db.execute(text("""
+        SELECT * FROM tr_bank_accounts WHERE id=:id AND tenant_id=:tid
+    """), {"id": str(account_id), "tid": tid})
+    acc = acc_r.mappings().fetchone()
+    if not acc: raise HTTPException(404, "الحساب غير موجود")
+
+    conds_base = ["tenant_id=:tid", "bank_account_id=:acc_id", "status='posted'"]
+    params: dict = {"tid": tid, "acc_id": str(account_id)}
+    if date_from: conds_base.append("tx_date>=:df"); params["df"] = str(date_from)
+    if date_to:   conds_base.append("tx_date<=:dt"); params["dt"] = str(date_to)
+    where = " AND ".join(conds_base)
+
+    # opening balance = balance before date_from
+    opening = float(acc["current_balance"] or 0)
+    if date_from:
+        ob_r = await db.execute(text(f"""
+            SELECT COALESCE(SUM(
+                CASE WHEN tx_type IN ('RV','BR') THEN amount_sar ELSE -amount_sar END
+            ), 0)
+            FROM (
+                SELECT tx_type, amount_sar FROM tr_cash_transactions
+                WHERE tenant_id=:tid AND bank_account_id=:acc_id AND status='posted' AND tx_date < :df
+                UNION ALL
+                SELECT tx_type, amount_sar FROM tr_bank_transactions
+                WHERE tenant_id=:tid AND bank_account_id=:acc_id AND status='posted' AND tx_date < :df
+            ) t
+        """), {"tid": tid, "acc_id": str(account_id), "df": str(date_from)})
+        recent_total = float(ob_r.scalar() or 0)
+        opening = float(acc["current_balance"] or 0) - recent_total
+
+    tx_r = await db.execute(text(f"""
+        SELECT tx_date, serial, tx_type, description, party_name AS party,
+               reference, amount_sar AS amount, 'cash' AS src, id
+        FROM tr_cash_transactions WHERE {where}
+        UNION ALL
+        SELECT tx_date, serial, tx_type, description, beneficiary_name AS party,
+               reference, amount_sar AS amount, 'bank' AS src, id
+        FROM tr_bank_transactions WHERE {where}
+        ORDER BY tx_date, serial
+    """), params)
+
+    rows = []
+    running = opening
+    for row in tx_r.fetchall():
+        r = dict(row._mapping)
+        amt = float(r["amount"] or 0)
+        is_debit = r["tx_type"] in ("RV", "BR")
+        debit = amt if is_debit else 0
+        credit = 0 if is_debit else amt
+        running += debit - credit
+        rows.append({**r, "debit": debit, "credit": credit, "balance": round(running, 2)})
+
+    return ok(data={
+        "account": dict(acc._mapping),
+        "opening_balance": round(opening, 2),
+        "closing_balance": round(running, 2),
+        "rows": rows,
+        "total_debit":  sum(r["debit"] for r in rows),
+        "total_credit": sum(r["credit"] for r in rows),
+    })
+
+
+@router.get("/reports/check-aging")
+async def check_aging_report(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """تقرير أعمار الديون — الشيكات والمدفوعات المتأخرة"""
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT c.*,
+               ba.account_name AS bank_account_name,
+               CURRENT_DATE - due_date AS days_overdue
+        FROM tr_checks c
+        LEFT JOIN tr_bank_accounts ba ON ba.id=c.bank_account_id
+        WHERE c.tenant_id=:tid
+          AND c.status IN ('pending','deposited')
+          AND c.due_date IS NOT NULL
+        ORDER BY c.due_date
+    """), {"tid": tid})
+    checks = [dict(row._mapping) for row in r.fetchall()]
+
+    def bucket(days):
+        if days < 0: return "future"
+        if days == 0: return "today"
+        if days <= 30: return "1-30"
+        if days <= 60: return "31-60"
+        if days <= 90: return "61-90"
+        return "90+"
+
+    buckets: dict = {"future": [], "today": [], "1-30": [], "31-60": [], "61-90": [], "90+": []}
+    for c in checks:
+        days = int(c["days_overdue"] or 0)
+        c["days_overdue"] = days
+        b = bucket(days)
+        c["bucket"] = b
+        buckets[b].append(c)
+
+    summary = {k: {"count": len(v), "total": sum(float(x.get("amount",0)) for x in v)} for k, v in buckets.items()}
+    return ok(data={"checks": checks, "buckets": summary})
+
+
+@router.get("/reports/low-balance-alerts")
+async def low_balance_alerts(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """حسابات رصيدها أقل من أو يساوي حد التنبيه"""
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT id, account_name, account_type, current_balance, low_balance_alert, currency_code
+        FROM tr_bank_accounts
+        WHERE tenant_id=:tid AND is_active=true
+          AND low_balance_alert > 0
+          AND current_balance <= low_balance_alert
+        ORDER BY (current_balance - low_balance_alert)
+    """), {"tid": tid})
+    alerts = [dict(row._mapping) for row in r.fetchall()]
+    return ok(data=alerts)
 
 
 @router.get("/reports/balance-history")
