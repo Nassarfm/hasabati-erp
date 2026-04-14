@@ -1854,6 +1854,136 @@ async def petty_cash_statement(
     return ok(data={"total": total, "count": len(items), "items": items})
 
 
+@router.get("/reports/balance-history")
+async def balance_history_report(
+    months: int = Query(6),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """تاريخ الرصيد الشهري لكل حساب — آخر N أشهر"""
+    tid = str(user.tenant_id)
+    # fetch all accounts
+    acc_r = await db.execute(text("""
+        SELECT id, account_name, current_balance
+        FROM tr_bank_accounts WHERE tenant_id=:tid AND is_active=true
+    """), {"tid": tid})
+    accounts = [dict(r._mapping) for r in acc_r.fetchall()]
+
+    # fetch all posted transactions grouped by account + month
+    tx_r = await db.execute(text("""
+        SELECT bank_account_id,
+               TO_CHAR(DATE_TRUNC('month', tx_date), 'YYYY-MM') AS month,
+               SUM(CASE WHEN tx_type IN ('RV','BR') THEN amount_sar ELSE -amount_sar END) AS net
+        FROM (
+            SELECT bank_account_id, tx_date, tx_type, amount_sar FROM tr_cash_transactions
+            WHERE tenant_id=:tid AND status='posted' AND bank_account_id IS NOT NULL
+              AND tx_date >= DATE_TRUNC('month', CURRENT_DATE) - (:months - 1) * INTERVAL '1 month'
+            UNION ALL
+            SELECT bank_account_id, tx_date, tx_type, amount_sar FROM tr_bank_transactions
+            WHERE tenant_id=:tid AND status='posted'
+              AND tx_date >= DATE_TRUNC('month', CURRENT_DATE) - (:months - 1) * INTERVAL '1 month'
+        ) t
+        GROUP BY bank_account_id, DATE_TRUNC('month', tx_date)
+        ORDER BY bank_account_id, month
+    """), {"tid": tid, "months": months})
+
+    # build month buckets
+    from datetime import date as dt_date
+    today = dt_date.today()
+    month_list = []
+    for i in range(months - 1, -1, -1):
+        y = today.year
+        m = today.month - i
+        while m <= 0: m += 12; y -= 1
+        month_list.append(f"{y:04d}-{m:02d}")
+
+    # group net by account + month
+    nets: dict = {}
+    for row in tx_r.fetchall():
+        acc_id = str(row[0])
+        nets.setdefault(acc_id, {})[row[1]] = float(row[2] or 0)
+
+    result = []
+    for acc in accounts:
+        acc_id = str(acc["id"])
+        acc_nets = nets.get(acc_id, {})
+        current_bal = float(acc["current_balance"] or 0)
+
+        # work backwards from current balance to reconstruct monthly snapshots
+        months_net = [acc_nets.get(m, 0) for m in month_list]
+        running = current_bal
+        snapshots = []
+        for i in range(len(month_list) - 1, -1, -1):
+            snapshots.insert(0, {"month": month_list[i], "balance": round(running, 2)})
+            if i > 0:
+                running -= months_net[i]  # go back
+
+        result.append({
+            "id": acc_id,
+            "account_name": acc["account_name"],
+            "history": snapshots,
+        })
+    return ok(data=result)
+
+
+@router.get("/reports/cash-forecast")
+async def cash_forecast(
+    days: int = Query(30),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """توقع المركز النقدي للأيام القادمة بناءً على الرصيد الحالي + المتكررات المستحقة"""
+    tid = str(user.tenant_id)
+    from datetime import date as dt_date, timedelta
+
+    # total current balance
+    bal_r = await db.execute(text("""
+        SELECT COALESCE(SUM(current_balance), 0) FROM tr_bank_accounts
+        WHERE tenant_id=:tid AND is_active=true
+    """), {"tid": tid})
+    total_balance = float(bal_r.scalar() or 0)
+
+    # recurring transactions due in next N days
+    today = dt_date.today()
+    cutoff = today + timedelta(days=days)
+    rec_r = await db.execute(text("""
+        SELECT next_due_date, tx_type, estimated_amount
+        FROM tr_recurring_transactions
+        WHERE tenant_id=:tid AND is_active=true
+          AND next_due_date BETWEEN :today AND :cutoff
+        ORDER BY next_due_date
+    """), {"tid": tid, "today": str(today), "cutoff": str(cutoff)})
+    recs = rec_r.fetchall()
+
+    # build daily events map
+    events: dict = {}
+    for rec in recs:
+        d = str(rec[0])
+        tx_type = rec[1]
+        amt = float(rec[2] or 0)
+        events.setdefault(d, {"inflow": 0, "outflow": 0})
+        if tx_type in ("RV", "BR"):
+            events[d]["inflow"] += amt
+        else:
+            events[d]["outflow"] += amt
+
+    # build day-by-day forecast
+    running = total_balance
+    forecast = []
+    for i in range(days + 1):
+        d = str(today + timedelta(days=i))
+        ev = events.get(d, {})
+        running += ev.get("inflow", 0) - ev.get("outflow", 0)
+        forecast.append({
+            "date": d,
+            "balance": round(running, 2),
+            "inflow": ev.get("inflow", 0),
+            "outflow": ev.get("outflow", 0),
+        })
+
+    return ok(data={"start_balance": total_balance, "days": forecast})
+
+
 @router.get("/reports/monthly-cash-flow")
 async def monthly_cash_flow_report(
     months: int = Query(12),
