@@ -260,15 +260,17 @@ async def create_bank_account(
         await db.execute(text("""
             INSERT INTO tr_bank_accounts (
                 id, tenant_id, account_code, account_name,
-                account_type, bank_name, bank_branch, account_number,
+                account_type, account_sub_type, bank_name, bank_branch, account_number,
                 iban, swift_code, currency_code, gl_account_code,
                 opening_balance, current_balance, low_balance_alert,
+                opening_date, contact_person, contact_phone, notes,
                 is_active, created_by
             ) VALUES (
                 :id, :tid, :account_code, :account_name,
-                :account_type, :bank_name, :bank_branch, :account_number,
+                :account_type, :account_sub_type, :bank_name, :bank_branch, :account_number,
                 :iban, :swift_code, :currency_code, :gl_account_code,
                 :opening_balance, :current_balance, :low_balance_alert,
+                :opening_date, :contact_person, :contact_phone, :notes,
                 true, :created_by
             )
         """), {
@@ -277,6 +279,7 @@ async def create_bank_account(
             "account_code":     str(data["account_code"]).strip(),
             "account_name":     str(data["account_name"]).strip(),
             "account_type":     data.get("account_type") or "bank",
+            "account_sub_type": data.get("account_sub_type") or None,
             "bank_name":        data.get("bank_name") or None,
             "bank_branch":      data.get("bank_branch") or None,
             "account_number":   data.get("account_number") or None,
@@ -287,6 +290,10 @@ async def create_bank_account(
             "opening_balance":  to_decimal(data.get("opening_balance"), 0),
             "current_balance":  to_decimal(data.get("opening_balance"), 0),
             "low_balance_alert":to_decimal(data.get("low_balance_alert"), 0),
+            "opening_date":     data.get("opening_date") or None,
+            "contact_person":   data.get("contact_person") or None,
+            "contact_phone":    data.get("contact_phone") or None,
+            "notes":            data.get("notes") or None,
             "created_by":       user.email,
         })
         await db.commit()
@@ -312,10 +319,11 @@ async def update_bank_account(
     tid = str(user.tenant_id)
 
     ALLOWED = {
-        "account_code","account_name","account_name_en","account_type",
+        "account_code","account_name","account_name_en","account_type","account_sub_type",
         "bank_name","bank_branch","account_number","iban","swift_code",
         "currency_code","gl_account_code","opening_balance",
         "low_balance_alert","credit_limit","notes","is_active",
+        "opening_date","contact_person","contact_phone",
     }
     safe = {k:v for k,v in data.items() if k in ALLOWED}
     if not safe:
