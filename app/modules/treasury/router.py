@@ -2403,56 +2403,122 @@ async def cash_forecast(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """توقع المركز النقدي للأيام القادمة بناءً على الرصيد الحالي + المتكررات المستحقة"""
+    """توقع المركز النقدي للأيام القادمة:
+       رصيد حالي + متكررات + مستحقات AP (مدفوعات) + مستحقات AR (تحصيلات)
+    """
     tid = str(user.tenant_id)
     from datetime import date as dt_date, timedelta
 
-    # total current balance
+    today  = dt_date.today()
+    cutoff = today + timedelta(days=days)
+    p = {"tid": tid, "today": str(today), "cutoff": str(cutoff)}
+
+    # ── رصيد البنوك والصناديق الحالي ──────────────────────────
     bal_r = await db.execute(text("""
-        SELECT COALESCE(SUM(current_balance), 0) FROM tr_bank_accounts
+        SELECT COALESCE(SUM(current_balance), 0)
+        FROM tr_bank_accounts
         WHERE tenant_id=:tid AND is_active=true
     """), {"tid": tid})
     total_balance = float(bal_r.scalar() or 0)
 
-    # recurring transactions due in next N days
-    today = dt_date.today()
-    cutoff = today + timedelta(days=days)
+    # ── المعاملات المتكررة ─────────────────────────────────────
     rec_r = await db.execute(text("""
-        SELECT next_due_date, tx_type, estimated_amount
+        SELECT next_due_date::text, tx_type, estimated_amount, description
         FROM tr_recurring_transactions
         WHERE tenant_id=:tid AND is_active=true
           AND next_due_date BETWEEN :today AND :cutoff
         ORDER BY next_due_date
-    """), {"tid": tid, "today": str(today), "cutoff": str(cutoff)})
-    recs = rec_r.fetchall()
+    """), p)
+    recs = rec_r.mappings().fetchall()
 
-    # build daily events map
+    # ── فواتير AP مستحقة الدفع (outflow) ─────────────────────
+    ap_r = await db.execute(text("""
+        SELECT
+            GREATEST(due_date, :today::date)::text AS day,
+            COALESCE(SUM(balance_due), 0)          AS total,
+            COUNT(*)                               AS cnt,
+            STRING_AGG(DISTINCT v.vendor_name, '، ' ORDER BY v.vendor_name) AS vendors
+        FROM ap_invoices i
+        LEFT JOIN ap_vendors v ON v.id = i.vendor_id
+        WHERE i.tenant_id=:tid
+          AND i.status='posted'
+          AND i.balance_due > 0
+          AND i.due_date <= :cutoff
+        GROUP BY GREATEST(due_date, :today::date)
+        ORDER BY 1
+    """), p)
+    ap_rows = ap_r.mappings().fetchall()
+
+    # ── فواتير AR مستحقة التحصيل (inflow) ────────────────────
+    ar_r = await db.execute(text("""
+        SELECT
+            GREATEST(due_date, :today::date)::text AS day,
+            COALESCE(SUM(balance_due), 0)          AS total,
+            COUNT(*)                               AS cnt,
+            STRING_AGG(DISTINCT c.customer_name, '، ' ORDER BY c.customer_name) AS customers
+        FROM ar_invoices i
+        LEFT JOIN ar_customers c ON c.id = i.customer_id
+        WHERE i.tenant_id=:tid
+          AND i.status='posted'
+          AND i.balance_due > 0
+          AND i.due_date <= :cutoff
+        GROUP BY GREATEST(due_date, :today::date)
+        ORDER BY 1
+    """), p)
+    ar_rows = ar_r.mappings().fetchall()
+
+    # ── بناء خريطة الأحداث اليومية ────────────────────────────
+    # الهيكل: { "YYYY-MM-DD": { inflow, outflow, items: [...] } }
     events: dict = {}
-    for rec in recs:
-        d = str(rec[0])
-        tx_type = rec[1]
-        amt = float(rec[2] or 0)
-        events.setdefault(d, {"inflow": 0, "outflow": 0})
-        if tx_type in ("RV", "BR"):
-            events[d]["inflow"] += amt
-        else:
-            events[d]["outflow"] += amt
 
-    # build day-by-day forecast
-    running = total_balance
+    def add_event(d: str, direction: str, amt: float, source: str, label: str):
+        events.setdefault(d, {"inflow": 0.0, "outflow": 0.0, "items": []})
+        events[d][direction] += amt
+        events[d]["items"].append({"source": source, "label": label,
+                                   "amount": round(amt, 2), "direction": direction})
+
+    for rec in recs:
+        d   = rec["next_due_date"]
+        amt = float(rec["estimated_amount"] or 0)
+        direction = "inflow" if rec["tx_type"] in ("RV", "BR") else "outflow"
+        add_event(d, direction, amt, "recurring", rec["description"] or "متكرر")
+
+    for row in ap_rows:
+        add_event(row["day"], "outflow", float(row["total"]),
+                  "ap", f"مستحقات موردين ({row['cnt']} فاتورة) — {row['vendors'] or ''}")
+
+    for row in ar_rows:
+        add_event(row["day"], "inflow", float(row["total"]),
+                  "ar", f"تحصيلات عملاء ({row['cnt']} فاتورة) — {row['customers'] or ''}")
+
+    # ── بناء التوقع اليومي ─────────────────────────────────────
+    running  = total_balance
     forecast = []
     for i in range(days + 1):
-        d = str(today + timedelta(days=i))
+        d  = str(today + timedelta(days=i))
         ev = events.get(d, {})
-        running += ev.get("inflow", 0) - ev.get("outflow", 0)
+        inflow  = ev.get("inflow",  0.0)
+        outflow = ev.get("outflow", 0.0)
+        running += inflow - outflow
         forecast.append({
-            "date": d,
+            "date":    d,
             "balance": round(running, 2),
-            "inflow": ev.get("inflow", 0),
-            "outflow": ev.get("outflow", 0),
+            "inflow":  round(inflow,  2),
+            "outflow": round(outflow, 2),
+            "items":   ev.get("items", []),
         })
 
-    return ok(data={"start_balance": total_balance, "days": forecast})
+    # ── ملخص المصادر ───────────────────────────────────────────
+    summary = {
+        "ap_due":  round(sum(float(r["total"]) for r in ap_rows), 2),
+        "ar_due":  round(sum(float(r["total"]) for r in ar_rows), 2),
+        "rec_out": round(sum(float(r["estimated_amount"] or 0)
+                             for r in recs if r["tx_type"] not in ("RV","BR")), 2),
+        "rec_in":  round(sum(float(r["estimated_amount"] or 0)
+                             for r in recs if r["tx_type"] in ("RV","BR")), 2),
+    }
+
+    return ok(data={"start_balance": total_balance, "days": forecast, "summary": summary})
 
 
 @router.get("/reports/monthly-cash-flow")
