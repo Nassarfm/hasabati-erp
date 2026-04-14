@@ -1562,3 +1562,50 @@ async def petty_cash_statement(
     items = [dict(row._mapping) for row in r.fetchall()]
     total = sum(float(i["total_amount"]) for i in items)
     return ok(data={"total": total, "count": len(items), "items": items})
+
+
+@router.get("/reports/monthly-cash-flow")
+async def monthly_cash_flow_report(
+    months: int = Query(12),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT
+            TO_CHAR(DATE_TRUNC('month', tx_date), 'YYYY-MM') AS month,
+            SUM(CASE WHEN tx_type='RV' AND src='cash' THEN amount ELSE 0 END) AS cash_receipts,
+            SUM(CASE WHEN tx_type='PV' AND src='cash' THEN amount ELSE 0 END) AS cash_payments,
+            SUM(CASE WHEN tx_type='BR' AND src='bank' THEN amount ELSE 0 END) AS bank_receipts,
+            SUM(CASE WHEN tx_type='BP' AND src='bank' THEN amount ELSE 0 END) AS bank_payments
+        FROM (
+            SELECT tx_date, tx_type, amount, 'cash' AS src
+            FROM tr_cash_transactions
+            WHERE tenant_id=:tid AND status='posted'
+              AND tx_date >= DATE_TRUNC('month', CURRENT_DATE) - (:months - 1) * INTERVAL '1 month'
+            UNION ALL
+            SELECT tx_date, tx_type, amount, 'bank' AS src
+            FROM tr_bank_transactions
+            WHERE tenant_id=:tid AND status='posted'
+              AND tx_date >= DATE_TRUNC('month', CURRENT_DATE) - (:months - 1) * INTERVAL '1 month'
+        ) combined
+        GROUP BY DATE_TRUNC('month', tx_date)
+        ORDER BY month
+    """), {"tid": tid, "months": months})
+    rows = []
+    for row in r.fetchall():
+        cr = float(row[1] or 0)
+        cp = float(row[2] or 0)
+        br = float(row[3] or 0)
+        bp = float(row[4] or 0)
+        rows.append({
+            "month": row[0],
+            "cash_receipts":  cr,
+            "cash_payments":  cp,
+            "bank_receipts":  br,
+            "bank_payments":  bp,
+            "total_receipts": cr + br,
+            "total_payments": cp + bp,
+            "net": (cr + br) - (cp + bp),
+        })
+    return ok(data={"rows": rows, "count": len(rows)})
