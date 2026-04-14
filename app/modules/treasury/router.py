@@ -15,7 +15,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException, Body
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.response import ok, created
@@ -217,6 +217,7 @@ async def dashboard(
 @router.get("/bank-accounts")
 async def list_bank_accounts(
     account_type: Optional[str] = Query(None),
+    is_active: Optional[bool] = Query(None),
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
@@ -226,6 +227,9 @@ async def list_bank_accounts(
     if account_type:
         where += " AND account_type=:atype"
         params["atype"] = account_type
+    if is_active is not None:
+        where += " AND is_active=:ia"
+        params["ia"] = is_active
     r = await db.execute(text(f"""
         SELECT * FROM tr_bank_accounts {where}
         ORDER BY account_type, account_name
@@ -706,7 +710,7 @@ async def post_bank_transaction(
 @router.post("/cash-transactions/{tx_id}/reverse")
 async def reverse_cash_transaction(
     tx_id: uuid.UUID,
-    data: dict = {},
+    data: dict = Body(default={}),
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
@@ -783,7 +787,7 @@ async def reverse_cash_transaction(
 @router.post("/bank-transactions/{tx_id}/reverse")
 async def reverse_bank_transaction(
     tx_id: uuid.UUID,
-    data: dict = {},
+    data: dict = Body(default={}),
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
@@ -932,7 +936,7 @@ async def approve_cash_transaction(
 @router.post("/cash-transactions/{tx_id}/reject")
 async def reject_cash_transaction(
     tx_id: uuid.UUID,
-    data: dict = {},
+    data: dict = Body(default={}),
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
@@ -1018,7 +1022,7 @@ async def approve_bank_transaction(
 @router.post("/bank-transactions/{tx_id}/reject")
 async def reject_bank_transaction(
     tx_id: uuid.UUID,
-    data: dict = {},
+    data: dict = Body(default={}),
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
