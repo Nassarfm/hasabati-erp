@@ -1373,6 +1373,179 @@ async def create_petty_cash_count(
 
 
 # ══════════════════════════════════════════════════════════
+# RECURRING TRANSACTIONS
+# ══════════════════════════════════════════════════════════
+@router.get("/recurring-transactions")
+async def list_recurring(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT rt.*, ba.account_name AS bank_account_name
+        FROM tr_recurring_transactions rt
+        LEFT JOIN tr_bank_accounts ba ON ba.id=rt.bank_account_id
+        WHERE rt.tenant_id=:tid
+        ORDER BY rt.next_due_date, rt.name
+    """), {"tid": tid})
+    return ok(data=[dict(row._mapping) for row in r.fetchall()])
+
+
+@router.post("/recurring-transactions", status_code=201)
+async def create_recurring(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    rid = str(uuid.uuid4())
+    await db.execute(text("""
+        INSERT INTO tr_recurring_transactions
+          (id, tenant_id, name, source, tx_type, bank_account_id,
+           counterpart_account, amount, currency_code, description,
+           frequency, next_due_date, is_active,
+           branch_code, cost_center, project_code, expense_classification_code,
+           created_by)
+        VALUES
+          (:id, :tid, :name, :src, :tt, :ba,
+           :cp, :amt, :cur, :desc,
+           :freq, :ndd, true,
+           :br, :cc, :pr, :ec,
+           :by)
+    """), {
+        "id": rid, "tid": tid,
+        "name": str(data["name"]).strip(),
+        "src":  data.get("source") or "bank",
+        "tt":   data.get("tx_type") or "BP",
+        "ba":   str(data["bank_account_id"]) if data.get("bank_account_id") else None,
+        "cp":   data.get("counterpart_account") or None,
+        "amt":  Decimal(str(data.get("amount") or 0)),
+        "cur":  data.get("currency_code") or "SAR",
+        "desc": data.get("description") or None,
+        "freq": data.get("frequency") or "monthly",
+        "ndd":  data.get("next_due_date") or None,
+        "br":   data.get("branch_code") or None,
+        "cc":   data.get("cost_center") or None,
+        "pr":   data.get("project_code") or None,
+        "ec":   data.get("expense_classification_code") or None,
+        "by":   user.email,
+    })
+    await db.commit()
+    return created(data={"id": rid}, message="تم إنشاء المعاملة المتكررة ✅")
+
+
+@router.put("/recurring-transactions/{rid}")
+async def update_recurring(
+    rid: uuid.UUID,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    ALLOWED = {"name","source","tx_type","bank_account_id","counterpart_account","amount",
+               "currency_code","description","frequency","next_due_date","is_active",
+               "branch_code","cost_center","project_code","expense_classification_code"}
+    safe = {k:v for k,v in data.items() if k in ALLOWED}
+    if not safe: raise HTTPException(400, "لا توجد بيانات")
+    safe["updated_at"] = datetime.utcnow()
+    set_clause = ", ".join([f"{k}=:{k}" for k in safe.keys()])
+    safe.update({"id": str(rid), "tid": tid})
+    await db.execute(text(f"UPDATE tr_recurring_transactions SET {set_clause} WHERE id=:id AND tenant_id=:tid"), safe)
+    await db.commit()
+    return ok(message="تم التعديل ✅")
+
+
+@router.delete("/recurring-transactions/{rid}")
+async def delete_recurring(
+    rid: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    await db.execute(text("DELETE FROM tr_recurring_transactions WHERE id=:id AND tenant_id=:tid"),
+                     {"id": str(rid), "tid": tid})
+    await db.commit()
+    return ok(message="تم الحذف")
+
+
+@router.post("/recurring-transactions/{rid}/execute")
+async def execute_recurring(
+    rid: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """إنشاء مسودة معاملة من القالب المتكرر"""
+    tid = str(user.tenant_id)
+    r = await db.execute(text("SELECT * FROM tr_recurring_transactions WHERE id=:id AND tenant_id=:tid"),
+                         {"id": str(rid), "tid": tid})
+    rec = r.mappings().fetchone()
+    if not rec: raise HTTPException(404, "القالب غير موجود")
+
+    tx_date = date.today()
+    if rec["source"] == "cash":
+        serial = await _next_serial(db, tid, rec["tx_type"], tx_date)
+        tx_id = str(uuid.uuid4())
+        await db.execute(text("""
+            INSERT INTO tr_cash_transactions
+              (id,tenant_id,serial,tx_type,tx_date,amount,currency_code,counterpart_account,
+               description,branch_code,cost_center,project_code,expense_classification_code,
+               status,created_by)
+            VALUES
+              (:id,:tid,:serial,:tt,:dt,:amt,:cur,:cp,
+               :desc,:br,:cc,:pr,:ec,
+               'draft',:by)
+        """), {
+            "id": tx_id, "tid": tid, "serial": serial,
+            "tt": rec["tx_type"], "dt": tx_date,
+            "amt": rec["amount"], "cur": rec["currency_code"],
+            "cp": rec["counterpart_account"], "desc": rec["description"],
+            "br": rec["branch_code"], "cc": rec["cost_center"],
+            "pr": rec["project_code"], "ec": rec["expense_classification_code"],
+            "by": user.email,
+        })
+    else:
+        serial = await _next_serial(db, tid, rec["tx_type"], tx_date)
+        tx_id = str(uuid.uuid4())
+        await db.execute(text("""
+            INSERT INTO tr_bank_transactions
+              (id,tenant_id,serial,tx_type,tx_date,bank_account_id,amount,currency_code,
+               counterpart_account,description,branch_code,cost_center,project_code,
+               expense_classification_code,status,created_by)
+            VALUES
+              (:id,:tid,:serial,:tt,:dt,:ba,:amt,:cur,
+               :cp,:desc,:br,:cc,:pr,:ec,'draft',:by)
+        """), {
+            "id": tx_id, "tid": tid, "serial": serial,
+            "tt": rec["tx_type"], "dt": tx_date,
+            "ba": str(rec["bank_account_id"]) if rec["bank_account_id"] else None,
+            "amt": rec["amount"], "cur": rec["currency_code"],
+            "cp": rec["counterpart_account"], "desc": rec["description"],
+            "br": rec["branch_code"], "cc": rec["cost_center"],
+            "pr": rec["project_code"], "ec": rec["expense_classification_code"],
+            "by": user.email,
+        })
+
+    # تحديث تاريخ التنفيذ الأخير والتالي
+    from dateutil.relativedelta import relativedelta
+    freq = rec["frequency"] or "monthly"
+    current_due = rec["next_due_date"] or tx_date
+    if freq == "weekly":     next_due = current_due + relativedelta(weeks=1)
+    elif freq == "quarterly": next_due = current_due + relativedelta(months=3)
+    elif freq == "yearly":   next_due = current_due + relativedelta(years=1)
+    else:                    next_due = current_due + relativedelta(months=1)
+
+    await db.execute(text("""
+        UPDATE tr_recurring_transactions
+        SET last_executed_date=:last, next_due_date=:next
+        WHERE id=:id AND tenant_id=:tid
+    """), {"last": tx_date, "next": next_due, "id": str(rid), "tid": tid})
+
+    await db.commit()
+    return created(data={"tx_id": tx_id, "serial": serial},
+                   message=f"تم إنشاء مسودة {serial} ✅")
+
+
+# ══════════════════════════════════════════════════════════
 # REPORTS
 # ══════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════
