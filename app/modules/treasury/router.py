@@ -1375,6 +1375,129 @@ async def create_petty_cash_count(
 # ══════════════════════════════════════════════════════════
 # REPORTS
 # ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════
+# BANK FEES / COMMISSIONS
+# ══════════════════════════════════════════════════════════
+@router.get("/bank-fees")
+async def list_bank_fees(
+    bank_account_id: Optional[uuid.UUID] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to:   Optional[date] = Query(None),
+    limit: int = Query(200),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    conds = ["f.tenant_id=:tid"]
+    params: dict = {"tid": tid}
+    if bank_account_id: conds.append("f.bank_account_id=:ba"); params["ba"] = str(bank_account_id)
+    if date_from: conds.append("f.fee_date>=:df"); params["df"] = str(date_from)
+    if date_to:   conds.append("f.fee_date<=:dt"); params["dt"] = str(date_to)
+    where = " AND ".join(conds)
+    r = await db.execute(text(f"""
+        SELECT f.*, ba.account_name AS bank_account_name
+        FROM tr_bank_fees f
+        LEFT JOIN tr_bank_accounts ba ON ba.id=f.bank_account_id
+        WHERE {where}
+        ORDER BY f.fee_date DESC, f.created_at DESC
+        LIMIT :lim
+    """), {**params, "lim": limit})
+    items = [dict(row._mapping) for row in r.fetchall()]
+    total = sum(float(i["amount"]) for i in items)
+    return ok(data={"items": items, "total": total, "count": len(items)})
+
+
+@router.post("/bank-fees")
+async def create_bank_fee(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    if not data.get("bank_account_id"): raise HTTPException(400, "الحساب البنكي مطلوب")
+    if not data.get("fee_date"):        raise HTTPException(400, "تاريخ الرسوم مطلوب")
+    if not data.get("amount"):          raise HTTPException(400, "المبلغ مطلوب")
+
+    fee_id = str(uuid.uuid4())
+    try:
+        await db.execute(text("""
+            INSERT INTO tr_bank_fees
+              (id, tenant_id, bank_account_id, fee_date, fee_type, amount, currency_code, description, created_by)
+            VALUES
+              (:id, :tid, :ba, :dt, :ft, :amt, :cur, :desc, :by)
+        """), {
+            "id":  fee_id,
+            "tid": tid,
+            "ba":  str(data["bank_account_id"]),
+            "dt":  data["fee_date"],
+            "ft":  data.get("fee_type") or "other",
+            "amt": Decimal(str(data["amount"])),
+            "cur": data.get("currency_code") or "SAR",
+            "desc":data.get("description") or None,
+            "by":  user.email,
+        })
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ: {str(e)}")
+    return created(data={"id": fee_id}, message="تم تسجيل الرسوم ✅")
+
+
+@router.delete("/bank-fees/{fee_id}")
+async def delete_bank_fee(
+    fee_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    await db.execute(text("DELETE FROM tr_bank_fees WHERE id=:id AND tenant_id=:tid"),
+                     {"id": str(fee_id), "tid": tid})
+    await db.commit()
+    return ok(message="تم الحذف")
+
+
+# ══════════════════════════════════════════════════════════
+# ACTIVITY LOG
+# ══════════════════════════════════════════════════════════
+@router.get("/activity-log")
+async def activity_log(
+    limit: int = Query(150),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT 'cash' AS source, serial, tx_type, tx_date::text AS tx_date,
+               amount, currency_code, status, description,
+               created_by, created_at,
+               posted_by, posted_at,
+               NULL::text AS bank_account_name
+        FROM tr_cash_transactions WHERE tenant_id=:tid
+        UNION ALL
+        SELECT 'bank', bt.serial, bt.tx_type, bt.tx_date::text,
+               bt.amount, bt.currency_code, bt.status, bt.description,
+               bt.created_by, bt.created_at,
+               bt.posted_by, bt.posted_at,
+               ba.account_name
+        FROM tr_bank_transactions bt
+        LEFT JOIN tr_bank_accounts ba ON ba.id=bt.bank_account_id
+        WHERE bt.tenant_id=:tid
+        UNION ALL
+        SELECT 'transfer', it.serial, 'IT', it.transfer_date::text,
+               it.amount, it.currency_code, it.status, it.notes,
+               it.created_by, it.created_at,
+               it.posted_by, it.posted_at,
+               fa.account_name
+        FROM tr_internal_transfers it
+        LEFT JOIN tr_bank_accounts fa ON fa.id=it.from_account_id
+        WHERE it.tenant_id=:tid
+        ORDER BY created_at DESC
+        LIMIT :lim
+    """), {"tid": tid, "lim": limit})
+    items = [dict(row._mapping) for row in r.fetchall()]
+    return ok(data={"items": items, "count": len(items)})
+
+
 @router.get("/reports/cash-position")
 async def cash_position_report(
     db: AsyncSession = Depends(get_db),
