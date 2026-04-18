@@ -397,6 +397,28 @@ async def delete_bank_account(
     return ok(data={}, message="تم إلغاء تفعيل الحساب")
 
 
+@router.patch("/bank-accounts/{ba_id}/toggle-active")
+async def toggle_bank_account_active(
+    ba_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """تفعيل / إلغاء تفعيل حساب بنكي أو صندوق"""
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        UPDATE tr_bank_accounts
+        SET is_active = NOT is_active, updated_at = NOW()
+        WHERE id = :id AND tenant_id = :tid
+        RETURNING is_active, account_name
+    """), {"id": str(ba_id), "tid": tid})
+    row = r.fetchone()
+    if not row:
+        raise HTTPException(404, "الحساب غير موجود")
+    await db.commit()
+    status_ar = "مفعّل" if row[0] else "موقوف"
+    return ok(data={"is_active": row[0]}, message=f"تم تغيير حالة {row[1]} إلى {status_ar}")
+
+
 # ══════════════════════════════════════════════════════════
 # CASH TRANSACTIONS (PV / RV)
 # ══════════════════════════════════════════════════════════
@@ -2385,7 +2407,7 @@ async def activity_log(
         LEFT JOIN tr_bank_accounts ba ON ba.id=bt.bank_account_id
         WHERE bt.tenant_id=:tid
         UNION ALL
-        SELECT 'transfer', it.serial, 'IT', it.transfer_date::text,
+        SELECT 'transfer', it.serial, 'IT', it.tx_date::text,
                it.amount, it.currency_code, it.status, it.notes,
                it.created_by, it.created_at,
                it.posted_by, it.posted_at,
