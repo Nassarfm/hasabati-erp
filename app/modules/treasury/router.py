@@ -235,6 +235,49 @@ async def dashboard(
     })
 
 
+@router.get("/reports/gl-balance-check")
+async def gl_balance_check(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """
+    مقارنة رصيد الخزينة مع رصيد الأستاذ العام لكل حساب
+    يكشف الفروق بين رصيد tr_bank_accounts.current_balance ورصيد account_balances في GL
+    """
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT
+            ba.id,
+            ba.account_name,
+            ba.account_code,
+            ba.account_type,
+            ba.gl_account_code,
+            ba.current_balance   AS treasury_balance,
+            COALESCE(ab.balance, 0) AS gl_balance,
+            ABS(ba.current_balance - COALESCE(ab.balance, 0)) AS diff,
+            CASE WHEN ABS(ba.current_balance - COALESCE(ab.balance, 0)) < 0.01
+                 THEN 'matched' ELSE 'mismatch' END AS status
+        FROM tr_bank_accounts ba
+        LEFT JOIN account_balances ab
+               ON ab.account_code = ba.gl_account_code
+              AND ab.tenant_id    = ba.tenant_id
+        WHERE ba.tenant_id = :tid AND ba.is_active = true
+        ORDER BY ba.account_type, ba.account_name
+    """), {"tid": tid})
+    rows = [dict(row._mapping) for row in r.fetchall()]
+
+    mismatches = [r for r in rows if r["status"] == "mismatch"]
+    total_diff  = sum(float(r["diff"]) for r in mismatches)
+
+    return ok(data={
+        "accounts": rows,
+        "total_accounts": len(rows),
+        "mismatches": len(mismatches),
+        "total_diff": round(total_diff, 3),
+        "all_matched": len(mismatches) == 0,
+    })
+
+
 # ══════════════════════════════════════════════════════════
 # BANK ACCOUNTS
 # ══════════════════════════════════════════════════════════
