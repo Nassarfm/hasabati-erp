@@ -104,6 +104,30 @@ async def _update_balance(db, bank_account_id: str, delta: Decimal):
     """), {"delta": delta, "id": bank_account_id})
 
 
+async def _check_period(db: AsyncSession, tid: str, tx_date: date):
+    """
+    حارس الفترة المحاسبية — يرفع 422 إذا كانت الفترة مغلقة أو غير موجودة
+    استدعِه في بداية كل endpoint يُنشئ قيوداً مالية
+    """
+    r = await db.execute(text("""
+        SELECT status, period_name FROM fiscal_periods
+        WHERE tenant_id = :tid
+          AND start_date <= :dt AND end_date >= :dt
+        LIMIT 1
+    """), {"tid": tid, "dt": tx_date})
+    row = r.fetchone()
+    if not row:
+        raise HTTPException(
+            status_code=422,
+            detail=f"لا توجد فترة مالية للتاريخ {tx_date} — يرجى إنشاء فترة أو مراجعة مدير النظام"
+        )
+    if row[0] != "open":
+        raise HTTPException(
+            status_code=422,
+            detail=f"الفترة المالية '{row[1]}' مغلقة — لا يمكن تسجيل قيود في فترة مغلقة"
+        )
+
+
 # ══════════════════════════════════════════════════════════
 # DASHBOARD
 # ══════════════════════════════════════════════════════════
@@ -420,6 +444,7 @@ async def create_cash_transaction(
 ):
     tid = str(user.tenant_id)
     tx_date = date.fromisoformat(str(data["tx_date"]))
+    await _check_period(db, tid, tx_date)
     tx_type = data["tx_type"]  # PV | RV
     serial = await _next_serial(db, tid, tx_type, tx_date)
 
@@ -614,6 +639,7 @@ async def create_bank_transaction(
 ):
     tid = str(user.tenant_id)
     tx_date = date.fromisoformat(str(data["tx_date"]))
+    await _check_period(db, tid, tx_date)
     tx_type = data["tx_type"]
     serial = await _next_serial(db, tid, tx_type, tx_date)
 
@@ -1210,6 +1236,7 @@ async def create_internal_transfer(
 ):
     tid = str(user.tenant_id)
     tx_date = date.fromisoformat(str(data["tx_date"]))
+    await _check_period(db, tid, tx_date)
     serial = await _next_serial(db, tid, "IT", tx_date)
     tx_id = str(uuid.uuid4())
     amt = Decimal(str(data["amount"]))
@@ -1320,6 +1347,7 @@ async def create_check(
 ):
     tid = str(user.tenant_id)
     check_date = date.fromisoformat(str(data["check_date"]))
+    await _check_period(db, tid, check_date)
     serial = await _next_serial(db, tid, "CHK", check_date)
     ck_id = str(uuid.uuid4())
 
@@ -1834,6 +1862,7 @@ async def create_petty_cash_expense(
 ):
     tid = str(user.tenant_id)
     exp_date = date.fromisoformat(str(data["expense_date"]))
+    await _check_period(db, tid, exp_date)
     serial = await _next_serial(db, tid, "PET", exp_date)
     exp_id = str(uuid.uuid4())
     lines = data.get("lines", [])
@@ -2259,6 +2288,8 @@ async def create_bank_fee(
     if not data.get("bank_account_id"): raise HTTPException(400, "الحساب البنكي مطلوب")
     if not data.get("fee_date"):        raise HTTPException(400, "تاريخ الرسوم مطلوب")
     if not data.get("amount"):          raise HTTPException(400, "المبلغ مطلوب")
+    fee_date_dt = date.fromisoformat(str(data["fee_date"]))
+    await _check_period(db, tid, fee_date_dt)
 
     fee_id = str(uuid.uuid4())
     try:
