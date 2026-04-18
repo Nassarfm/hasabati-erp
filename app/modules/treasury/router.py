@@ -333,6 +333,17 @@ async def update_bank_account(
     if not safe:
         raise HTTPException(status_code=400, detail="لا توجد بيانات للتعديل")
 
+    for date_field in ("opening_date",):
+        if date_field in safe:
+            v = safe[date_field]
+            if v == "" or v is None:
+                safe[date_field] = None
+            else:
+                try:
+                    safe[date_field] = date.fromisoformat(str(v))
+                except Exception:
+                    safe[date_field] = None
+
     safe["updated_at"] = datetime.utcnow()
     set_clause = ", ".join([f"{k}=:{k}" for k in safe.keys()])
     safe.update({"id": str(ba_id), "tid": tid})
@@ -921,8 +932,8 @@ async def approve_cash_transaction(
             await _update_balance(db, str(tx["bank_account_id"]), delta)
         await db.execute(text("""
             UPDATE tr_cash_transactions
-            SET status='posted', approved_by=:by, approved_at=NOW(),
-                je_id=:je_id, je_serial=:je_serial, posted_by=:by, posted_at=NOW()
+            SET status='posted', approved_by=:by::text, approved_at=NOW(),
+                je_id=:je_id, je_serial=:je_serial, posted_by=:by::text, posted_at=NOW()
             WHERE id=:id AND tenant_id=:tid
         """), {"by": user.email, "je_id": je["je_id"], "je_serial": je["je_serial"],
                "id": str(tx_id), "tid": tid})
@@ -1007,8 +1018,8 @@ async def approve_bank_transaction(
             await _update_balance(db, str(tx["bank_account_id"]), delta)
         await db.execute(text("""
             UPDATE tr_bank_transactions
-            SET status='posted', approved_by=:by, approved_at=NOW(),
-                je_id=:je_id, je_serial=:je_serial, posted_by=:by, posted_at=NOW()
+            SET status='posted', approved_by=:by::text, approved_at=NOW(),
+                je_id=:je_id, je_serial=:je_serial, posted_by=:by::text, posted_at=NOW()
             WHERE id=:id AND tenant_id=:tid
         """), {"by": user.email, "je_id": je["je_id"], "je_serial": je["je_serial"],
                "id": str(tx_id), "tid": tid})
@@ -2260,7 +2271,7 @@ async def create_bank_fee(
             "id":  fee_id,
             "tid": tid,
             "ba":  str(data["bank_account_id"]),
-            "dt":  data["fee_date"],
+            "dt":  date.fromisoformat(str(data["fee_date"])),
             "ft":  data.get("fee_type") or "other",
             "amt": Decimal(str(data["amount"])),
             "cur": data.get("currency_code") or "SAR",
@@ -2633,40 +2644,46 @@ async def cash_forecast(
     recs = rec_r.mappings().fetchall()
 
     # ── فواتير AP مستحقة الدفع (outflow) ─────────────────────
-    ap_r = await db.execute(text("""
-        SELECT
-            GREATEST(due_date, :today::date)::text AS day,
-            COALESCE(SUM(balance_due), 0)          AS total,
-            COUNT(*)                               AS cnt,
-            STRING_AGG(DISTINCT v.vendor_name, '، ' ORDER BY v.vendor_name) AS vendors
-        FROM ap_invoices i
-        LEFT JOIN ap_vendors v ON v.id = i.vendor_id
-        WHERE i.tenant_id=:tid
-          AND i.status='posted'
-          AND i.balance_due > 0
-          AND i.due_date <= :cutoff
-        GROUP BY GREATEST(due_date, :today::date)
-        ORDER BY 1
-    """), p)
-    ap_rows = ap_r.mappings().fetchall()
+    try:
+        ap_r = await db.execute(text("""
+            SELECT
+                GREATEST(due_date, :today::date)::text AS day,
+                COALESCE(SUM(balance_due), 0)          AS total,
+                COUNT(*)                               AS cnt,
+                STRING_AGG(DISTINCT v.vendor_name, '، ' ORDER BY v.vendor_name) AS vendors
+            FROM ap_invoices i
+            LEFT JOIN ap_vendors v ON v.id = i.vendor_id
+            WHERE i.tenant_id=:tid
+              AND i.status='posted'
+              AND i.balance_due > 0
+              AND i.due_date <= :cutoff
+            GROUP BY GREATEST(due_date, :today::date)
+            ORDER BY 1
+        """), p)
+        ap_rows = ap_r.mappings().fetchall()
+    except Exception:
+        ap_rows = []
 
     # ── فواتير AR مستحقة التحصيل (inflow) ────────────────────
-    ar_r = await db.execute(text("""
-        SELECT
-            GREATEST(due_date, :today::date)::text AS day,
-            COALESCE(SUM(balance_due), 0)          AS total,
-            COUNT(*)                               AS cnt,
-            STRING_AGG(DISTINCT c.customer_name, '، ' ORDER BY c.customer_name) AS customers
-        FROM ar_invoices i
-        LEFT JOIN ar_customers c ON c.id = i.customer_id
-        WHERE i.tenant_id=:tid
-          AND i.status='posted'
-          AND i.balance_due > 0
-          AND i.due_date <= :cutoff
-        GROUP BY GREATEST(due_date, :today::date)
-        ORDER BY 1
-    """), p)
-    ar_rows = ar_r.mappings().fetchall()
+    try:
+        ar_r = await db.execute(text("""
+            SELECT
+                GREATEST(due_date, :today::date)::text AS day,
+                COALESCE(SUM(balance_due), 0)          AS total,
+                COUNT(*)                               AS cnt,
+                STRING_AGG(DISTINCT c.customer_name, '، ' ORDER BY c.customer_name) AS customers
+            FROM ar_invoices i
+            LEFT JOIN ar_customers c ON c.id = i.customer_id
+            WHERE i.tenant_id=:tid
+              AND i.status='posted'
+              AND i.balance_due > 0
+              AND i.due_date <= :cutoff
+            GROUP BY GREATEST(due_date, :today::date)
+            ORDER BY 1
+        """), p)
+        ar_rows = ar_r.mappings().fetchall()
+    except Exception:
+        ar_rows = []
 
     # ── بناء خريطة الأحداث اليومية ────────────────────────────
     # الهيكل: { "YYYY-MM-DD": { inflow, outflow, items: [...] } }
