@@ -2148,38 +2148,45 @@ async def create_recurring(
 ):
     tid = str(user.tenant_id)
     rid = str(uuid.uuid4())
-    await db.execute(text("""
-        INSERT INTO tr_recurring_transactions
-          (id, tenant_id, name, source, tx_type, bank_account_id,
-           counterpart_account, amount, currency_code, description,
-           frequency, next_due_date, is_active,
-           branch_code, cost_center, project_code, expense_classification_code,
-           created_by)
-        VALUES
-          (:id, :tid, :name, :src, :tt, :ba,
-           :cp, :amt, :cur, :desc,
-           :freq, :ndd, true,
-           :br, :cc, :pr, :ec,
-           :by)
-    """), {
-        "id": rid, "tid": tid,
-        "name": str(data["name"]).strip(),
-        "src":  data.get("source") or "bank",
-        "tt":   data.get("tx_type") or "BP",
-        "ba":   str(data["bank_account_id"]) if data.get("bank_account_id") else None,
-        "cp":   data.get("counterpart_account") or None,
-        "amt":  Decimal(str(data.get("amount") or 0)),
-        "cur":  data.get("currency_code") or "SAR",
-        "desc": data.get("description") or None,
-        "freq": data.get("frequency") or "monthly",
-        "ndd":  data.get("next_due_date") or None,
-        "br":   data.get("branch_code") or None,
-        "cc":   data.get("cost_center") or None,
-        "pr":   data.get("project_code") or None,
-        "ec":   data.get("expense_classification_code") or None,
-        "by":   user.email,
-    })
-    await db.commit()
+    # تحويل التاريخ والمبلغ بأمان
+    raw_ndd = data.get("next_due_date")
+    ndd = date.fromisoformat(str(raw_ndd)) if raw_ndd else None
+    try:
+        await db.execute(text("""
+            INSERT INTO tr_recurring_transactions
+              (id, tenant_id, name, source, tx_type, bank_account_id,
+               counterpart_account, amount, currency_code, description,
+               frequency, next_due_date, is_active,
+               branch_code, cost_center, project_code, expense_classification_code,
+               created_by)
+            VALUES
+              (:id, :tid, :name, :src, :tt, :ba,
+               :cp, :amt, :cur, :desc,
+               :freq, :ndd, true,
+               :br, :cc, :pr, :ec,
+               :by)
+        """), {
+            "id": rid, "tid": tid,
+            "name": str(data["name"]).strip(),
+            "src":  data.get("source") or "bank",
+            "tt":   data.get("tx_type") or "BP",
+            "ba":   str(data["bank_account_id"]) if data.get("bank_account_id") else None,
+            "cp":   data.get("counterpart_account") or None,
+            "amt":  Decimal(str(data.get("amount") or 0)),
+            "cur":  data.get("currency_code") or "SAR",
+            "desc": data.get("description") or None,
+            "freq": data.get("frequency") or "monthly",
+            "ndd":  ndd,
+            "br":   data.get("branch_code") or None,
+            "cc":   data.get("cost_center") or None,
+            "pr":   data.get("project_code") or None,
+            "ec":   data.get("expense_classification_code") or None,
+            "by":   user.email,
+        })
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ في الحفظ: {str(e)}")
     return created(data={"id": rid}, message="تم إنشاء المعاملة المتكررة ✅")
 
 
@@ -2196,11 +2203,24 @@ async def update_recurring(
                "branch_code","cost_center","project_code","expense_classification_code"}
     safe = {k:v for k,v in data.items() if k in ALLOWED}
     if not safe: raise HTTPException(400, "لا توجد بيانات")
+    # تحويل الأنواع بأمان
+    if "amount" in safe and safe["amount"] is not None:
+        safe["amount"] = Decimal(str(safe["amount"]))
+    if "next_due_date" in safe and safe["next_due_date"]:
+        safe["next_due_date"] = date.fromisoformat(str(safe["next_due_date"]))
+    elif "next_due_date" in safe:
+        safe["next_due_date"] = None
+    if "bank_account_id" in safe and safe["bank_account_id"]:
+        safe["bank_account_id"] = str(safe["bank_account_id"])
     safe["updated_at"] = datetime.utcnow()
     set_clause = ", ".join([f"{k}=:{k}" for k in safe.keys()])
     safe.update({"id": str(rid), "tid": tid})
-    await db.execute(text(f"UPDATE tr_recurring_transactions SET {set_clause} WHERE id=:id AND tenant_id=:tid"), safe)
-    await db.commit()
+    try:
+        await db.execute(text(f"UPDATE tr_recurring_transactions SET {set_clause} WHERE id=:id AND tenant_id=:tid"), safe)
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ في التعديل: {str(e)}")
     return ok(message="تم التعديل ✅")
 
 
