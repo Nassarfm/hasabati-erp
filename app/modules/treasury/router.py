@@ -452,18 +452,24 @@ async def create_cash_transaction(
     amt = Decimal(str(data["amount"]))
     amt_sar = amt * Decimal(str(data.get("exchange_rate", 1)))
 
+    vat_rate   = Decimal(str(data.get("vat_rate", 0) or 0))
+    vat_amount = (amt * vat_rate / 100).quantize(Decimal("0.001"))
+    vat_acc    = data.get("vat_account_code") or None
+
     try:
         await db.execute(text("""
             INSERT INTO tr_cash_transactions
               (id,tenant_id,serial,tx_type,tx_date,bank_account_id,amount,
                currency_code,exchange_rate,amount_sar,counterpart_account,
                description,party_name,reference,payment_method,check_number,
-               branch_code,cost_center,project_code,expense_classification_code,notes,status,created_by)
+               branch_code,cost_center,project_code,expense_classification_code,
+               vat_rate,vat_amount,vat_account_code,notes,status,created_by)
             VALUES
               (:id,:tid,:serial,:tx_type,:tx_date,:ba_id,:amount,
                :cur,:rate,:amt_sar,:cp_acc,
                :desc,:party,:ref,:method,:check_no,
-               :branch,:cc,:proj,:exp_cls,:notes,'draft',:by)
+               :branch,:cc,:proj,:exp_cls,
+               :vat_rate,:vat_amount,:vat_acc,:notes,'draft',:by)
         """), {
             "id": tx_id, "tid": tid, "serial": serial,
             "tx_type": tx_type, "tx_date": tx_date,
@@ -476,7 +482,8 @@ async def create_cash_transaction(
             "check_no": data.get("check_number"), "branch": data.get("branch_code"),
             "cc": data.get("cost_center"), "proj": data.get("project_code"),
             "exp_cls": data.get("expense_classification_code"),
-            "notes": data.get("notes"), "by": user.email,
+            "vat_rate": vat_rate, "vat_amount": vat_amount,
+            "vat_acc": vat_acc, "notes": data.get("notes"), "by": user.email,
         })
         await db.commit()
     except Exception as e:
@@ -504,12 +511,15 @@ async def post_cash_transaction(
 
     gl = tx["gl_account_code"]
     cp = tx["counterpart_account"]
-    amt = Decimal(str(tx["amount_sar"] or tx["amount"]))
+    base_amt = Decimal(str(tx["amount_sar"] or tx["amount"]))
+    vat_amt  = Decimal(str(tx.get("vat_amount") or 0))
+    vat_acc  = tx.get("vat_account_code") or None
+    total_amt = base_amt + vat_amt
     tx_date = tx["tx_date"]
     desc = tx["description"]
 
-    # PV = صرف → CR صندوق/بنك, DR الطرف المقابل
-    # RV = قبض → DR صندوق/بنك, CR الطرف المقابل
+    # PV = صرف → CR صندوق/بنك بالإجمالي, DR الطرف المقابل + DR ضريبة
+    # RV = قبض → DR صندوق/بنك بالإجمالي, CR الطرف المقابل + CR ضريبة
     dims = {
         "branch_code": tx.get("branch_code"),
         "cost_center": tx.get("cost_center"),
@@ -518,14 +528,19 @@ async def post_cash_transaction(
     }
     if tx["tx_type"] == "RV":
         lines = [
-            {"account_code": gl, "debit": amt, "credit": 0, "description": desc},
-            {"account_code": cp, "debit": 0, "credit": amt, "description": desc, **dims},
+            {"account_code": gl, "debit": total_amt, "credit": 0,        "description": desc},
+            {"account_code": cp, "debit": 0,         "credit": base_amt, "description": desc, **dims},
         ]
+        if vat_amt > 0 and vat_acc:
+            lines.append({"account_code": vat_acc, "debit": 0, "credit": vat_amt, "description": f"ضريبة — {desc}"})
     else:
         lines = [
-            {"account_code": cp, "debit": amt, "credit": 0, "description": desc, **dims},
-            {"account_code": gl, "debit": 0, "credit": amt, "description": desc},
+            {"account_code": cp, "debit": base_amt, "credit": 0,        "description": desc, **dims},
+            {"account_code": gl, "debit": 0,        "credit": total_amt, "description": desc},
         ]
+        if vat_amt > 0 and vat_acc:
+            lines.append({"account_code": vat_acc, "debit": vat_amt, "credit": 0, "description": f"ضريبة — {desc}"})
+    amt = total_amt  # لتحديث الرصيد بالمبلغ الإجمالي
 
     je = await _post_je(db, tid, user.email, tx["tx_type"], tx_date, desc, lines, tx["reference"])
     delta = amt if tx["tx_type"] == "RV" else -amt
@@ -647,19 +662,25 @@ async def create_bank_transaction(
     amt = Decimal(str(data["amount"]))
     amt_sar = amt * Decimal(str(data.get("exchange_rate", 1)))
 
+    vat_rate   = Decimal(str(data.get("vat_rate", 0) or 0))
+    vat_amount = (amt * vat_rate / 100).quantize(Decimal("0.001"))
+    vat_acc    = data.get("vat_account_code") or None
+
     await db.execute(text("""
         INSERT INTO tr_bank_transactions
           (id,tenant_id,serial,tx_type,tx_date,bank_account_id,amount,
            currency_code,exchange_rate,amount_sar,counterpart_account,
            beneficiary_name,beneficiary_iban,beneficiary_bank,
            description,reference,payment_method,check_number,
-           branch_code,cost_center,project_code,expense_classification_code,notes,status,created_by)
+           branch_code,cost_center,project_code,expense_classification_code,
+           vat_rate,vat_amount,vat_account_code,notes,status,created_by)
         VALUES
           (:id,:tid,:serial,:tx_type,:tx_date,:ba_id,:amount,
            :cur,:rate,:amt_sar,:cp_acc,
            :ben_name,:ben_iban,:ben_bank,
            :desc,:ref,:method,:check_no,
-           :branch,:cc,:proj,:exp_cls,:notes,'draft',:by)
+           :branch,:cc,:proj,:exp_cls,
+           :vat_rate,:vat_amount,:vat_acc,:notes,'draft',:by)
     """), {
         "id": tx_id, "tid": tid, "serial": serial,
         "tx_type": tx_type, "tx_date": tx_date,
@@ -674,7 +695,8 @@ async def create_bank_transaction(
         "check_no": data.get("check_number"), "branch": data.get("branch_code"),
         "cc": data.get("cost_center"), "proj": data.get("project_code"),
         "exp_cls": data.get("expense_classification_code"),
-        "notes": data.get("notes"), "by": user.email,
+        "vat_rate": vat_rate, "vat_amount": vat_amount,
+        "vat_acc": vat_acc, "notes": data.get("notes"), "by": user.email,
     })
     await db.commit()
     return created(data={"id": tx_id, "serial": serial}, message=f"تم إنشاء {serial} ✅")
@@ -697,14 +719,17 @@ async def post_bank_transaction(
     if not tx: raise Exception("السند غير موجود")
     if tx["status"] != "draft": raise Exception("السند مُرحَّل مسبقاً")
 
-    gl = tx["gl_account_code"]
-    cp = tx["counterpart_account"] or "9999"
-    amt = Decimal(str(tx["amount_sar"] or tx["amount"]))
-    desc = tx["description"]
-    tx_date = tx["tx_date"]
+    gl        = tx["gl_account_code"]
+    cp        = tx["counterpart_account"] or "9999"
+    base_amt  = Decimal(str(tx["amount_sar"] or tx["amount"]))
+    vat_amt   = Decimal(str(tx.get("vat_amount") or 0))
+    vat_acc   = tx.get("vat_account_code") or None
+    total_amt = base_amt + vat_amt
+    desc      = tx["description"]
+    tx_date   = tx["tx_date"]
 
-    # BP = دفعة → DR مورد/مصروف, CR بنك
-    # BR = قبض  → DR بنك, CR عميل/إيراد
+    # BP = دفعة → DR مورد/مصروف + DR ضريبة, CR بنك بالإجمالي
+    # BR = قبض  → DR بنك بالإجمالي, CR عميل/إيراد + CR ضريبة
     # BT = تحويل → DR مستفيد, CR بنك
     dims = {
         "branch_code": tx.get("branch_code"),
@@ -714,16 +739,20 @@ async def post_bank_transaction(
     }
     if tx["tx_type"] == "BR":
         lines = [
-            {"account_code": gl, "debit": amt, "credit": 0, "description": desc},
-            {"account_code": cp, "debit": 0, "credit": amt, "description": desc, **dims},
+            {"account_code": gl, "debit": total_amt, "credit": 0,        "description": desc},
+            {"account_code": cp, "debit": 0,         "credit": base_amt, "description": desc, **dims},
         ]
-        delta = amt
+        if vat_amt > 0 and vat_acc:
+            lines.append({"account_code": vat_acc, "debit": 0, "credit": vat_amt, "description": f"ضريبة — {desc}"})
+        delta = total_amt
     else:  # BP, BT
         lines = [
-            {"account_code": cp, "debit": amt, "credit": 0, "description": desc, **dims},
-            {"account_code": gl, "debit": 0, "credit": amt, "description": desc},
+            {"account_code": cp, "debit": base_amt, "credit": 0,        "description": desc, **dims},
+            {"account_code": gl, "debit": 0,        "credit": total_amt, "description": desc},
         ]
-        delta = -amt
+        if vat_amt > 0 and vat_acc:
+            lines.append({"account_code": vat_acc, "debit": vat_amt, "credit": 0, "description": f"ضريبة — {desc}"})
+        delta = -total_amt
 
     je = await _post_je(db, tid, user.email, tx["tx_type"], tx_date, desc, lines, tx["reference"])
     if tx["bank_account_id"]:
