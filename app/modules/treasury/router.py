@@ -1461,8 +1461,10 @@ async def match_transaction(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """مطابقة سطر كشف البنك مع حركة في النظام"""
+    """مطابقة سطر كشف البنك مع حركة في النظام (bank tx / AR receipt / AP payment)"""
     tid = str(user.tenant_id)
+
+    # ── تحديث سطر الكشف ───────────────────────────────────
     await db.execute(text("""
         UPDATE tr_bank_statement_lines
         SET match_status='matched', matched_tx_id=:tx_id, matched_tx_type=:tx_type
@@ -1470,15 +1472,214 @@ async def match_transaction(
     """), {"tx_id": str(tx_id), "tx_type": tx_type,
            "line_id": str(statement_line_id), "sess_id": str(sess_id), "tid": tid})
 
-    # تحديث حالة الحركة
-    tbl = "tr_bank_transactions" if tx_type in ("BP","BR","BT") else "tr_cash_transactions"
-    await db.execute(text(f"""
-        UPDATE {tbl} SET is_reconciled=true, reconciled_at=NOW()
-        WHERE id=:tx_id AND tenant_id=:tid
-    """), {"tx_id": str(tx_id), "tid": tid})
+    # ── تحديث حالة المستند المطابق ───────────────────────
+    if tx_type == "AR_RECEIPT":
+        await db.execute(text("""
+            UPDATE ar_receipts SET is_reconciled=true, reconciled_at=NOW()
+            WHERE id=:tx_id AND tenant_id=:tid
+        """), {"tx_id": str(tx_id), "tid": tid})
+    elif tx_type == "AP_PAYMENT":
+        await db.execute(text("""
+            UPDATE ap_payments SET is_reconciled=true, reconciled_at=NOW()
+            WHERE id=:tx_id AND tenant_id=:tid
+        """), {"tx_id": str(tx_id), "tid": tid})
+    else:
+        tbl = "tr_bank_transactions" if tx_type in ("BP","BR","BT") else "tr_cash_transactions"
+        await db.execute(text(f"""
+            UPDATE {tbl} SET is_reconciled=true, reconciled_at=NOW()
+            WHERE id=:tx_id AND tenant_id=:tid
+        """), {"tx_id": str(tx_id), "tid": tid})
 
     await db.commit()
     return ok(data={}, message="✅ تمت المطابقة")
+
+
+@router.post("/reconciliation/sessions/{sess_id}/auto-match")
+async def auto_match_session(
+    sess_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """مطابقة تلقائية — تُقارن كل سطر غير مطابق مع AR receipts + AP payments + bank transactions
+       وتُطبّق المطابقات التي تحصل على ثقة 100٪ (مبلغ مطابق تماماً + نفس الحساب + فارق ≤ 7 أيام)
+    """
+    tid = str(user.tenant_id)
+    from datetime import timedelta as td
+
+    # جلب الجلسة
+    sr = await db.execute(text("""
+        SELECT * FROM tr_reconciliation_sessions
+        WHERE id=:id AND tenant_id=:tid
+    """), {"id": str(sess_id), "tid": tid})
+    sess = sr.mappings().fetchone()
+    if not sess: raise HTTPException(404, "الجلسة غير موجودة")
+
+    bank_account_id = str(sess["bank_account_id"])
+
+    # ── الأسطر غير المطابقة ─────────────────────────────
+    lr = await db.execute(text("""
+        SELECT id, line_date, debit, credit, reference, description
+        FROM tr_bank_statement_lines
+        WHERE session_id=:sess_id AND tenant_id=:tid
+          AND (match_status IS NULL OR match_status != 'matched')
+        ORDER BY line_date
+    """), {"sess_id": str(sess_id), "tid": tid})
+    lines = lr.mappings().fetchall()
+
+    # ── مصادر المطابقة: AR receipts (credit) ───────────
+    ar_r = await db.execute(text("""
+        SELECT r.id, r.serial, r.receipt_date AS tx_date,
+               r.amount_sar AS amount, r.reference,
+               c.customer_name AS party_name,
+               r.is_reconciled
+        FROM ar_receipts r
+        LEFT JOIN ar_customers c ON c.id = r.customer_id
+        WHERE r.tenant_id=:tid AND r.status='posted'
+          AND (r.bank_account_id=:ba OR r.payment_method='bank')
+          AND (r.is_reconciled IS NULL OR r.is_reconciled=false)
+    """), {"tid": tid, "ba": bank_account_id})
+    ar_receipts = ar_r.mappings().fetchall()
+
+    # ── مصادر المطابقة: AP payments (debit) ─────────────
+    ap_r = await db.execute(text("""
+        SELECT p.id, p.serial, p.payment_date AS tx_date,
+               p.amount_sar AS amount, p.reference,
+               v.vendor_name AS party_name,
+               p.is_reconciled
+        FROM ap_payments p
+        LEFT JOIN ap_vendors v ON v.id = p.vendor_id
+        WHERE p.tenant_id=:tid AND p.status='posted'
+          AND (p.bank_account_id=:ba OR p.payment_method='bank')
+          AND (p.is_reconciled IS NULL OR p.is_reconciled=false)
+    """), {"tid": tid, "ba": bank_account_id})
+    ap_payments = ap_r.mappings().fetchall()
+
+    # ── مصادر المطابقة: Bank transactions ───────────────
+    br_r = await db.execute(text("""
+        SELECT id, serial, tx_date, amount, reference, description,
+               tx_type, is_reconciled
+        FROM tr_bank_transactions
+        WHERE tenant_id=:tid AND bank_account_id=:ba AND status='posted'
+          AND (is_reconciled IS NULL OR is_reconciled=false)
+    """), {"tid": tid, "ba": bank_account_id})
+    bank_txns = br_r.mappings().fetchall()
+
+    def score(line_date, line_ref, cand_date, cand_ref, cand_amt, line_amt):
+        """نقاط الثقة من 0 إلى 100"""
+        if abs(float(line_amt) - float(cand_amt)) > 0.01:
+            return 0   # المبلغ لا بد أن يتطابق تماماً
+        days_diff = abs((line_date - cand_date).days)
+        if days_diff > 7: return 0
+        pts = 60                         # مبلغ مطابق
+        pts += max(0, 30 - days_diff*4)  # كلما قلّ الفارق زادت النقاط
+        if line_ref and cand_ref and (str(line_ref).strip() in str(cand_ref) or str(cand_ref).strip() in str(line_ref)):
+            pts += 10                    # المرجع متطابق
+        return pts
+
+    matched_count  = 0
+    skipped_count  = 0
+    suggestions    = []   # مطابقات بثقة < 100 — ترجع للمستخدم
+    used_cand_ids  = set()
+
+    for line in lines:
+        line_date = line["line_date"]
+        credit    = float(line["credit"] or 0)
+        debit     = float(line["debit"]  or 0)
+        best_score = 0
+        best_cand  = None
+        best_type  = None
+
+        if credit > 0:
+            # نبحث في AR receipts أولاً
+            for rec in ar_receipts:
+                if str(rec["id"]) in used_cand_ids: continue
+                s = score(line_date, line["reference"], rec["tx_date"], rec["reference"], rec["amount"], credit)
+                if s > best_score:
+                    best_score = s; best_cand = rec; best_type = "AR_RECEIPT"
+            # ثم Bank BR
+            for bt in bank_txns:
+                if bt["tx_type"] != "BR": continue
+                if str(bt["id"]) in used_cand_ids: continue
+                s = score(line_date, line["reference"], bt["tx_date"], bt["reference"], bt["amount"], credit)
+                if s > best_score:
+                    best_score = s; best_cand = bt; best_type = bt["tx_type"]
+
+        elif debit > 0:
+            # نبحث في AP payments أولاً
+            for pay in ap_payments:
+                if str(pay["id"]) in used_cand_ids: continue
+                s = score(line_date, line["reference"], pay["tx_date"], pay["reference"], pay["amount"], debit)
+                if s > best_score:
+                    best_score = s; best_cand = pay; best_type = "AP_PAYMENT"
+            # ثم Bank BP
+            for bt in bank_txns:
+                if bt["tx_type"] != "BP": continue
+                if str(bt["id"]) in used_cand_ids: continue
+                s = score(line_date, line["reference"], bt["tx_date"], bt["reference"], bt["amount"], debit)
+                if s > best_score:
+                    best_score = s; best_cand = bt; best_type = bt["tx_type"]
+
+        if best_cand is None or best_score == 0:
+            skipped_count += 1
+            continue
+
+        cand_id = str(best_cand["id"])
+
+        if best_score >= 90:
+            # تطبيق المطابقة تلقائياً
+            await db.execute(text("""
+                UPDATE tr_bank_statement_lines
+                SET match_status='matched', matched_tx_id=:tx_id, matched_tx_type=:tx_type
+                WHERE id=:line_id AND tenant_id=:tid
+            """), {"tx_id": cand_id, "tx_type": best_type,
+                   "line_id": str(line["id"]), "tid": tid})
+
+            if best_type == "AR_RECEIPT":
+                await db.execute(text("""
+                    UPDATE ar_receipts SET is_reconciled=true, reconciled_at=NOW()
+                    WHERE id=:id AND tenant_id=:tid
+                """), {"id": cand_id, "tid": tid})
+            elif best_type == "AP_PAYMENT":
+                await db.execute(text("""
+                    UPDATE ap_payments SET is_reconciled=true, reconciled_at=NOW()
+                    WHERE id=:id AND tenant_id=:tid
+                """), {"id": cand_id, "tid": tid})
+            else:
+                tbl = "tr_bank_transactions" if best_type in ("BP","BR","BT") else "tr_cash_transactions"
+                await db.execute(text(f"""
+                    UPDATE {tbl} SET is_reconciled=true, reconciled_at=NOW()
+                    WHERE id=:id AND tenant_id=:tid
+                """), {"id": cand_id, "tid": tid})
+
+            used_cand_ids.add(cand_id)
+            matched_count += 1
+        else:
+            # اقتراح فقط
+            suggestions.append({
+                "line_id":   str(line["id"]),
+                "line_date": str(line_date),
+                "line_ref":  line["reference"],
+                "amount":    credit if credit > 0 else debit,
+                "direction": "credit" if credit > 0 else "debit",
+                "candidate_id":     cand_id,
+                "candidate_type":   best_type,
+                "candidate_serial": best_cand.get("serial",""),
+                "candidate_date":   str(best_cand.get("tx_date","")),
+                "candidate_party":  best_cand.get("party_name","") or best_cand.get("description",""),
+                "score": best_score,
+            })
+
+    await db.commit()
+
+    msg = f"✅ تم تطبيق {matched_count} مطابقة تلقائية"
+    if suggestions: msg += f" · {len(suggestions)} اقتراح يحتاج مراجعة"
+    if skipped_count: msg += f" · {skipped_count} سطر بلا مرشح"
+
+    return ok(data={
+        "matched":     matched_count,
+        "suggestions": suggestions,
+        "skipped":     skipped_count,
+    }, message=msg)
 
 
 @router.get("/reconciliation/sessions/{sess_id}/lines")
