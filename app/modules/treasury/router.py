@@ -267,6 +267,16 @@ async def create_bank_account(
 
     ba_id = str(uuid.uuid4())
 
+    # ── Unique: حساب الأستاذ العام لا يُستخدم في أكثر من حساب بنكي ──
+    dup = await db.execute(text(
+        "SELECT account_name FROM tr_bank_accounts"
+        " WHERE tenant_id=:tid AND gl_account_code=:gl"
+    ), {"tid": tid, "gl": str(data["gl_account_code"]).strip()})
+    dup_row = dup.fetchone()
+    if dup_row:
+        raise HTTPException(400,
+            f"حساب الأستاذ العام مستخدم مسبقاً في '{dup_row[0]}' — اختر حساباً مختلفاً")
+
     # تحويل آمن للأرقام
     def to_decimal(v, default=0):
         try: return Decimal(str(v)) if v not in (None, "", "null") else Decimal(default)
@@ -328,14 +338,27 @@ async def update_bank_account(
     tid = str(user.tenant_id)
 
     ALLOWED = {
-        "account_code","account_name","account_name_en","account_type",
+        "account_code","account_name","account_name_en","account_type","account_sub_type",
         "bank_name","bank_branch","account_number","iban","swift_code",
         "currency_code","gl_account_code","opening_balance",
         "low_balance_alert","credit_limit","notes","is_active",
+        "opening_date","contact_person","contact_phone",
     }
     safe = {k:v for k,v in data.items() if k in ALLOWED}
     if not safe:
         raise HTTPException(status_code=400, detail="لا توجد بيانات للتعديل")
+
+    # ── Unique: gl_account_code إذا تغيّر ──
+    if "gl_account_code" in safe:
+        new_gl = str(safe["gl_account_code"]).strip()
+        dup = await db.execute(text(
+            "SELECT account_name FROM tr_bank_accounts"
+            " WHERE tenant_id=:tid AND gl_account_code=:gl AND id != :skip"
+        ), {"tid": tid, "gl": new_gl, "skip": str(ba_id)})
+        dup_row = dup.fetchone()
+        if dup_row:
+            raise HTTPException(400,
+                f"حساب الأستاذ العام مستخدم مسبقاً في '{dup_row[0]}' — اختر حساباً مختلفاً")
 
     safe["updated_at"] = datetime.utcnow()
     set_clause = ", ".join([f"{k}=:{k}" for k in safe.keys()])
@@ -359,11 +382,66 @@ async def delete_bank_account(
 ):
     tid = str(user.tenant_id)
     await db.execute(text("""
-        UPDATE tr_bank_accounts SET is_active=false, updated_at=NOW()
+        UPDATE tr_bank_accounts
+        SET is_active=false, updated_at=NOW(),
+            deactivated_at=NOW(), deactivated_by=:by
         WHERE id=:id AND tenant_id=:tid
-    """), {"id": str(ba_id), "tid": tid})
+    """), {"id": str(ba_id), "tid": tid, "by": user.email})
     await db.commit()
-    return ok(data={}, message="تم إلغاء تفعيل الحساب")
+    return ok(data={}, message="تم إيقاف الحساب")
+
+
+@router.patch("/bank-accounts/{ba_id}/toggle-active")
+async def toggle_bank_account_active(
+    ba_id: uuid.UUID,
+    data: dict = Body(default={}),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """تفعيل / إيقاف حساب بنكي مع تسجيل السبب والتاريخ"""
+    tid = str(user.tenant_id)
+    cur = await db.execute(text(
+        "SELECT is_active, account_name FROM tr_bank_accounts"
+        " WHERE id=:id AND tenant_id=:tid"
+    ), {"id": str(ba_id), "tid": tid})
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(404, "الحساب غير موجود")
+
+    new_active = not row[0]
+    reason     = data.get("reason") or None
+
+    try:
+        if new_active:
+            # إعادة التفعيل
+            await db.execute(text("""
+                UPDATE tr_bank_accounts
+                SET is_active=true, updated_at=NOW(),
+                    deactivated_at=NULL,
+                    deactivation_reason=NULL,
+                    deactivated_by=NULL
+                WHERE id=:id AND tenant_id=:tid
+            """), {"id": str(ba_id), "tid": tid})
+        else:
+            # إيقاف — تسجيل التاريخ والسبب والمستخدم
+            await db.execute(text("""
+                UPDATE tr_bank_accounts
+                SET is_active=false, updated_at=NOW(),
+                    deactivated_at=NOW(),
+                    deactivation_reason=:reason,
+                    deactivated_by=:by
+                WHERE id=:id AND tenant_id=:tid
+            """), {"id": str(ba_id), "tid": tid, "reason": reason, "by": user.email})
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ في تغيير الحالة: {str(e)}")
+
+    status_ar = "مفعّل ✅" if new_active else "موقوف 🔴"
+    return ok(
+        data={"is_active": new_active, "account_name": row[1]},
+        message=f"تم تغيير حالة '{row[1]}' إلى {status_ar}"
+    )
 
 
 # ══════════════════════════════════════════════════════════
