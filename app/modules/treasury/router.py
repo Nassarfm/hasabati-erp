@@ -1552,3 +1552,77 @@ async def petty_cash_statement(
     items = [dict(row._mapping) for row in r.fetchall()]
     total = sum(float(i["total_amount"]) for i in items)
     return ok(data={"total": total, "count": len(items), "items": items})
+
+@router.get("/reports/gl-balance-check")
+async def gl_balance_check(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """
+    مقارنة رصيد الخزينة مع رصيد الأستاذ العام لكل حساب
+    يكشف الفروق بين tr_bank_accounts.current_balance و account_balances في GL
+    """
+    tid = str(user.tenant_id)
+
+    # نجلب أرصدة الخزينة مع حسابات GL المقابلة
+    r = await db.execute(text("""
+        SELECT
+            ba.id,
+            ba.account_name,
+            ba.account_code,
+            ba.account_type,
+            ba.gl_account_code,
+            ba.current_balance                              AS treasury_balance,
+            COALESCE(
+                (SELECT SUM(jl.debit) - SUM(jl.credit)
+                 FROM je_lines jl
+                 JOIN journal_entries je ON je.id = jl.journal_entry_id
+                 WHERE jl.account_code  = ba.gl_account_code
+                   AND je.tenant_id     = ba.tenant_id
+                   AND je.status        = 'posted'),
+                0
+            )                                               AS gl_balance,
+            ABS(ba.current_balance - COALESCE(
+                (SELECT SUM(jl.debit) - SUM(jl.credit)
+                 FROM je_lines jl
+                 JOIN journal_entries je ON je.id = jl.journal_entry_id
+                 WHERE jl.account_code  = ba.gl_account_code
+                   AND je.tenant_id     = ba.tenant_id
+                   AND je.status        = 'posted'),
+                0
+            ))                                              AS diff,
+            CASE
+                WHEN ABS(ba.current_balance - COALESCE(
+                    (SELECT SUM(jl.debit) - SUM(jl.credit)
+                     FROM je_lines jl
+                     JOIN journal_entries je ON je.id = jl.journal_entry_id
+                     WHERE jl.account_code  = ba.gl_account_code
+                       AND je.tenant_id     = ba.tenant_id
+                       AND je.status        = 'posted'),
+                    0
+                )) < 0.01
+                THEN 'matched'
+                ELSE 'mismatch'
+            END                                             AS status
+        FROM tr_bank_accounts ba
+        WHERE ba.tenant_id = :tid AND ba.is_active = true
+        ORDER BY ba.account_type, ba.account_name
+    """), {"tid": tid})
+
+    rows = [dict(row._mapping) for row in r.fetchall()]
+    # تحويل Decimal إلى float
+    for row in rows:
+        for k in ("treasury_balance","gl_balance","diff"):
+            if row.get(k) is not None:
+                row[k] = float(row[k])
+
+    mismatches  = [r for r in rows if r["status"] == "mismatch"]
+    total_diff  = sum(r["diff"] for r in mismatches)
+
+    return ok(data={
+        "accounts":       rows,
+        "total_accounts": len(rows),
+        "mismatches":     len(mismatches),
+        "total_diff":     round(total_diff, 3),
+        "all_matched":    len(mismatches) == 0,
+    })
