@@ -15,7 +15,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException, Body
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.response import ok, created
