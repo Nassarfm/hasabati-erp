@@ -1127,32 +1127,46 @@ async def create_petty_cash_fund(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    tid = str(user.tenant_id)
+    tid     = str(user.tenant_id)
     fund_id = str(uuid.uuid4())
-    await db.execute(text("""
-        INSERT INTO tr_petty_cash_funds
-          (id,tenant_id,fund_code,fund_name,custodian_name,custodian_email,
-           currency_code,limit_amount,current_balance,gl_account_code,
-           bank_account_id,branch_code,replenish_threshold,notes,created_by)
-        VALUES
-          (:id,:tid,:code,:name,:custodian,:custodian_email,
-           :cur,:limit,:balance,:gl,
-           :ba_id,:branch,:threshold,:notes,:by)
-    """), {
-        "id": fund_id, "tid": tid,
-        "code": data["fund_code"], "name": data["fund_name"],
-        "custodian": data.get("custodian_name"),
-        "custodian_email": data.get("custodian_email"),
-        "cur": data.get("currency_code","SAR"),
-        "limit": Decimal(str(data["limit_amount"])),
-        "balance": Decimal(str(data.get("opening_balance",0))),
-        "gl": data["gl_account_code"],
-        "ba_id": str(data["bank_account_id"]) if data.get("bank_account_id") else None,
-        "branch": data.get("branch_code"),
-        "threshold": data.get("replenish_threshold", 20),
-        "notes": data.get("notes"), "by": user.email,
-    })
-    await db.commit()
+    try:
+        await db.execute(text("""
+            INSERT INTO tr_petty_cash_funds
+              (id,tenant_id,fund_code,fund_name,fund_type,
+               custodian_name,custodian_email,custodian_phone,
+               currency_code,limit_amount,current_balance,gl_account_code,
+               bank_account_id,branch_code,replenish_threshold,
+               require_daily_close,notes,is_active,created_by)
+            VALUES
+              (:id,:tid,:code,:name,:fund_type,
+               :custodian,:custodian_email,:custodian_phone,
+               :cur,:limit,:balance,:gl,
+               :ba_id,:branch,:threshold,
+               :daily_close,:notes,true,:by)
+        """), {
+            "id":          fund_id,
+            "tid":         tid,
+            "code":        data["fund_code"],
+            "name":        data["fund_name"],
+            "fund_type":   data.get("fund_type") or "main",
+            "custodian":   data.get("custodian_name"),
+            "custodian_email": data.get("custodian_email"),
+            "custodian_phone": data.get("custodian_phone"),
+            "cur":         data.get("currency_code","SAR"),
+            "limit":       Decimal(str(data["limit_amount"])),
+            "balance":     Decimal(str(data.get("opening_balance",0))),
+            "gl":          data["gl_account_code"],
+            "ba_id":       str(data["bank_account_id"]) if data.get("bank_account_id") else None,
+            "branch":      data.get("branch_code"),
+            "threshold":   data.get("replenish_threshold", 20),
+            "daily_close": bool(data.get("require_daily_close", False)),
+            "notes":       data.get("notes"),
+            "by":          user.email,
+        })
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ في الحفظ: {str(e)}")
     return created(data={"id": fund_id}, message="تم إنشاء صندوق العهدة ✅")
 
 
@@ -1164,9 +1178,19 @@ async def update_petty_cash_fund(
     user: CurrentUser = Depends(get_current_user),
 ):
     tid = str(user.tenant_id)
-    data.pop("id",None); data.pop("tenant_id",None); data.pop("current_balance",None)
-    set_clause = ", ".join([f"{k}=:{k}" for k in data.keys()])
-    data.update({"id": str(fund_id), "tid": tid})
+    ALLOWED_PF = {
+        "fund_code","fund_name","fund_type","custodian_name","custodian_email",
+        "custodian_phone","currency_code","limit_amount","gl_account_code",
+        "bank_account_id","branch_code","replenish_threshold","notes",
+        "is_active","require_daily_close",
+        "deactivated_at","deactivation_reason","deactivated_by",
+    }
+    safe = {k:v for k,v in data.items() if k in ALLOWED_PF}
+    if not safe:
+        raise HTTPException(400, "لا توجد بيانات للتعديل")
+    set_clause = ", ".join([f"{k}=:{k}" for k in safe.keys()])
+    safe.update({"id": str(fund_id), "tid": tid})
+    data = safe
     await db.execute(text(f"UPDATE tr_petty_cash_funds SET {set_clause} WHERE id=:id AND tenant_id=:tid"), data)
     await db.commit()
     return ok(data={}, message="تم التعديل ✅")
