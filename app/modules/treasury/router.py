@@ -360,6 +360,34 @@ async def update_bank_account(
             raise HTTPException(400,
                 f"حساب الأستاذ العام مستخدم مسبقاً في '{dup_row[0]}' — اختر حساباً مختلفاً")
 
+    # ── تحويل الحقول الحساسة ────────────────────────────────
+    # حقول التاريخ: string فارغ → None
+    for date_field in ("opening_date",):
+        if date_field in safe:
+            v = safe[date_field]
+            if v in (None, "", "null", "undefined"):
+                safe[date_field] = None
+            else:
+                try:
+                    safe[date_field] = date.fromisoformat(str(v))
+                except Exception:
+                    safe[date_field] = None
+
+    # حقول Decimal: string فارغ → 0
+    for dec_field in ("opening_balance", "low_balance_alert", "credit_limit"):
+        if dec_field in safe:
+            try:
+                safe[dec_field] = Decimal(str(safe[dec_field])) if safe[dec_field] not in (None,"") else Decimal(0)
+            except Exception:
+                safe[dec_field] = Decimal(0)
+
+    # حقول نصية: string فارغ → None
+    for str_field in ("account_name_en","bank_name","bank_branch","account_number",
+                      "iban","swift_code","contact_person","contact_phone","notes",
+                      "account_sub_type"):
+        if str_field in safe and safe[str_field] == "":
+            safe[str_field] = None
+
     safe["updated_at"] = datetime.utcnow()
     set_clause = ", ".join([f"{k}=:{k}" for k in safe.keys()])
     safe.update({"id": str(ba_id), "tid": tid})
