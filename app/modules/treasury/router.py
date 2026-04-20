@@ -2048,3 +2048,19 @@ async def bulk_post_bank(
             await db.rollback(); errors.append(str(raw_id))
     return ok(data={"posted": posted, "errors": errors},
               message=f"✅ تم ترحيل {len(posted)} سند" + (f" | ⚠️ {len(errors)} فشل" if errors else ""))
+
+
+@router.get("/reports/low-balance-alerts")
+async def low_balance_alerts(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT id, account_name, account_type, current_balance, low_balance_alert, currency_code
+        FROM tr_bank_accounts
+        WHERE tenant_id=:tid AND is_active=true
+          AND low_balance_alert > 0 AND current_balance <= low_balance_alert
+        ORDER BY (current_balance - low_balance_alert)
+    """), {"tid": tid})
+    return ok(data=[dict(row._mapping) for row in r.fetchall()])
