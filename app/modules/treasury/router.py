@@ -572,49 +572,63 @@ async def post_cash_transaction(
         WHERE ct.id=:id AND ct.tenant_id=:tid
     """), {"id": str(tx_id), "tid": tid})
     tx = r.mappings().fetchone()
-    if not tx: raise Exception("السند غير موجود")
-    if tx["status"] != "draft": raise Exception("السند مُرحَّل مسبقاً")
+    if not tx: raise HTTPException(404, "السند غير موجود")
+    if tx["status"] != "draft":
+        raise HTTPException(400, f"السند في حالة '{tx['status']}' ولا يمكن ترحيله")
 
-    gl = tx["gl_account_code"]
-    cp = tx["counterpart_account"]
-    amt = Decimal(str(tx["amount_sar"] or tx["amount"]))
-    tx_date = tx["tx_date"]
-    desc = tx["description"]
+    gl  = tx["gl_account_code"]
+    cp  = tx["counterpart_account"]
+    if not gl: raise HTTPException(400, "حساب الأستاذ العام غير محدد — تحقق من بطاقة الحساب البنكي")
+    if not cp: raise HTTPException(400, "الحساب المقابل غير محدد في السند")
 
-    # تحقق من وجود الحسابات — السبب الرئيسي لعدم ظهور القيد في الأستاذ العام
-    if not gl:
-        raise HTTPException(400, "حساب الأستاذ العام للصندوق/البنك غير محدد — تحقق من بطاقة الحساب البنكي")
-    if not cp:
-        raise HTTPException(400, "الحساب المقابل غير محدد في السند")
+    amt      = Decimal(str(tx["amount_sar"] or tx["amount"]))
+    vat_amt  = Decimal(str(tx.get("vat_amount") or 0))
+    vat_acc  = tx.get("vat_account_code")
+    base_amt = amt - vat_amt
+    total    = amt
+    tx_date  = tx["tx_date"]
+    desc     = tx["description"] or ""
+    dims     = {
+        "branch_code": tx.get("branch_code"),
+        "cost_center": tx.get("cost_center"),
+        "project_code": tx.get("project_code"),
+        "expense_classification_code": tx.get("expense_classification_code"),
+    }
 
-    # PV = صرف → CR صندوق/بنك, DR الطرف المقابل
-    # RV = قبض → DR صندوق/بنك, CR الطرف المقابل
     if tx["tx_type"] == "RV":
         lines = [
-            {"account_code": gl, "debit": float(amt), "credit": 0, "description": desc},
-            {"account_code": cp, "debit": 0, "credit": float(amt), "description": desc},
+            {"account_code": gl, "debit": float(total),    "credit": 0,            "description": desc},
+            {"account_code": cp, "debit": 0,               "credit": float(base_amt), "description": desc, **dims},
         ]
-    else:
+        if vat_amt > 0 and vat_acc:
+            lines.append({"account_code": vat_acc, "debit": 0, "credit": float(vat_amt), "description": "ضريبة القيمة المضافة"})
+        delta = total
+    else:  # PV
         lines = [
-            {"account_code": cp, "debit": float(amt), "credit": 0, "description": desc},
-            {"account_code": gl, "debit": 0, "credit": float(amt), "description": desc},
+            {"account_code": cp, "debit": float(base_amt), "credit": 0,            "description": desc, **dims},
+            {"account_code": gl, "debit": 0,               "credit": float(total), "description": desc},
         ]
+        if vat_amt > 0 and vat_acc:
+            lines.append({"account_code": vat_acc, "debit": float(vat_amt), "credit": 0, "description": "ضريبة القيمة المضافة"})
+        delta = -total
 
-    je = await _post_je(db, tid, user.email, tx["tx_type"], tx_date, desc, lines, tx["reference"])
-    if not je.get("je_id"):
-        raise HTTPException(500, "فشل إنشاء القيد المحاسبي — تحقق من إعدادات دليل الحسابات")
-    delta = amt if tx["tx_type"] == "RV" else -amt
-    if tx["bank_account_id"]:
-        await _update_balance(db, str(tx["bank_account_id"]), delta)
-
-    await db.execute(text("""
-        UPDATE tr_cash_transactions
-        SET status='posted', je_id=:je_id, je_serial=:je_serial,
-            posted_by=:by, posted_at=NOW()
-        WHERE id=:id AND tenant_id=:tid
-    """), {"je_id": je["je_id"], "je_serial": je["je_serial"],
-           "by": user.email, "id": str(tx_id), "tid": tid})
-    await db.commit()
+    try:
+        je = await _post_je(db, tid, user.email, tx["tx_type"], tx_date, desc, lines, tx.get("reference"))
+        if tx["bank_account_id"]:
+            await _update_balance(db, str(tx["bank_account_id"]), delta)
+        await db.execute(text("""
+            UPDATE tr_cash_transactions
+            SET status='posted', je_id=:je_id, je_serial=:je_serial,
+                posted_by=:by, posted_at=NOW()
+            WHERE id=:id AND tenant_id=:tid
+        """), {"je_id": je["je_id"], "je_serial": je["je_serial"],
+               "by": user.email, "id": str(tx_id), "tid": tid})
+        await db.commit()
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ في الترحيل: {str(e)}")
     return ok(data={"je_serial": je["je_serial"]}, message=f"✅ تم الترحيل — {je['je_serial']}")
 
 
@@ -733,91 +747,64 @@ async def post_bank_transaction(
         WHERE bt.id=:id AND bt.tenant_id=:tid
     """), {"id": str(tx_id), "tid": tid})
     tx = r.mappings().fetchone()
-    if not tx: raise Exception("السند غير موجود")
-    if tx["status"] != "draft": raise Exception("السند مُرحَّل مسبقاً")
+    if not tx: raise HTTPException(404, "السند غير موجود")
+    if tx["status"] != "draft":
+        raise HTTPException(400, f"السند في حالة '{tx['status']}' ولا يمكن ترحيله")
 
-    gl = tx["gl_account_code"]
-    cp = tx["counterpart_account"]
+    gl  = tx["gl_account_code"]
+    cp  = tx["counterpart_account"]
+    if not gl: raise HTTPException(400, "حساب الأستاذ العام غير محدد")
+    if not cp: raise HTTPException(400, "الحساب المقابل غير محدد")
 
-    # ── تحقق من الحسابات ─────────────────────────────────────
-    if not gl:
-        raise HTTPException(400,
-            "حساب الأستاذ العام للبنك غير محدد — "
-            "افتح بطاقة الحساب البنكي وتأكد من ربط gl_account_code")
-    if not cp:
-        raise HTTPException(400, "الحساب المقابل غير محدد في الحركة البنكية")
+    amt      = Decimal(str(tx["amount_sar"] or tx["amount"]))
+    vat_amt  = Decimal(str(tx.get("vat_amount") or 0))
+    vat_acc  = tx.get("vat_account_code")
+    base_amt = amt - vat_amt
+    total    = amt
+    tx_date  = tx["tx_date"]
+    desc     = tx["description"] or ""
+    dims     = {
+        "branch_code": tx.get("branch_code"),
+        "cost_center": tx.get("cost_center"),
+        "project_code": tx.get("project_code"),
+        "expense_classification_code": tx.get("expense_classification_code"),
+    }
 
-    amt     = Decimal(str(tx["amount_sar"] or tx["amount"]))
-    desc    = tx["description"]
-    tx_date = tx["tx_date"]
-
-    # BP = دفعة → DR مورد/مصروف, CR بنك
-    # BR = قبض  → DR بنك, CR عميل/إيراد
-    # BT = تحويل → DR مستفيد, CR بنك
     if tx["tx_type"] == "BR":
         lines = [
-            {"account_code": gl, "debit": amt, "credit": 0, "description": desc},
-            {"account_code": cp, "debit": 0, "credit": amt, "description": desc},
+            {"account_code": gl, "debit": float(total),    "credit": 0,               "description": desc},
+            {"account_code": cp, "debit": 0,               "credit": float(base_amt), "description": desc, **dims},
         ]
-        delta = amt
-    else:  # BP, BT
+        if vat_amt > 0 and vat_acc:
+            lines.append({"account_code": vat_acc, "debit": 0, "credit": float(vat_amt), "description": "ضريبة"})
+        delta = total
+    else:  # BP or BT
         lines = [
-            {"account_code": cp, "debit": amt, "credit": 0, "description": desc},
-            {"account_code": gl, "debit": 0, "credit": amt, "description": desc},
+            {"account_code": cp, "debit": float(base_amt), "credit": 0,            "description": desc, **dims},
+            {"account_code": gl, "debit": 0,               "credit": float(total), "description": desc},
         ]
-        delta = -amt
+        if vat_amt > 0 and vat_acc:
+            lines.append({"account_code": vat_acc, "debit": float(vat_amt), "credit": 0, "description": "ضريبة"})
+        delta = -total
 
-    je = await _post_je(db, tid, user.email, tx["tx_type"], tx_date, desc, lines, tx["reference"])
-    if not je.get("je_id"):
-        raise HTTPException(500, "فشل إنشاء القيد المحاسبي — تحقق من إعدادات دليل الحسابات")
-    if tx["bank_account_id"]:
-        await _update_balance(db, str(tx["bank_account_id"]), delta)
-
-    await db.execute(text("""
-        UPDATE tr_bank_transactions
-        SET status='posted', je_id=:je_id, je_serial=:je_serial,
-            posted_by=:by, posted_at=NOW()
-        WHERE id=:id AND tenant_id=:tid
-    """), {"je_id": je["je_id"], "je_serial": je["je_serial"],
-           "by": user.email, "id": str(tx_id), "tid": tid})
-    await db.commit()
+    try:
+        je = await _post_je(db, tid, user.email, tx["tx_type"], tx_date, desc, lines, tx.get("reference"))
+        if tx["bank_account_id"]:
+            await _update_balance(db, str(tx["bank_account_id"]), delta)
+        await db.execute(text("""
+            UPDATE tr_bank_transactions
+            SET status='posted', je_id=:je_id, je_serial=:je_serial,
+                posted_by=:by, posted_at=NOW()
+            WHERE id=:id AND tenant_id=:tid
+        """), {"je_id": je["je_id"], "je_serial": je["je_serial"],
+               "by": user.email, "id": str(tx_id), "tid": tid})
+        await db.commit()
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ في الترحيل: {str(e)}")
     return ok(data={"je_serial": je["je_serial"]}, message=f"✅ تم الترحيل — {je['je_serial']}")
-
-
-# ══════════════════════════════════════════════════════════
-# INTERNAL TRANSFERS (IT)
-# ══════════════════════════════════════════════════════════
-@router.get("/internal-transfers")
-async def list_internal_transfers(
-    status:    Optional[str]  = Query(None),
-    date_from: Optional[date] = Query(None),
-    date_to:   Optional[date] = Query(None),
-    limit: int = Query(50), offset: int = Query(0),
-    db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),
-):
-    tid = str(user.tenant_id)
-    conds = ["it.tenant_id=:tid"]
-    params: dict = {"tid": tid, "limit": limit, "offset": offset}
-    if status:    conds.append("it.status=:status"); params["status"] = status
-    if date_from: conds.append("it.tx_date>=:df");   params["df"] = str(date_from)
-    if date_to:   conds.append("it.tx_date<=:dt");   params["dt"] = str(date_to)
-    where = " AND ".join(conds)
-
-    cnt = await db.execute(text(f"SELECT COUNT(*) FROM tr_internal_transfers it WHERE {where}"), params)
-    r = await db.execute(text(f"""
-        SELECT it.*,
-               fa.account_name AS from_account_name,
-               ta.account_name AS to_account_name
-        FROM tr_internal_transfers it
-        LEFT JOIN tr_bank_accounts fa ON fa.id=it.from_account_id
-        LEFT JOIN tr_bank_accounts ta ON ta.id=it.to_account_id
-        WHERE {where}
-        ORDER BY it.tx_date DESC
-        LIMIT :limit OFFSET :offset
-    """), params)
-    return ok(data={"total": cnt.scalar(), "items": [dict(row._mapping) for row in r.fetchall()]})
-
 
 @router.post("/internal-transfers", status_code=201)
 async def create_internal_transfer(
@@ -1699,10 +1686,11 @@ async def approve_cash_transaction(
             await _update_balance(db, str(tx["bank_account_id"]), delta)
         await db.execute(text("""
             UPDATE tr_cash_transactions
-            SET status='posted', approved_by=:by, approved_at=NOW(),
-                je_id=:je_id, je_serial=:je_serial, posted_by=:by, posted_at=NOW()
+            SET status='posted', approved_by=:approved_by, approved_at=NOW(),
+                je_id=:je_id, je_serial=:je_serial, posted_by=:posted_by, posted_at=NOW()
             WHERE id=:id AND tenant_id=:tid
-        """), {"by": user.email, "je_id": je["je_id"], "je_serial": je["je_serial"],
+        """), {"approved_by": user.email, "posted_by": user.email,
+               "je_id": je["je_id"], "je_serial": je["je_serial"],
                "id": str(tx_id), "tid": tid})
         await db.commit()
     except HTTPException:
@@ -1915,10 +1903,11 @@ async def approve_bank_transaction(
             await _update_balance(db, str(tx["bank_account_id"]), delta)
         await db.execute(text("""
             UPDATE tr_bank_transactions
-            SET status='posted', approved_by=:by, approved_at=NOW(),
-                je_id=:je_id, je_serial=:je_serial, posted_by=:by, posted_at=NOW()
+            SET status='posted', approved_by=:approved_by, approved_at=NOW(),
+                je_id=:je_id, je_serial=:je_serial, posted_by=:posted_by, posted_at=NOW()
             WHERE id=:id AND tenant_id=:tid
-        """), {"by": user.email, "je_id": je["je_id"], "je_serial": je["je_serial"],
+        """), {"approved_by": user.email, "posted_by": user.email,
+               "je_id": je["je_id"], "je_serial": je["je_serial"],
                "id": str(tx_id), "tid": tid})
         await db.commit()
     except HTTPException: raise
