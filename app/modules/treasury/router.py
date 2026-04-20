@@ -821,6 +821,50 @@ async def post_bank_transaction(
         raise HTTPException(400, f"خطأ في الترحيل: {str(e)}")
     return ok(data={"je_serial": je["je_serial"]}, message=f"✅ تم الترحيل — {je['je_serial']}")
 
+@router.get("/internal-transfers")
+async def list_internal_transfers(
+    status:    Optional[str] = Query(default=None),
+    date_from: Optional[str] = Query(default=None),
+    date_to:   Optional[str] = Query(default=None),
+    limit:     int           = Query(default=50),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    where, params = ["tenant_id=:tid"], {"tid": tid}
+    if status:    where.append("status=:status");    params["status"] = status
+    if date_from: where.append("tx_date>=:df");      params["df"]     = date_from
+    if date_to:   where.append("tx_date<=:dt");      params["dt"]     = date_to
+    r = await db.execute(text("""
+        SELECT it.*,
+               fa.account_name AS from_account_name,
+               ta.account_name AS to_account_name
+        FROM tr_internal_transfers it
+        LEFT JOIN tr_bank_accounts fa ON fa.id=it.from_account_id
+        LEFT JOIN tr_bank_accounts ta ON ta.id=it.to_account_id
+        WHERE """ + " AND ".join(where) + """
+        ORDER BY tx_date DESC, serial DESC
+        LIMIT :limit
+    """), {**params, "limit": limit})
+    rows = [dict(row._mapping) for row in r.fetchall()]
+    for row in rows:
+        for k in ("amount","amount_to"):
+            if row.get(k) is not None:
+                row[k] = float(row[k])
+    r2 = await db.execute(text("""
+        SELECT
+            COUNT(*) FILTER (WHERE status='draft')  AS drafts,
+            COUNT(*) FILTER (WHERE status='posted') AS posted,
+            COALESCE(SUM(amount),0)                 AS total_amount
+        FROM tr_internal_transfers WHERE tenant_id=:tid
+    """), {"tid": tid})
+    stats = r2.mappings().fetchone() or {}
+    return ok(data={"items": rows, "total": len(rows),
+                    "stats": {"drafts": int(stats.get("drafts",0)),
+                              "posted": int(stats.get("posted",0)),
+                              "total_amount": float(stats.get("total_amount",0))}})
+
+
 @router.post("/internal-transfers", status_code=201)
 async def create_internal_transfer(
     data: dict,
