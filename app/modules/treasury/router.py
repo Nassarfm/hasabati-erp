@@ -532,12 +532,16 @@ async def create_cash_transaction(
               (id,tenant_id,serial,tx_type,tx_date,bank_account_id,amount,
                currency_code,exchange_rate,amount_sar,counterpart_account,
                description,party_name,reference,payment_method,check_number,
-               branch_code,cost_center,project_code,notes,status,created_by)
+               branch_code,cost_center,project_code,notes,
+               vat_amount,vat_account_code,expense_classification_code,
+               status,created_by)
             VALUES
               (:id,:tid,:serial,:tx_type,:tx_date,:ba_id,:amount,
                :cur,:rate,:amt_sar,:cp_acc,
                :desc,:party,:ref,:method,:check_no,
-               :branch,:cc,:proj,:notes,'draft',:by)
+               :branch,:cc,:proj,:notes,
+               :vat_amount,:vat_acc,:exp_cls,
+               'draft',:by)
         """), {
             "id": tx_id, "tid": tid, "serial": serial,
             "tx_type": tx_type, "tx_date": tx_date,
@@ -549,7 +553,11 @@ async def create_cash_transaction(
             "ref": data.get("reference"), "method": data.get("payment_method","cash"),
             "check_no": data.get("check_number"), "branch": data.get("branch_code"),
             "cc": data.get("cost_center"), "proj": data.get("project_code"),
-            "notes": data.get("notes"), "by": user.email,
+            "notes": data.get("notes"),
+            "vat_amount": Decimal(str(data.get("vat_amount") or 0)),
+            "vat_acc":    data.get("vat_account_code") or None,
+            "exp_cls":    data.get("expense_classification_code") or None,
+            "by": user.email,
         })
         await db.commit()
     except Exception as e:
@@ -707,13 +715,17 @@ async def create_bank_transaction(
            currency_code,exchange_rate,amount_sar,counterpart_account,
            beneficiary_name,beneficiary_iban,beneficiary_bank,
            description,reference,payment_method,check_number,
-           branch_code,cost_center,project_code,notes,status,created_by)
+           branch_code,cost_center,project_code,notes,
+           vat_amount,vat_account_code,expense_classification_code,
+           status,created_by)
         VALUES
           (:id,:tid,:serial,:tx_type,:tx_date,:ba_id,:amount,
            :cur,:rate,:amt_sar,:cp_acc,
            :ben_name,:ben_iban,:ben_bank,
            :desc,:ref,:method,:check_no,
-           :branch,:cc,:proj,:notes,'draft',:by)
+           :branch,:cc,:proj,:notes,
+           :vat_amount,:vat_acc,:exp_cls,
+           'draft',:by)
     """), {
         "id": tx_id, "tid": tid, "serial": serial,
         "tx_type": tx_type, "tx_date": tx_date,
@@ -728,6 +740,9 @@ async def create_bank_transaction(
         "check_no": data.get("check_number"), "branch": data.get("branch_code"),
         "cc": data.get("cost_center"), "proj": data.get("project_code"),
         "notes": data.get("notes"), "by": user.email,
+        "vat_amount": Decimal(str(data.get("vat_amount") or 0)),
+        "vat_acc":    data.get("vat_account_code") or None,
+        "exp_cls":    data.get("expense_classification_code") or None,
     })
     await db.commit()
     return created(data={"id": tx_id, "serial": serial}, message=f"تم إنشاء {serial} ✅")
