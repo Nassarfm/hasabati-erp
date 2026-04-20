@@ -833,26 +833,30 @@ async def create_internal_transfer(
     tx_id = str(uuid.uuid4())
     amt = Decimal(str(data["amount"]))
 
-    await db.execute(text("""
-        INSERT INTO tr_internal_transfers
-          (id,tenant_id,serial,tx_date,from_account_id,to_account_id,
-           amount,currency_code,exchange_rate,amount_to,
-           description,reference,notes,status,created_by)
-        VALUES
-          (:id,:tid,:serial,:tx_date,:from_id,:to_id,
-           :amount,:cur,:rate,:amount_to,
-           :desc,:ref,:notes,'draft',:by)
-    """), {
-        "id": tx_id, "tid": tid, "serial": serial, "tx_date": tx_date,
-        "from_id": str(data["from_account_id"]),
-        "to_id": str(data["to_account_id"]),
-        "amount": amt, "cur": data.get("currency_code","SAR"),
-        "rate": data.get("exchange_rate",1),
-        "amount_to": data.get("amount_to", amt),
-        "desc": data["description"], "ref": data.get("reference"),
-        "notes": data.get("notes"), "by": user.email,
-    })
-    await db.commit()
+    try:
+        await db.execute(text("""
+            INSERT INTO tr_internal_transfers
+              (id,tenant_id,serial,tx_date,from_account_id,to_account_id,
+               amount,currency_code,exchange_rate,amount_to,
+               description,reference,notes,status,created_by)
+            VALUES
+              (:id,:tid,:serial,:tx_date,:from_id,:to_id,
+               :amount,:cur,:rate,:amount_to,
+               :desc,:ref,:notes,'draft',:by)
+        """), {
+            "id": tx_id, "tid": tid, "serial": serial, "tx_date": tx_date,
+            "from_id": str(data["from_account_id"]),
+            "to_id":   str(data["to_account_id"]),
+            "amount":  amt, "cur": data.get("currency_code","SAR"),
+            "rate":    data.get("exchange_rate",1),
+            "amount_to": data.get("amount_to", amt),
+            "desc":    data["description"], "ref": data.get("reference"),
+            "notes":   data.get("notes"), "by": user.email,
+        })
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=f"خطأ في حفظ التحويل: {str(e)}")
     return created(data={"id": tx_id, "serial": serial}, message=f"تم إنشاء {serial} ✅")
 
 
@@ -2079,3 +2083,209 @@ async def low_balance_alerts(
         ORDER BY (current_balance - low_balance_alert)
     """), {"tid": tid})
     return ok(data=[dict(row._mapping) for row in r.fetchall()])
+
+# ══════════════════════════════════════════════════════════
+# GL IMPORT — استيراد القيود اليومية إلى موديول الخزينة
+# تحل مشكلة: قيود JV/REV/REC على حسابات البنك لا تظهر في الخزينة
+# ══════════════════════════════════════════════════════════
+
+@router.get("/gl-import/unlinked-entries")
+async def get_unlinked_gl_entries(
+    date_from: Optional[str] = Query(default=None),
+    date_to:   Optional[str] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """جلب قيود الأستاذ العام التي تؤثر على حسابات البنك/الصندوق
+       ولم تُستورَد بعد إلى موديول الخزينة."""
+    tid = str(user.tenant_id)
+
+    # نجد أكواد GL لحسابات البنك والصناديق
+    r = await db.execute(text("""
+        SELECT DISTINCT gl_account_code, account_name, account_type, id
+        FROM tr_bank_accounts
+        WHERE tenant_id=:tid AND is_active=true AND gl_account_code IS NOT NULL
+    """), {"tid": tid})
+    bank_accounts = {row.gl_account_code: row._mapping for row in r.fetchall()}
+
+    if not bank_accounts:
+        return ok(data=[], message="لا توجد حسابات بنكية مرتبطة بالأستاذ العام")
+
+    gl_codes = list(bank_accounts.keys())
+    codes_placeholder = ",".join([f":code_{i}" for i in range(len(gl_codes))])
+    codes_params = {f"code_{i}": code for i, code in enumerate(gl_codes)}
+
+    where_date = ""
+    if date_from:
+        where_date += " AND je.entry_date >= :date_from"
+    if date_to:
+        where_date += " AND je.entry_date <= :date_to"
+
+    r2 = await db.execute(text(f"""
+        SELECT
+            je.id          AS je_id,
+            je.serial      AS je_serial,
+            je.entry_date  AS tx_date,
+            je.je_type,
+            je.description,
+            je.reference,
+            jl.account_code,
+            jl.debit,
+            jl.credit,
+            jl.description AS line_desc,
+            jl.branch_code,
+            jl.cost_center,
+            jl.project_code
+        FROM journal_entries je
+        JOIN je_lines jl ON jl.je_id = je.id
+        WHERE je.tenant_id = :tid
+          AND je.status = 'posted'
+          AND jl.account_code IN ({codes_placeholder})
+          AND je.source_module != 'treasury'
+          AND NOT EXISTS (
+              SELECT 1 FROM tr_bank_transactions bt
+              WHERE bt.tenant_id = :tid AND bt.je_id = je.id
+              UNION ALL
+              SELECT 1 FROM tr_cash_transactions ct
+              WHERE ct.tenant_id = :tid AND ct.je_id = je.id
+          )
+          {where_date}
+        ORDER BY je.entry_date DESC, je.serial DESC
+        LIMIT 200
+    """), {"tid": tid, **codes_params,
+           **({} if not date_from else {"date_from": date_from}),
+           **({} if not date_to   else {"date_to":   date_to})})
+
+    rows = r2.mappings().fetchall()
+    result = []
+    for row in rows:
+        acc_info = bank_accounts.get(row["account_code"], {})
+        result.append({
+            "je_id":         str(row["je_id"]),
+            "je_serial":     row["je_serial"],
+            "je_type":       row["je_type"],
+            "tx_date":       str(row["tx_date"]),
+            "description":   row["description"] or row["line_desc"] or "",
+            "reference":     row["reference"],
+            "account_code":  row["account_code"],
+            "bank_account_id": str(acc_info.get("id","")) if acc_info else None,
+            "bank_account_name": acc_info.get("account_name","") if acc_info else row["account_code"],
+            "account_type":  acc_info.get("account_type","bank") if acc_info else "bank",
+            "debit":         float(row["debit"] or 0),
+            "credit":        float(row["credit"] or 0),
+            "amount":        float(row["debit"] or row["credit"] or 0),
+            "direction":     "debit" if float(row["debit"] or 0) > 0 else "credit",
+            "tx_type":       "BR" if float(row["debit"] or 0) > 0 else "BP",
+            "branch_code":   row["branch_code"],
+            "cost_center":   row["cost_center"],
+            "project_code":  row["project_code"],
+        })
+
+    return ok(data=result, message=f"يوجد {len(result)} قيد غير مُستورَد")
+
+
+@router.post("/gl-import/import-entries")
+async def import_gl_entries(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """استيراد قيود محددة من الأستاذ العام إلى موديول الخزينة كسندات مُرحَّلة."""
+    tid = str(user.tenant_id)
+    entry_ids = data.get("je_ids", [])
+    if not entry_ids:
+        raise HTTPException(400, "لم يتم تحديد أي قيود للاستيراد")
+
+    imported, errors = [], []
+
+    for je_id in entry_ids:
+        try:
+            # جلب بيانات القيد
+            r = await db.execute(text("""
+                SELECT
+                    je.id, je.serial, je.entry_date, je.je_type,
+                    je.description, je.reference,
+                    jl.account_code, jl.debit, jl.credit,
+                    jl.branch_code, jl.cost_center, jl.project_code,
+                    ba.id AS bank_account_id, ba.account_name AS bank_name,
+                    ba.account_type
+                FROM journal_entries je
+                JOIN je_lines jl ON jl.je_id = je.id
+                JOIN tr_bank_accounts ba
+                     ON ba.gl_account_code = jl.account_code
+                     AND ba.tenant_id = :tid
+                WHERE je.id = :je_id AND je.tenant_id = :tid
+                  AND je.status = 'posted'
+                LIMIT 1
+            """), {"je_id": je_id, "tid": tid})
+
+            je = r.mappings().fetchone()
+            if not je:
+                errors.append({"je_id": je_id, "reason": "القيد غير موجود أو غير مُرحَّل"})
+                continue
+
+            amt       = Decimal(str(je["debit"] or je["credit"] or 0))
+            is_debit  = float(je["debit"] or 0) > 0
+            tx_type   = "BR" if is_debit else "BP"
+            tx_date   = je["entry_date"]
+            ba_type   = je["account_type"] or "bank"
+
+            # تحديد الجدول: نقدي أم بنكي
+            is_cash = ba_type in ("cash_fund", "petty_cash")
+            serial  = await _next_serial(db, tid, tx_type, tx_date)
+            tx_id   = str(uuid.uuid4())
+
+            if is_cash:
+                await db.execute(text("""
+                    INSERT INTO tr_cash_transactions
+                      (id,tenant_id,serial,tx_type,tx_date,bank_account_id,
+                       amount,currency_code,amount_sar,
+                       description,reference,payment_method,
+                       branch_code,cost_center,project_code,
+                       status,je_id,je_serial,posted_by,posted_at,created_by)
+                    VALUES
+                      (:id,:tid,:serial,:tt,:dt,:ba,
+                       :amt,'SAR',:amt,
+                       :desc,:ref,'cash',
+                       :branch,:cc,:proj,
+                       'posted',:je_id,:je_serial,:by,NOW(),:by)
+                """), {
+                    "id":tx_id,"tid":tid,"serial":serial,"tt":tx_type,"dt":tx_date,
+                    "ba":str(je["bank_account_id"]),"amt":amt,
+                    "desc":je["description"],"ref":je["reference"],
+                    "branch":je["branch_code"],"cc":je["cost_center"],"proj":je["project_code"],
+                    "je_id":je_id,"je_serial":je["serial"],"by":user.email,
+                })
+            else:
+                await db.execute(text("""
+                    INSERT INTO tr_bank_transactions
+                      (id,tenant_id,serial,tx_type,tx_date,bank_account_id,
+                       amount,currency_code,amount_sar,
+                       description,reference,payment_method,
+                       branch_code,cost_center,project_code,
+                       status,je_id,je_serial,posted_by,posted_at,created_by)
+                    VALUES
+                      (:id,:tid,:serial,:tt,:dt,:ba,
+                       :amt,'SAR',:amt,
+                       :desc,:ref,'wire',
+                       :branch,:cc,:proj,
+                       'posted',:je_id,:je_serial,:by,NOW(),:by)
+                """), {
+                    "id":tx_id,"tid":tid,"serial":serial,"tt":tx_type,"dt":tx_date,
+                    "ba":str(je["bank_account_id"]),"amt":amt,
+                    "desc":je["description"],"ref":je["reference"],
+                    "branch":je["branch_code"],"cc":je["cost_center"],"proj":je["project_code"],
+                    "je_id":je_id,"je_serial":je["serial"],"by":user.email,
+                })
+
+            await db.commit()
+            imported.append({"je_id": je_id, "serial": serial, "tx_type": tx_type})
+
+        except Exception as e:
+            await db.rollback()
+            errors.append({"je_id": je_id, "reason": str(e)})
+
+    return ok(
+        data={"imported": imported, "errors": errors},
+        message=f"✅ تم استيراد {len(imported)} قيد" + (f" | ⚠️ {len(errors)} فشل" if errors else "")
+    )
