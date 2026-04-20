@@ -204,6 +204,26 @@ async def dashboard(
     """), {"tid": tid})
     kpi_row = r7.mappings().fetchone()
 
+    # ── إحصائيات التسوية البنكية ──────────────────────────
+    r_rec = await db.execute(text("""
+        SELECT
+            COUNT(*) FILTER (WHERE status='posted') AS total_posted,
+            COUNT(*) FILTER (WHERE status='posted' AND is_reconciled=true)  AS reconciled,
+            COUNT(*) FILTER (WHERE status='posted' AND (is_reconciled IS NULL OR is_reconciled=false)) AS unreconciled,
+            COALESCE(SUM(amount) FILTER (WHERE status='posted' AND is_reconciled=true), 0)  AS reconciled_amount,
+            COALESCE(SUM(amount) FILTER (WHERE status='posted' AND (is_reconciled IS NULL OR is_reconciled=false)), 0) AS unreconciled_amount
+        FROM tr_bank_transactions WHERE tenant_id=:tid
+    """), {"tid": tid})
+    rec_row = r_rec.mappings().fetchone()
+    reconciliation_stats = {
+        "total_posted":        int(rec_row["total_posted"] or 0),
+        "reconciled":          int(rec_row["reconciled"] or 0),
+        "unreconciled":        int(rec_row["unreconciled"] or 0),
+        "reconciled_amount":   float(rec_row["reconciled_amount"] or 0),
+        "unreconciled_amount": float(rec_row["unreconciled_amount"] or 0),
+    }
+
+
     return ok(data={
         "kpis": {
             "total_balance":    total_bank + total_cash,
@@ -224,6 +244,58 @@ async def dashboard(
         "alerts":          alerts,
         "due_checks":      due_checks,
         "cash_flow_chart": cash_flow_chart,
+        "reconciliation":  reconciliation_stats,
+    })
+
+
+@router.get("/reports/cash-forecast")
+async def cash_forecast(
+    days: int = Query(default=30),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """توقع التدفق النقدي للأيام القادمة بناءً على المعاملات المتكررة والشيكات"""
+    tid = str(user.tenant_id)
+    # الرصيد الحالي
+    r = await db.execute(text("""
+        SELECT COALESCE(SUM(current_balance),0) AS total
+        FROM tr_bank_accounts WHERE tenant_id=:tid AND is_active=true
+    """), {"tid": tid})
+    current_balance = float(r.scalar() or 0)
+
+    # الشيكات المستحقة
+    r2 = await db.execute(text("""
+        SELECT due_date::text, SUM(amount) AS total,
+               SUM(CASE WHEN check_type='incoming' THEN amount ELSE 0 END) AS inflow,
+               SUM(CASE WHEN check_type='outgoing' THEN amount ELSE 0 END) AS outflow
+        FROM tr_checks
+        WHERE tenant_id=:tid AND status='issued'
+          AND due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + :days
+        GROUP BY due_date ORDER BY due_date
+    """), {"tid": tid, "days": days})
+    check_rows = [dict(r._mapping) for r in r2.fetchall()]
+
+    # حركات معلقة (draft)
+    r3 = await db.execute(text("""
+        SELECT COALESCE(SUM(CASE WHEN tx_type='PV' THEN amount ELSE 0 END),0) AS pending_out,
+               COALESCE(SUM(CASE WHEN tx_type='RV' THEN amount ELSE 0 END),0) AS pending_in
+        FROM tr_cash_transactions WHERE tenant_id=:tid AND status='draft'
+    """), {"tid": tid})
+    p = r3.mappings().fetchone()
+    r4 = await db.execute(text("""
+        SELECT COALESCE(SUM(CASE WHEN tx_type IN ('BP','BT') THEN amount ELSE 0 END),0) AS pending_out,
+               COALESCE(SUM(CASE WHEN tx_type='BR' THEN amount ELSE 0 END),0) AS pending_in
+        FROM tr_bank_transactions WHERE tenant_id=:tid AND status='draft'
+    """), {"tid": tid})
+    p2 = r4.mappings().fetchone()
+
+    return ok(data={
+        "current_balance": current_balance,
+        "pending_inflow":  float(p["pending_in"]) + float(p2["pending_in"]),
+        "pending_outflow": float(p["pending_out"]) + float(p2["pending_out"]),
+        "expected_checks": check_rows,
+        "forecast_balance": current_balance + float(p["pending_in"]) + float(p2["pending_in"])
+                            - float(p["pending_out"]) - float(p2["pending_out"]),
     })
 
 
@@ -2696,3 +2768,254 @@ async def execute_recurring(
         await db.rollback()
         raise HTTPException(400, f"خطأ: {str(e)}")
     return ok(data={"serial": serial}, message=f"✅ تم إنشاء {serial}")
+
+# ══════════════════════════════════════════════════════════
+# SMART BANK IMPORT — استيراد كشف البنك الذكي
+# يقرأ Excel ← ينشئ سندات مسودة PAY/REC بحسابات وسيطة
+# ══════════════════════════════════════════════════════════
+
+@router.post("/smart-import/preview")
+async def smart_import_preview(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """يستقبل JSON بصفوف كشف البنك ويُنشئ معاينة القيود قبل الحفظ"""
+    tid  = str(user.tenant_id)
+    body = await request.json()
+
+    rows            = body.get("rows", [])
+    bank_account_id = body.get("bank_account_id")
+    col_date        = body.get("col_date",   "date")
+    col_desc        = body.get("col_desc",   "description")
+    col_debit       = body.get("col_debit",  "debit")
+    col_credit      = body.get("col_credit", "credit")
+    transit_pay     = body.get("transit_pay_account",  "")   # حساب دفعات تحت التسوية
+    transit_rec     = body.get("transit_rec_account",  "")   # حساب مقبوضات تحت التسوية
+
+    if not rows:
+        raise HTTPException(400, "لا توجد صفوف بيانات")
+    if not bank_account_id:
+        raise HTTPException(400, "يرجى تحديد الحساب البنكي")
+
+    # نجلب بيانات الحساب البنكي
+    r = await db.execute(text("""
+        SELECT id, account_name, gl_account_code
+        FROM tr_bank_accounts
+        WHERE id=:id AND tenant_id=:tid
+    """), {"id": bank_account_id, "tid": tid})
+    bank = r.mappings().fetchone()
+    if not bank:
+        raise HTTPException(404, "الحساب البنكي غير موجود")
+
+    bank_gl   = bank["gl_account_code"]
+    bank_name = bank["account_name"]
+
+    # نُنشئ معاينة لكل صف
+    preview = []
+    pay_seq = 1
+    rec_seq = 1
+    today   = date.today()
+    year    = today.year
+
+    for idx, row in enumerate(rows):
+        raw_date   = str(row.get(col_date,   "")).strip()
+        desc       = str(row.get(col_desc,   "")).strip() or f"حركة بنكية {idx+1}"
+        debit_raw  = str(row.get(col_debit,  "") or "").replace(",","").strip()
+        credit_raw = str(row.get(col_credit, "") or "").replace(",","").strip()
+
+        # تحويل الأرقام
+        try: debit  = float(debit_raw)  if debit_raw  else 0.0
+        except: debit = 0.0
+        try: credit = float(credit_raw) if credit_raw else 0.0
+        except: credit = 0.0
+
+        if debit <= 0 and credit <= 0:
+            continue  # تجاهل الصفوف الفارغة
+
+        # تحويل التاريخ
+        tx_date = today
+        for fmt_str in ("%Y-%m-%d","%d/%m/%Y","%d-%m-%Y","%m/%d/%Y","%Y/%m/%d"):
+            try:
+                from datetime import datetime as dt
+                tx_date = dt.strptime(raw_date, fmt_str).date()
+                year = tx_date.year
+                break
+            except: pass
+
+        if debit > 0:
+            # خروج من البنك → سند دفع PAY
+            serial   = f"PAY-{year}/{pay_seq}"
+            pay_seq += 1
+            entry = {
+                "row_idx":    idx,
+                "serial":     serial,
+                "direction":  "out",
+                "tx_type":    "BP",
+                "tx_date":    str(tx_date),
+                "description": desc,
+                "amount":     round(debit, 3),
+                "bank_account_id": bank_account_id,
+                "bank_name":  bank_name,
+                "bank_gl":    bank_gl,
+                "debit_account":  transit_pay or "",   # ح/ دفعات تحت التسوية ← المحاسب يعدّله
+                "credit_account": bank_gl or "",       # ح/ البنك
+                "debit_name":  "دفعات تحت التسوية" if transit_pay else "⚠️ حدد الحساب",
+                "credit_name": bank_name,
+                "tx_subtype":  "expense",              # المحاسب يختار: expense / vendor / other
+                "vendor_id":   None,
+                "status":      "pending",
+            }
+        else:
+            # دخول للبنك → سند قبض REC
+            serial   = f"REC-{year}/{rec_seq}"
+            rec_seq += 1
+            entry = {
+                "row_idx":    idx,
+                "serial":     serial,
+                "direction":  "in",
+                "tx_type":    "BR",
+                "tx_date":    str(tx_date),
+                "description": desc,
+                "amount":     round(credit, 3),
+                "bank_account_id": bank_account_id,
+                "bank_name":  bank_name,
+                "bank_gl":    bank_gl,
+                "debit_account":  bank_gl or "",         # ح/ البنك
+                "credit_account": transit_rec or "",     # ح/ مقبوضات تحت التسوية ← المحاسب يعدّله
+                "debit_name":  bank_name,
+                "credit_name": "مقبوضات تحت التسوية" if transit_rec else "⚠️ حدد الحساب",
+                "tx_subtype":  "receipt",
+                "customer_id": None,
+                "status":      "pending",
+            }
+        preview.append(entry)
+
+    return ok(data={
+        "preview": preview,
+        "summary": {
+            "total_rows":   len(rows),
+            "valid_rows":   len(preview),
+            "payments":     sum(1 for p in preview if p["direction"]=="out"),
+            "receipts":     sum(1 for p in preview if p["direction"]=="in"),
+            "total_out":    round(sum(p["amount"] for p in preview if p["direction"]=="out"),3),
+            "total_in":     round(sum(p["amount"] for p in preview if p["direction"]=="in"),3),
+        }
+    })
+
+
+@router.post("/smart-import/create-drafts")
+async def smart_import_create_drafts(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """ينشئ سندات BP/BR مسودة من الصفوف المراجَعة"""
+    tid  = str(user.tenant_id)
+    body = await request.json()
+    rows = body.get("rows", [])
+
+    if not rows:
+        raise HTTPException(400, "لا توجد صفوف")
+
+    created, errors = [], []
+
+    for row in rows:
+        try:
+            tx_date  = date.fromisoformat(str(row["tx_date"]))
+            amt      = Decimal(str(row["amount"]))
+            tx_type  = row.get("tx_type", "BP")
+
+            # نستخدم serial من الـ preview أو نولّد جديد
+            serial   = row.get("serial") or await _next_serial(db, tid, tx_type, tx_date)
+            tx_id    = str(uuid.uuid4())
+
+            await db.execute(text("""
+                INSERT INTO tr_bank_transactions
+                  (id,tenant_id,serial,tx_type,tx_date,bank_account_id,
+                   amount,currency_code,amount_sar,
+                   counterpart_account,
+                   description,reference,payment_method,
+                   branch_code,cost_center,project_code,
+                   status,created_by,import_source)
+                VALUES
+                  (:id,:tid,:serial,:tx_type,:tx_date,:ba,
+                   :amt,'SAR',:amt,
+                   :cp_acc,
+                   :desc,:ref,'bank_import',
+                   :branch,:cc,:proj,
+                   'draft',:by,'smart_import')
+            """), {
+                "id":      tx_id,
+                "tid":     tid,
+                "serial":  serial,
+                "tx_type": tx_type,
+                "tx_date": tx_date,
+                "ba":      row.get("bank_account_id"),
+                "amt":     amt,
+                "cp_acc":  row.get("debit_account")  if tx_type=="BR" else row.get("credit_account"),
+                "desc":    row.get("description",""),
+                "ref":     row.get("reference",""),
+                "branch":  row.get("branch_code"),
+                "cc":      row.get("cost_center"),
+                "proj":    row.get("project_code"),
+                "by":      user.email,
+            })
+            created.append({"tx_id": tx_id, "serial": serial, "tx_type": tx_type})
+
+        except Exception as e:
+            await db.rollback()
+            errors.append({"row": row.get("serial","?"), "error": str(e)})
+            continue
+
+    if created:
+        await db.commit()
+
+    return ok(
+        data={"created": created, "errors": errors},
+        message=f"✅ تم إنشاء {len(created)} سند مسودة" +
+                (f" | ⚠️ {len(errors)} فشل" if errors else "")
+    )
+
+
+@router.get("/smart-import/settings")
+async def get_smart_import_settings(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """إعدادات الحسابات الوسيطة للاستيراد الذكي"""
+    tid = str(user.tenant_id)
+    r   = await db.execute(text("""
+        SELECT setting_key, setting_value
+        FROM company_settings
+        WHERE tenant_id=:tid AND setting_key LIKE 'smart_import_%'
+    """), {"tid": tid})
+    rows = r.fetchall()
+    settings = {row[0]: row[1] for row in rows}
+    return ok(data=settings)
+
+
+@router.post("/smart-import/settings")
+async def save_smart_import_settings(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """حفظ إعدادات الحسابات الوسيطة"""
+    tid = str(user.tenant_id)
+    allowed = {
+        "smart_import_transit_pay",
+        "smart_import_transit_rec",
+        "smart_import_transit_pay_name",
+        "smart_import_transit_rec_name",
+    }
+    for key, val in data.items():
+        if key not in allowed: continue
+        await db.execute(text("""
+            INSERT INTO company_settings (tenant_id, setting_key, setting_value)
+            VALUES (:tid, :key, :val)
+            ON CONFLICT (tenant_id, setting_key)
+            DO UPDATE SET setting_value=:val, updated_at=NOW()
+        """), {"tid": tid, "key": key, "val": str(val)})
+    await db.commit()
+    return ok(data={}, message="✅ تم حفظ الإعدادات")
