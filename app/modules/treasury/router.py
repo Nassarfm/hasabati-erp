@@ -3043,3 +3043,251 @@ async def save_smart_import_settings(
         """), {"tid": tid, "key": key, "val": str(val)})
     await db.commit()
     return ok(data={}, message="✅ تم حفظ الإعدادات")
+
+# ══════════════════════════════════════════════════════════
+# ACTIVITY LOG — سجل الأحداث والـ Audit Trail للخزينة
+# ══════════════════════════════════════════════════════════
+
+@router.get("/activity-log")
+async def treasury_activity_log(
+    date_from:  Optional[str] = Query(default=None),
+    date_to:    Optional[str] = Query(default=None),
+    tx_type:    Optional[str] = Query(default=None),
+    action:     Optional[str] = Query(default=None),
+    user_email: Optional[str] = Query(default=None),
+    limit:      int           = Query(default=100),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """سجل جميع أحداث الخزينة: إنشاء، ترحيل، عكس، اعتماد، رفض"""
+    tid = str(user.tenant_id)
+
+    # نجمع من جميع جداول الخزينة
+    where_cash  = ["ct.tenant_id=:tid"]
+    where_bank  = ["bt.tenant_id=:tid"]
+    where_it    = ["it.tenant_id=:tid"]
+    params: dict = {"tid": tid, "limit": limit}
+
+    if date_from:
+        where_cash.append("ct.tx_date>=:df"); where_bank.append("bt.tx_date>=:df")
+        where_it.append("it.tx_date>=:df");   params["df"] = date_from
+    if date_to:
+        where_cash.append("ct.tx_date<=:dt"); where_bank.append("bt.tx_date<=:dt")
+        where_it.append("it.tx_date<=:dt");   params["dt"] = date_to
+    if tx_type:
+        where_cash.append("ct.tx_type=:tt"); where_bank.append("bt.tx_type=:tt")
+        params["tt"] = tx_type
+    if user_email:
+        where_cash.append("(ct.created_by=:ue OR ct.posted_by=:ue)")
+        where_bank.append("(bt.created_by=:ue OR bt.posted_by=:ue)")
+        params["ue"] = user_email
+
+    wc = " AND ".join(where_cash)
+    wb = " AND ".join(where_bank)
+    wi = " AND ".join(where_it)
+
+    r = await db.execute(text(f"""
+        SELECT * FROM (
+            -- سندات نقدية
+            SELECT
+                ct.id, ct.serial, ct.tx_type, ct.tx_date::text,
+                ct.amount, ct.status, ct.description,
+                ct.created_by, ct.created_at,
+                ct.posted_by, ct.posted_at,
+                ct.approved_by, ct.approved_at,
+                ct.rejected_by, ct.rejected_at,
+                ct.reversed_by, ct.reversed_at,
+                ct.je_serial,
+                ba.account_name AS bank_account_name,
+                'cash' AS source_table
+            FROM tr_cash_transactions ct
+            LEFT JOIN tr_bank_accounts ba ON ba.id=ct.bank_account_id
+            WHERE {wc}
+
+            UNION ALL
+
+            -- معاملات بنكية
+            SELECT
+                bt.id, bt.serial, bt.tx_type, bt.tx_date::text,
+                bt.amount, bt.status, bt.description,
+                bt.created_by, bt.created_at,
+                bt.posted_by, bt.posted_at,
+                bt.approved_by, bt.approved_at,
+                bt.rejected_by, bt.rejected_at,
+                NULL AS reversed_by, NULL AS reversed_at,
+                bt.je_serial,
+                ba2.account_name AS bank_account_name,
+                'bank' AS source_table
+            FROM tr_bank_transactions bt
+            LEFT JOIN tr_bank_accounts ba2 ON ba2.id=bt.bank_account_id
+            WHERE {wb}
+
+            UNION ALL
+
+            -- تحويلات داخلية
+            SELECT
+                it.id, it.serial, 'IT'::text AS tx_type, it.tx_date::text,
+                it.amount, it.status, it.description,
+                it.created_by, it.created_at,
+                it.posted_by, it.posted_at,
+                NULL AS approved_by, NULL AS approved_at,
+                NULL AS rejected_by, NULL AS rejected_at,
+                NULL AS reversed_by, NULL AS reversed_at,
+                it.je_serial,
+                fa.account_name AS bank_account_name,
+                'transfer' AS source_table
+            FROM tr_internal_transfers it
+            LEFT JOIN tr_bank_accounts fa ON fa.id=it.from_account_id
+            WHERE {wi}
+        ) t
+        ORDER BY created_at DESC NULLS LAST
+        LIMIT :limit
+    """), params)
+
+    rows = []
+    for row in r.mappings().fetchall():
+        r_dict = dict(row)
+        # نبني timeline الأحداث لكل سند
+        events = []
+        if r_dict.get("created_at"):
+            events.append({"action": "created",  "by": r_dict.get("created_by"),  "at": str(r_dict.get("created_at","")),  "label": "تم الإنشاء", "color": "blue"})
+        if r_dict.get("approved_at"):
+            events.append({"action": "approved", "by": r_dict.get("approved_by"), "at": str(r_dict.get("approved_at","")), "label": "تم الاعتماد", "color": "emerald"})
+        if r_dict.get("posted_at"):
+            events.append({"action": "posted",   "by": r_dict.get("posted_by"),   "at": str(r_dict.get("posted_at","")),   "label": "تم الترحيل", "color": "green"})
+        if r_dict.get("rejected_at"):
+            events.append({"action": "rejected", "by": r_dict.get("rejected_by"), "at": str(r_dict.get("rejected_at","")), "label": "تم الرفض",   "color": "red"})
+        if r_dict.get("reversed_at"):
+            events.append({"action": "reversed", "by": r_dict.get("reversed_by"), "at": str(r_dict.get("reversed_at","")), "label": "تم العكس",   "color": "orange"})
+
+        if r_dict.get("amount"): r_dict["amount"] = float(r_dict["amount"])
+        r_dict["events"] = sorted(events, key=lambda x: x["at"])
+        rows.append(r_dict)
+
+    # إحصائيات
+    stats = {
+        "total":    len(rows),
+        "posted":   sum(1 for r in rows if r["status"]=="posted"),
+        "draft":    sum(1 for r in rows if r["status"]=="draft"),
+        "reversed": sum(1 for r in rows if r["status"]=="reversed"),
+        "pending":  sum(1 for r in rows if r["status"]=="pending_approval"),
+    }
+    return ok(data={"rows": rows, "stats": stats})
+
+
+# ══════════════════════════════════════════════════════════
+# CASH FLOW REPORT — تقرير التدفقات النقدية الرسمي
+# ══════════════════════════════════════════════════════════
+
+@router.get("/reports/cash-flow-statement")
+async def cash_flow_statement(
+    year:       int           = Query(default=2026),
+    date_from:  Optional[str] = Query(default=None),
+    date_to:    Optional[str] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """تقرير التدفقات النقدية الرسمي — Cash In / Cash Out / Net + Forecast"""
+    tid = str(user.tenant_id)
+
+    df = date_from or f"{year}-01-01"
+    dt = date_to   or f"{year}-12-31"
+    params = {"tid": tid, "df": df, "dt": dt}
+
+    # ── 1. التدفقات التشغيلية (Operating) ─────────────────
+    r_op = await db.execute(text("""
+        SELECT
+            EXTRACT(MONTH FROM tx_date) AS month,
+            TO_CHAR(tx_date,'YYYY-MM')  AS period,
+            -- نقدي
+            COALESCE(SUM(CASE WHEN tx_type='RV' AND source='cash' THEN amount ELSE 0 END),0) AS cash_in_receipts,
+            COALESCE(SUM(CASE WHEN tx_type='PV' AND source='cash' THEN amount ELSE 0 END),0) AS cash_out_payments,
+            -- بنكي
+            COALESCE(SUM(CASE WHEN tx_type='BR' AND source='bank' THEN amount ELSE 0 END),0) AS bank_in,
+            COALESCE(SUM(CASE WHEN tx_type IN ('BP','BT') AND source='bank' THEN amount ELSE 0 END),0) AS bank_out
+        FROM (
+            SELECT tx_type, tx_date, amount, 'cash' AS source
+            FROM tr_cash_transactions
+            WHERE tenant_id=:tid AND status='posted' AND tx_date BETWEEN :df AND :dt
+            UNION ALL
+            SELECT tx_type, tx_date, amount, 'bank' AS source
+            FROM tr_bank_transactions
+            WHERE tenant_id=:tid AND status='posted' AND tx_date BETWEEN :df AND :dt
+        ) t
+        GROUP BY EXTRACT(MONTH FROM tx_date), TO_CHAR(tx_date,'YYYY-MM')
+        ORDER BY period
+    """), params)
+
+    monthly = []
+    for row in r_op.mappings().fetchall():
+        cash_in  = float(row["cash_in_receipts"]) + float(row["bank_in"])
+        cash_out = float(row["cash_out_payments"]) + float(row["bank_out"])
+        monthly.append({
+            "month":    int(row["month"]),
+            "period":   row["period"],
+            "cash_in":  round(cash_in, 3),
+            "cash_out": round(cash_out, 3),
+            "net":      round(cash_in - cash_out, 3),
+            # تفصيل
+            "receipts":  round(float(row["cash_in_receipts"]), 3),
+            "payments":  round(float(row["cash_out_payments"]), 3),
+            "bank_in":   round(float(row["bank_in"]), 3),
+            "bank_out":  round(float(row["bank_out"]), 3),
+        })
+
+    # ── 2. الرصيد الافتتاحي والختامي ─────────────────────
+    r_bal = await db.execute(text("""
+        SELECT COALESCE(SUM(current_balance),0) AS current_total
+        FROM tr_bank_accounts WHERE tenant_id=:tid AND is_active=true
+    """), {"tid": tid})
+    current_balance = float(r_bal.scalar() or 0)
+
+    total_in  = sum(m["cash_in"]  for m in monthly)
+    total_out = sum(m["cash_out"] for m in monthly)
+    net_flow  = total_in - total_out
+
+    # ── 3. التوقعات (Forecast) — المسودات القائمة ─────────
+    r_fc = await db.execute(text("""
+        SELECT
+            COALESCE(SUM(CASE WHEN tx_type IN ('RV','BR') THEN amount ELSE 0 END),0) AS expected_in,
+            COALESCE(SUM(CASE WHEN tx_type IN ('PV','BP','BT') THEN amount ELSE 0 END),0) AS expected_out
+        FROM (
+            SELECT tx_type, amount FROM tr_cash_transactions
+            WHERE tenant_id=:tid AND status='draft'
+            UNION ALL
+            SELECT tx_type, amount FROM tr_bank_transactions
+            WHERE tenant_id=:tid AND status='draft'
+        ) t
+    """), {"tid": tid})
+    fc = r_fc.mappings().fetchone()
+    forecast = {
+        "expected_in":       round(float(fc["expected_in"]), 3),
+        "expected_out":      round(float(fc["expected_out"]), 3),
+        "expected_net":      round(float(fc["expected_in"]) - float(fc["expected_out"]), 3),
+        "forecast_balance":  round(current_balance + float(fc["expected_in"]) - float(fc["expected_out"]), 3),
+    }
+
+    # ── 4. تحليل ربعي ─────────────────────────────────────
+    quarters = []
+    for q in range(1, 5):
+        months = [m for m in monthly if (m["month"]-1)//3 + 1 == q]
+        if months:
+            quarters.append({
+                "quarter": f"Q{q}",
+                "cash_in":  round(sum(m["cash_in"]  for m in months), 3),
+                "cash_out": round(sum(m["cash_out"] for m in months), 3),
+                "net":      round(sum(m["net"]       for m in months), 3),
+            })
+
+    return ok(data={
+        "period":           {"from": df, "to": dt, "year": year},
+        "summary": {
+            "total_cash_in":  round(total_in, 3),
+            "total_cash_out": round(total_out, 3),
+            "net_flow":       round(net_flow, 3),
+            "current_balance":current_balance,
+        },
+        "monthly":   monthly,
+        "quarterly": quarters,
+        "forecast":  forecast,
+    })
