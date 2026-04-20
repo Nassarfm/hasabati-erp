@@ -2333,3 +2333,366 @@ async def import_gl_entries(
         data={"imported": imported, "errors": errors},
         message=f"✅ تم استيراد {len(imported)} قيد" + (f" | ⚠️ {len(errors)} فشل" if errors else "")
     )
+
+# ══════════════════════════════════════════════════════════
+# REPORTS — التقارير المفقودة
+# ══════════════════════════════════════════════════════════
+
+@router.get("/reports/account-statement")
+async def account_statement(
+    bank_account_id: Optional[str] = Query(default=None),
+    date_from:       Optional[str] = Query(default=None),
+    date_to:         Optional[str] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """كشف حساب بنكي — يجمع كل الحركات النقدية والبنكية"""
+    tid = str(user.tenant_id)
+    if not bank_account_id:
+        raise HTTPException(400, "يرجى تحديد الحساب البنكي")
+
+    # معلومات الحساب
+    r = await db.execute(text("""
+        SELECT * FROM tr_bank_accounts
+        WHERE tenant_id=:tid AND id=:id
+    """), {"tid": tid, "id": bank_account_id})
+    account = r.mappings().fetchone()
+    if not account:
+        raise HTTPException(404, "الحساب غير موجود")
+
+    where = ["tenant_id=:tid", "bank_account_id=:ba_id", "status='posted'"]
+    params: dict = {"tid": tid, "ba_id": bank_account_id}
+    if date_from: where.append("tx_date>=:df"); params["df"] = date_from
+    if date_to:   where.append("tx_date<=:dt"); params["dt"] = date_to
+    w = " AND ".join(where)
+
+    # سندات نقدية
+    r2 = await db.execute(text(f"""
+        SELECT serial, tx_type, tx_date, description, reference,
+               party_name AS party, amount, 0 AS vat_amount,
+               CASE WHEN tx_type='RV' THEN amount ELSE 0 END AS debit,
+               CASE WHEN tx_type='PV' THEN amount ELSE 0 END AS credit,
+               'cash' AS source
+        FROM tr_cash_transactions WHERE {w} ORDER BY tx_date, serial
+    """), params)
+    cash_rows = [dict(r._mapping) for r in r2.fetchall()]
+
+    # معاملات بنكية
+    r3 = await db.execute(text(f"""
+        SELECT serial, tx_type, tx_date, description, reference,
+               COALESCE(beneficiary_name, party_name, '') AS party,
+               amount, COALESCE(vat_amount,0) AS vat_amount,
+               CASE WHEN tx_type='BR' THEN amount ELSE 0 END AS debit,
+               CASE WHEN tx_type IN ('BP','BT') THEN amount ELSE 0 END AS credit,
+               'bank' AS source
+        FROM tr_bank_transactions WHERE {w} ORDER BY tx_date, serial
+    """), params)
+    bank_rows = [dict(r._mapping) for r in r3.fetchall()]
+
+    all_rows = sorted(cash_rows + bank_rows, key=lambda x: (str(x["tx_date"]), str(x["serial"])))
+    opening = float(account.get("opening_balance") or 0)
+    balance = opening
+    for row in all_rows:
+        row["debit"]  = float(row["debit"] or 0)
+        row["credit"] = float(row["credit"] or 0)
+        row["amount"] = float(row["amount"] or 0)
+        balance += row["debit"] - row["credit"]
+        row["running_balance"] = round(balance, 3)
+
+    return ok(data={
+        "account":  dict(account),
+        "rows":     all_rows,
+        "opening":  opening,
+        "closing":  round(balance, 3),
+        "total_debit":  round(sum(r["debit"]  for r in all_rows), 3),
+        "total_credit": round(sum(r["credit"] for r in all_rows), 3),
+    })
+
+
+@router.get("/reports/monthly-cash-flow")
+async def monthly_cash_flow(
+    bank_account_id: Optional[str] = Query(default=None),
+    year:            int            = Query(default=2026),
+    month:           Optional[int]  = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """التدفق النقدي الشهري"""
+    tid = str(user.tenant_id)
+    ba_filter = "AND bank_account_id=:ba_id" if bank_account_id else ""
+    params: dict = {"tid": tid, "year": year}
+    if bank_account_id: params["ba_id"] = bank_account_id
+    month_filter = "AND EXTRACT(MONTH FROM tx_date)=:month" if month else ""
+    if month: params["month"] = month
+
+    r = await db.execute(text(f"""
+        SELECT
+            EXTRACT(MONTH FROM tx_date) AS month,
+            TO_CHAR(tx_date,'YYYY-MM') AS period,
+            SUM(CASE WHEN tx_type IN ('RV','BR') THEN amount ELSE 0 END) AS inflow,
+            SUM(CASE WHEN tx_type IN ('PV','BP','BT') THEN amount ELSE 0 END) AS outflow
+        FROM (
+            SELECT tx_type, tx_date, amount, bank_account_id
+            FROM tr_cash_transactions
+            WHERE tenant_id=:tid AND status='posted'
+              AND EXTRACT(YEAR FROM tx_date)=:year
+              {ba_filter} {month_filter}
+            UNION ALL
+            SELECT tx_type, tx_date, amount, bank_account_id
+            FROM tr_bank_transactions
+            WHERE tenant_id=:tid AND status='posted'
+              AND EXTRACT(YEAR FROM tx_date)=:year
+              {ba_filter} {month_filter}
+        ) t
+        GROUP BY EXTRACT(MONTH FROM tx_date), TO_CHAR(tx_date,'YYYY-MM')
+        ORDER BY period
+    """), params)
+    rows = []
+    for row in r.mappings().fetchall():
+        inflow  = float(row["inflow"]  or 0)
+        outflow = float(row["outflow"] or 0)
+        rows.append({
+            "month":   int(row["month"]),
+            "period":  row["period"],
+            "inflow":  round(inflow, 3),
+            "outflow": round(outflow, 3),
+            "net":     round(inflow - outflow, 3),
+        })
+    return ok(data={
+        "rows":         rows,
+        "total_inflow":  round(sum(r["inflow"]  for r in rows), 3),
+        "total_outflow": round(sum(r["outflow"] for r in rows), 3),
+        "net":           round(sum(r["net"]     for r in rows), 3),
+    })
+
+
+@router.get("/reports/inactive-accounts")
+async def inactive_accounts(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """الحسابات غير النشطة — لم يكن عليها أي حركة في آخر 90 يوماً"""
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT
+            ba.id, ba.account_name, ba.account_type, ba.currency_code,
+            ba.current_balance, ba.is_active,
+            MAX(GREATEST(
+                COALESCE(ct.tx_date, '2000-01-01'),
+                COALESCE(bt.tx_date, '2000-01-01')
+            )) AS last_activity
+        FROM tr_bank_accounts ba
+        LEFT JOIN tr_cash_transactions ct
+              ON ct.bank_account_id=ba.id AND ct.tenant_id=ba.tenant_id AND ct.status='posted'
+        LEFT JOIN tr_bank_transactions bt
+              ON bt.bank_account_id=ba.id AND bt.tenant_id=ba.tenant_id AND bt.status='posted'
+        WHERE ba.tenant_id=:tid
+        GROUP BY ba.id, ba.account_name, ba.account_type,
+                 ba.currency_code, ba.current_balance, ba.is_active
+        HAVING MAX(GREATEST(
+                COALESCE(ct.tx_date, '2000-01-01'),
+                COALESCE(bt.tx_date, '2000-01-01')
+            )) < NOW() - INTERVAL '90 days'
+            OR MAX(GREATEST(
+                COALESCE(ct.tx_date, '2000-01-01'),
+                COALESCE(bt.tx_date, '2000-01-01')
+            )) = '2000-01-01'
+        ORDER BY last_activity
+    """), {"tid": tid})
+    rows = []
+    for row in r.mappings().fetchall():
+        rows.append({
+            "id":              str(row["id"]),
+            "account_name":    row["account_name"],
+            "account_type":    row["account_type"],
+            "currency_code":   row["currency_code"],
+            "current_balance": float(row["current_balance"] or 0),
+            "is_active":       row["is_active"],
+            "last_activity":   str(row["last_activity"]) if row["last_activity"] and str(row["last_activity"]) != "2000-01-01" else None,
+            "days_inactive":   None,
+        })
+    return ok(data=rows, message=f"{len(rows)} حساب غير نشط")
+
+
+# ── المصاريف البنكية ──────────────────────────────────────
+@router.get("/bank-fees")
+async def list_bank_fees(
+    bank_account_id: Optional[str] = Query(default=None),
+    date_from:       Optional[str] = Query(default=None),
+    date_to:         Optional[str] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    where = ["tenant_id=:tid"]
+    params: dict = {"tid": tid}
+    if bank_account_id: where.append("bank_account_id=:ba"); params["ba"] = bank_account_id
+    if date_from: where.append("fee_date>=:df"); params["df"] = date_from
+    if date_to:   where.append("fee_date<=:dt"); params["dt"] = date_to
+    r = await db.execute(text("""
+        SELECT bf.*, ba.account_name AS bank_account_name
+        FROM tr_bank_fees bf
+        LEFT JOIN tr_bank_accounts ba ON ba.id=bf.bank_account_id
+        WHERE """ + " AND ".join(where) + """
+        ORDER BY fee_date DESC
+        LIMIT 200
+    """), params)
+    rows = [dict(r._mapping) for r in r.fetchall()]
+    for row in rows:
+        if row.get("amount"): row["amount"] = float(row["amount"])
+    return ok(data={"items": rows, "total": len(rows)})
+
+
+@router.post("/bank-fees")
+async def create_bank_fee(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    fee_id = str(uuid.uuid4())
+    try:
+        await db.execute(text("""
+            INSERT INTO tr_bank_fees
+              (id,tenant_id,bank_account_id,fee_type,fee_date,amount,description,created_by)
+            VALUES (:id,:tid,:ba,:type,:dt,:amt,:desc,:by)
+        """), {
+            "id": fee_id, "tid": tid,
+            "ba":   data.get("bank_account_id"),
+            "type": data.get("fee_type","other"),
+            "dt":   data.get("fee_date"),
+            "amt":  Decimal(str(data.get("amount",0))),
+            "desc": data.get("description",""),
+            "by":   user.email,
+        })
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ في الحفظ: {str(e)}")
+    return created(data={"id": fee_id})
+
+
+@router.delete("/bank-fees/{fee_id}")
+async def delete_bank_fee(
+    fee_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    await db.execute(text("DELETE FROM tr_bank_fees WHERE id=:id AND tenant_id=:tid"),
+                     {"id": str(fee_id), "tid": tid})
+    await db.commit()
+    return ok(data={})
+
+
+# ── المعاملات المتكررة ────────────────────────────────────
+@router.get("/recurring-transactions")
+async def list_recurring(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT rt.*, ba.account_name AS bank_account_name
+        FROM tr_recurring_transactions rt
+        LEFT JOIN tr_bank_accounts ba ON ba.id=rt.bank_account_id
+        WHERE rt.tenant_id=:tid
+        ORDER BY next_run_date, rt.created_at DESC
+    """), {"tid": tid})
+    rows = [dict(r._mapping) for r in r.fetchall()]
+    for row in rows:
+        if row.get("amount"): row["amount"] = float(row["amount"])
+    return ok(data={"items": rows, "total": len(rows)})
+
+
+@router.post("/recurring-transactions")
+async def create_recurring(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    rec_id = str(uuid.uuid4())
+    try:
+        await db.execute(text("""
+            INSERT INTO tr_recurring_transactions
+              (id,tenant_id,tx_type,bank_account_id,counterpart_account,
+               amount,description,frequency,start_date,next_run_date,
+               is_active,created_by)
+            VALUES
+              (:id,:tid,:tt,:ba,:cp,
+               :amt,:desc,:freq,:start,:next,
+               true,:by)
+        """), {
+            "id": rec_id, "tid": tid,
+            "tt":    data.get("tx_type","BP"),
+            "ba":    data.get("bank_account_id"),
+            "cp":    data.get("counterpart_account"),
+            "amt":   Decimal(str(data.get("amount",0))),
+            "desc":  data.get("description",""),
+            "freq":  data.get("frequency","monthly"),
+            "start": data.get("start_date"),
+            "next":  data.get("start_date"),
+            "by":    user.email,
+        })
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ: {str(e)}")
+    return created(data={"id": rec_id})
+
+
+@router.post("/recurring-transactions/{rec_id}/execute")
+async def execute_recurring(
+    rec_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT * FROM tr_recurring_transactions
+        WHERE id=:id AND tenant_id=:tid AND is_active=true
+    """), {"id": str(rec_id), "tid": tid})
+    rec = r.mappings().fetchone()
+    if not rec: raise HTTPException(404, "المعاملة غير موجودة")
+    tx_date = date.today()
+    serial  = await _next_serial(db, tid, rec["tx_type"], tx_date)
+    tx_id   = str(uuid.uuid4())
+    amt     = Decimal(str(rec["amount"]))
+    try:
+        await db.execute(text("""
+            INSERT INTO tr_bank_transactions
+              (id,tenant_id,serial,tx_type,tx_date,bank_account_id,
+               amount,currency_code,amount_sar,counterpart_account,
+               description,payment_method,status,created_by)
+            VALUES
+              (:id,:tid,:serial,:tt,:dt,:ba,
+               :amt,'SAR',:amt,:cp,
+               :desc,'wire','draft',:by)
+        """), {
+            "id": tx_id, "tid": tid, "serial": serial,
+            "tt": rec["tx_type"], "dt": tx_date,
+            "ba": str(rec["bank_account_id"]) if rec["bank_account_id"] else None,
+            "amt": amt, "cp": rec["counterpart_account"],
+            "desc": rec["description"], "by": user.email,
+        })
+        # تحديث next_run_date
+        from datetime import timedelta
+        freq = rec["frequency"]
+        if freq == "daily":   next_d = tx_date + timedelta(days=1)
+        elif freq == "weekly": next_d = tx_date + timedelta(weeks=1)
+        elif freq == "monthly":
+            m = tx_date.month % 12 + 1
+            y = tx_date.year + (1 if tx_date.month == 12 else 0)
+            next_d = tx_date.replace(year=y, month=m)
+        else: next_d = tx_date + timedelta(days=30)
+        await db.execute(text("""
+            UPDATE tr_recurring_transactions
+            SET last_run_date=:last, next_run_date=:next
+            WHERE id=:id AND tenant_id=:tid
+        """), {"last": tx_date, "next": next_d, "id": str(rec_id), "tid": tid})
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ: {str(e)}")
+    return ok(data={"serial": serial}, message=f"✅ تم إنشاء {serial}")
