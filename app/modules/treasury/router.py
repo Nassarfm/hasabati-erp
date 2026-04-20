@@ -171,11 +171,10 @@ async def dashboard(
     ck = r4.fetchone()
     due_checks = {"count": ck[0], "total": float(ck[1])}
 
-    # عهد تحتاج تعبئة
+    # عهد تحتاج تعبئة (بدون replenish_threshold)
     r5 = await db.execute(text("""
         SELECT COUNT(*) FROM tr_petty_cash_funds
         WHERE tenant_id=:tid AND is_active=true
-          AND current_balance <= (limit_amount * replenish_threshold / 100)
     """), {"tid": tid})
     need_replenish = int(r5.scalar() or 0)
 
@@ -204,23 +203,15 @@ async def dashboard(
     """), {"tid": tid})
     kpi_row = r7.mappings().fetchone()
 
-    # ── إحصائيات التسوية البنكية ──────────────────────────
-    r_rec = await db.execute(text("""
-        SELECT
-            COUNT(*) FILTER (WHERE status='posted') AS total_posted,
-            COUNT(*) FILTER (WHERE status='posted' AND is_reconciled=true)  AS reconciled,
-            COUNT(*) FILTER (WHERE status='posted' AND (is_reconciled IS NULL OR is_reconciled=false)) AS unreconciled,
-            COALESCE(SUM(amount) FILTER (WHERE status='posted' AND is_reconciled=true), 0)  AS reconciled_amount,
-            COALESCE(SUM(amount) FILTER (WHERE status='posted' AND (is_reconciled IS NULL OR is_reconciled=false)), 0) AS unreconciled_amount
-        FROM tr_bank_transactions WHERE tenant_id=:tid
-    """), {"tid": tid})
-    rec_row = r_rec.mappings().fetchone()
+    # ── إحصائيات التسوية البنكية (يدوية - من الـ frontend) ──
+    # is_reconciled يُحفظ client-side فقط حالياً
     reconciliation_stats = {
-        "total_posted":        int(rec_row["total_posted"] or 0),
-        "reconciled":          int(rec_row["reconciled"] or 0),
-        "unreconciled":        int(rec_row["unreconciled"] or 0),
-        "reconciled_amount":   float(rec_row["reconciled_amount"] or 0),
-        "unreconciled_amount": float(rec_row["unreconciled_amount"] or 0),
+        "total_posted":        0,
+        "reconciled":          0,
+        "unreconciled":        0,
+        "reconciled_amount":   0.0,
+        "unreconciled_amount": 0.0,
+        "note": "التسوية يدوية من صفحة حركات البنك",
     }
 
 
@@ -1647,6 +1638,39 @@ async def outstanding_checks_report(
     total = sum(float(c["amount"]) for c in checks)
     overdue = [c for c in checks if c["overdue_days"] and c["overdue_days"] > 0]
     return ok(data={"total": total, "count": len(checks), "overdue": len(overdue), "checks": checks})
+
+
+@router.get("/reports/check-aging")
+async def check_aging(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """أعمار الشيكات المستحقة"""
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT
+            ch.*,
+            ba.account_name AS bank_account_name,
+            (CURRENT_DATE - ch.due_date) AS days_overdue,
+            CASE
+                WHEN ch.due_date >= CURRENT_DATE THEN 'upcoming'
+                WHEN (CURRENT_DATE - ch.due_date) <= 30 THEN '0-30'
+                WHEN (CURRENT_DATE - ch.due_date) <= 60 THEN '31-60'
+                WHEN (CURRENT_DATE - ch.due_date) <= 90 THEN '61-90'
+                ELSE 'over-90'
+            END AS aging_bucket
+        FROM tr_checks ch
+        LEFT JOIN tr_bank_accounts ba ON ba.id=ch.bank_account_id
+        WHERE ch.tenant_id=:tid AND ch.status IN ('issued','deposited')
+        ORDER BY ch.due_date
+    """), {"tid": tid})
+    rows = [dict(r._mapping) for r in r.fetchall()]
+    for row in rows:
+        if row.get("amount"):    row["amount"]       = float(row["amount"])
+        if row.get("due_date"):  row["due_date"]     = str(row["due_date"])
+        if row.get("days_overdue"): row["days_overdue"] = int(row["days_overdue"])
+    return ok(data=rows)
+
 
 
 @router.get("/reports/petty-cash-statement")
