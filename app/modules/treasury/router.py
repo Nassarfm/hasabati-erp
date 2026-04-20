@@ -15,7 +15,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
-from fastapi import APIRouter, Depends, Query, HTTPException, Body
+from fastapi import APIRouter, Depends, Query, HTTPException, Body, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.response import ok, created
@@ -2937,14 +2937,14 @@ async def smart_import_create_drafts(
                    counterpart_account,
                    description,reference,payment_method,
                    branch_code,cost_center,project_code,
-                   status,created_by,import_source)
+                   status,created_by)
                 VALUES
                   (:id,:tid,:serial,:tx_type,:tx_date,:ba,
                    :amt,'SAR',:amt,
                    :cp_acc,
                    :desc,:ref,'bank_import',
                    :branch,:cc,:proj,
-                   'draft',:by,'smart_import')
+                   'draft',:by)
             """), {
                 "id":      tx_id,
                 "tid":     tid,
