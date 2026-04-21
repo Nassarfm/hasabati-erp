@@ -186,18 +186,42 @@ async def dashboard(
         cash_flow_chart = [{"date": row[0], "receipts": float(row[1] or 0), "payments": float(row[2] or 0)}
                            for row in r4.fetchall()]
 
-        # 5. KPI counts
-        r5 = await db.execute(text("""
-            SELECT
-              (SELECT COUNT(*) FROM tr_bank_accounts       WHERE tenant_id=:tid AND account_type='bank'    AND is_active=true) AS banks,
-              (SELECT COUNT(*) FROM tr_bank_accounts       WHERE tenant_id=:tid AND account_type='cash_fund' AND is_active=true) AS funds,
-              (SELECT COUNT(*) FROM tr_petty_cash_funds    WHERE tenant_id=:tid AND is_active=true)             AS petty_funds,
-              (SELECT COUNT(*) FROM tr_petty_cash_expenses WHERE tenant_id=:tid AND status='draft')             AS pending_expenses,
-              (SELECT COALESCE(SUM(COALESCE(total_amount,0)),0) FROM tr_petty_cash_expenses WHERE tenant_id=:tid AND status='draft') AS pending_amount,
-              (SELECT COUNT(*) FROM tr_cash_transactions   WHERE tenant_id=:tid AND status='draft')             AS pending_vouchers,
-              (SELECT COUNT(*) FROM tr_bank_transactions   WHERE tenant_id=:tid AND status='draft')             AS pending_bank_tx
-        """), {"tid": tid})
-        kpi = r5.mappings().fetchone() or {}
+        # 5. KPI counts — كل استعلام منفصل لتجنب فشل الكل بسبب جدول مفقود
+        kpi = {"banks":0,"funds":0,"petty_funds":0,"pending_expenses":0,"pending_amount":0,"pending_vouchers":0,"pending_bank_tx":0}
+        try:
+            r5a = await db.execute(text("""
+                SELECT
+                  (SELECT COUNT(*) FROM tr_bank_accounts WHERE tenant_id=:tid AND account_type='bank'      AND is_active=true) AS banks,
+                  (SELECT COUNT(*) FROM tr_bank_accounts WHERE tenant_id=:tid AND account_type='cash_fund' AND is_active=true) AS funds,
+                  (SELECT COUNT(*) FROM tr_cash_transactions WHERE tenant_id=:tid AND status='draft')  AS pending_vouchers,
+                  (SELECT COUNT(*) FROM tr_bank_transactions WHERE tenant_id=:tid AND status='draft')  AS pending_bank_tx
+            """), {"tid": tid})
+            row5a = r5a.mappings().fetchone() or {}
+            kpi.update({k: int(row5a.get(k) or 0) for k in row5a.keys()})
+        except Exception as e5a:
+            print(f"[Dashboard KPI-1] {e5a}")
+        try:
+            r5b = await db.execute(text("""
+                SELECT
+                  COUNT(*) AS petty_funds
+                FROM tr_petty_cash_funds WHERE tenant_id=:tid AND is_active=true
+            """), {"tid": tid})
+            row5b = r5b.mappings().fetchone()
+            if row5b: kpi["petty_funds"] = int(row5b.get("petty_funds") or 0)
+        except Exception as e5b:
+            print(f"[Dashboard KPI-2 petty_funds] {e5b}")
+        try:
+            r5c = await db.execute(text("""
+                SELECT COUNT(*) AS pending_expenses,
+                       COALESCE(SUM(COALESCE(total_amount,0)),0) AS pending_amount
+                FROM tr_petty_cash_expenses WHERE tenant_id=:tid AND status='draft'
+            """), {"tid": tid})
+            row5c = r5c.mappings().fetchone()
+            if row5c:
+                kpi["pending_expenses"] = int(row5c.get("pending_expenses") or 0)
+                kpi["pending_amount"]   = float(row5c.get("pending_amount") or 0)
+        except Exception as e5c:
+            print(f"[Dashboard KPI-3 petty_expenses] {e5c}")
 
         return ok(data={
             "kpis": {
@@ -338,19 +362,29 @@ async def create_bank_account(
         try: return Decimal(str(v)) if v not in (None, "", "null") else Decimal(default)
         except: return Decimal(default)
 
+    # تحويل آمن للتاريخ
+    def to_date_safe(v):
+        if v in (None, "", "null", "undefined"): return None
+        try: return date.fromisoformat(str(v))
+        except: return None
+
     try:
         await db.execute(text("""
             INSERT INTO tr_bank_accounts (
                 id, tenant_id, account_code, account_name,
-                account_type, bank_name, bank_branch, account_number,
+                account_type, account_sub_type,
+                bank_name, bank_branch, account_number,
                 iban, swift_code, currency_code, gl_account_code,
                 opening_balance, current_balance, low_balance_alert,
+                opening_date, contact_person, contact_phone, notes,
                 is_active, created_by
             ) VALUES (
                 :id, :tid, :account_code, :account_name,
-                :account_type, :bank_name, :bank_branch, :account_number,
+                :account_type, :account_sub_type,
+                :bank_name, :bank_branch, :account_number,
                 :iban, :swift_code, :currency_code, :gl_account_code,
                 :opening_balance, :current_balance, :low_balance_alert,
+                :opening_date, :contact_person, :contact_phone, :notes,
                 true, :created_by
             )
         """), {
@@ -359,6 +393,7 @@ async def create_bank_account(
             "account_code":     str(data["account_code"]).strip(),
             "account_name":     str(data["account_name"]).strip(),
             "account_type":     data.get("account_type") or "bank",
+            "account_sub_type": data.get("account_sub_type") or None,
             "bank_name":        data.get("bank_name") or None,
             "bank_branch":      data.get("bank_branch") or None,
             "account_number":   data.get("account_number") or None,
@@ -369,6 +404,10 @@ async def create_bank_account(
             "opening_balance":  to_decimal(data.get("opening_balance"), 0),
             "current_balance":  to_decimal(data.get("opening_balance"), 0),
             "low_balance_alert":to_decimal(data.get("low_balance_alert"), 0),
+            "opening_date":     to_date_safe(data.get("opening_date")),
+            "contact_person":   data.get("contact_person") or None,
+            "contact_phone":    data.get("contact_phone") or None,
+            "notes":            data.get("notes") or None,
             "created_by":       user.email,
         })
         await db.commit()
