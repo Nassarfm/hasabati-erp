@@ -60,6 +60,11 @@ class PostingLine:
     currency_code:  Optional[str]     = "SAR"
     exchange_rate:  Optional[Decimal] = Decimal("1.0")
     amount_foreign: Optional[Decimal] = Decimal("0")
+    # ── حقول المتعامل (Party / Subledger) ──
+    # party_id   → UUID للمتعامل (موظف، أمين صندوق، عميل، مورد...)
+    # party_role → دور المتعامل في هذا السطر
+    party_id:   Optional[str] = None   # UUID as string
+    party_role: Optional[str] = None   # 'employee_loan' | 'petty_cash_keeper' | 'customer' | 'vendor' | 'fund_keeper'
 
 
 @dataclass
@@ -321,6 +326,29 @@ class PostingEngine:
                     created_by=request.created_by_email,
                 )
                 self.db.add(je_line)
+                await self.db.flush()  # نحتاج flush هنا للحصول على je_line.id
+
+                # ── Party (المتعامل) — Raw SQL لتجنب المساس بـ models.py ──
+                # يُكتب فقط إذا كان party_id موجوداً في السطر
+                _party_id   = getattr(line, "party_id",   None)
+                _party_role = getattr(line, "party_role", None)
+                if _party_id:
+                    try:
+                        from sqlalchemy import text as _txt
+                        await self.db.execute(_txt("""
+                            UPDATE je_lines
+                            SET party_id   = :pid,
+                                party_role = :prole
+                            WHERE id = :line_id
+                        """), {
+                            "pid":     str(_party_id),
+                            "prole":   _party_role or "unknown",
+                            "line_id": str(je_line.id),
+                        })
+                    except Exception as _pe:
+                        # إذا لم يكن العمود موجوداً بعد — لا نوقف الترحيل
+                        logger.warning("party_update_skipped",
+                                       reason=str(_pe), line_id=str(je_line.id))
 
             for line in request.lines:
                 acc = account_map.get(line.account_code)
