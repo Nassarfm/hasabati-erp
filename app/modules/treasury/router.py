@@ -926,38 +926,60 @@ async def list_internal_transfers(
     user: CurrentUser = Depends(get_current_user),
 ):
     tid = str(user.tenant_id)
-    where, params = ["tenant_id=:tid"], {"tid": tid}
-    if status:    where.append("status=:status");    params["status"] = status
-    if date_from: where.append("tx_date>=:df");      params["df"]     = date_from
-    if date_to:   where.append("tx_date<=:dt");      params["dt"]     = date_to
-    r = await db.execute(text("""
-        SELECT it.*,
-               fa.account_name AS from_account_name,
-               ta.account_name AS to_account_name
-        FROM tr_internal_transfers it
-        LEFT JOIN tr_bank_accounts fa ON fa.id=it.from_account_id
-        LEFT JOIN tr_bank_accounts ta ON ta.id=it.to_account_id
-        WHERE """ + " AND ".join(where) + """
-        ORDER BY tx_date DESC, serial DESC
-        LIMIT :limit
-    """), {**params, "limit": limit})
-    rows = [dict(row._mapping) for row in r.fetchall()]
-    for row in rows:
-        for k in ("amount","amount_to"):
-            if row.get(k) is not None:
-                row[k] = float(row[k])
-    r2 = await db.execute(text("""
-        SELECT
-            COUNT(*) FILTER (WHERE status='draft')  AS drafts,
-            COUNT(*) FILTER (WHERE status='posted') AS posted,
-            COALESCE(SUM(amount),0)                 AS total_amount
-        FROM tr_internal_transfers WHERE tenant_id=:tid
-    """), {"tid": tid})
-    stats = r2.mappings().fetchone() or {}
-    return ok(data={"items": rows, "total": len(rows),
-                    "stats": {"drafts": int(stats.get("drafts",0)),
-                              "posted": int(stats.get("posted",0)),
-                              "total_amount": float(stats.get("total_amount",0))}})
+    try:
+        where, params = ["it.tenant_id=:tid"], {"tid": tid}
+        if status:    where.append("it.status=:status");    params["status"] = status
+        if date_from: where.append("it.tx_date>=:df");      params["df"]     = date_from
+        if date_to:   where.append("it.tx_date<=:dt");      params["dt"]     = date_to
+        r = await db.execute(text("""
+            SELECT
+                it.id, it.tenant_id, it.serial, it.tx_date::text AS tx_date,
+                it.from_account_id, it.to_account_id,
+                COALESCE(it.amount, 0)              AS amount,
+                COALESCE(it.amount_to, 0)           AS amount_to,
+                COALESCE(it.currency_code, 'SAR')   AS currency_code,
+                COALESCE(it.description, '')         AS description,
+                COALESCE(it.reference, '')           AS reference,
+                COALESCE(it.status, 'draft')         AS status,
+                it.je_serial,
+                it.created_by, it.created_at,
+                it.posted_by,  it.posted_at,
+                fa.account_name AS from_account_name,
+                ta.account_name AS to_account_name
+            FROM tr_internal_transfers it
+            LEFT JOIN tr_bank_accounts fa ON fa.id = it.from_account_id
+            LEFT JOIN tr_bank_accounts ta ON ta.id = it.to_account_id
+            WHERE """ + " AND ".join(where) + """
+            ORDER BY it.tx_date DESC, it.serial DESC
+            LIMIT :limit
+        """), {**params, "limit": limit})
+        rows = []
+        for row in r.mappings().fetchall():
+            d = dict(row)
+            d["amount"]    = float(d.get("amount") or 0)
+            d["amount_to"] = float(d.get("amount_to") or 0)
+            rows.append(d)
+
+        r2 = await db.execute(text("""
+            SELECT
+                COUNT(*) FILTER (WHERE status='draft')  AS drafts,
+                COUNT(*) FILTER (WHERE status='posted') AS posted,
+                COALESCE(SUM(amount), 0)                AS total_amount
+            FROM tr_internal_transfers WHERE tenant_id=:tid
+        """), {"tid": tid})
+        stats = r2.mappings().fetchone() or {}
+        return ok(data={
+            "items": rows, "total": len(rows),
+            "stats": {
+                "drafts":       int(stats.get("drafts") or 0),
+                "posted":       int(stats.get("posted") or 0),
+                "total_amount": float(stats.get("total_amount") or 0),
+            }
+        })
+    except Exception as e:
+        import traceback
+        print(f"[internal-transfers] {traceback.format_exc()}")
+        raise HTTPException(500, f"خطأ في جلب التحويلات الداخلية: {str(e)}")
 
 
 @router.post("/internal-transfers", status_code=201)
@@ -1815,6 +1837,21 @@ async def gl_balance_check(
 # CASH WORKFLOW — submit / approve / reject / reverse / bulk
 # ══════════════════════════════════════════════════════════
 
+async def _create_notification(db, tid: str, title: str, body: str, ref_type: str = None, ref_id: str = None):
+    """ينشئ إشعاراً في جدول notifications — يُستدعى بعد commit"""
+    try:
+        await db.execute(text("""
+            INSERT INTO notifications
+                (id, tenant_id, title, body, is_read, ref_type, ref_id, created_at)
+            VALUES
+                (gen_random_uuid(), :tid, :title, :body, false, :ref_type, :ref_id, NOW())
+        """), {"tid": tid, "title": title, "body": body,
+               "ref_type": ref_type or "treasury", "ref_id": ref_id})
+        await db.commit()
+    except Exception as e:
+        print(f"[Notification] فشل إنشاء الإشعار: {e}")
+
+
 @router.post("/cash-transactions/{tx_id}/submit")
 async def submit_cash_transaction(
     tx_id: uuid.UUID,
@@ -1826,10 +1863,20 @@ async def submit_cash_transaction(
         UPDATE tr_cash_transactions
         SET status='pending_approval', submitted_by=:by, submitted_at=NOW()
         WHERE id=:id AND tenant_id=:tid AND status='draft'
-        RETURNING id
+        RETURNING id, serial, tx_type, amount
     """), {"id": str(tx_id), "tid": tid, "by": user.email})
-    if not r.fetchone(): raise HTTPException(400, "السند غير موجود أو ليس مسودة")
+    row = r.fetchone()
+    if not row: raise HTTPException(400, "السند غير موجود أو ليس مسودة")
     await db.commit()
+    # إنشاء إشعار
+    tx_label = "سند قبض" if row[2] == "RV" else "سند صرف"
+    await _create_notification(
+        db, tid,
+        title=f"🔔 {tx_label} بانتظار الاعتماد",
+        body=f"السند {row[1]} بمبلغ {float(row[3] or 0):,.3f} ر.س — أرسله {user.email} للاعتماد",
+        ref_type="cash_transaction",
+        ref_id=str(tx_id),
+    )
     return ok(data={}, message="تم إرسال السند للاعتماد ✅")
 
 
@@ -2048,10 +2095,21 @@ async def submit_bank_transaction(
         UPDATE tr_bank_transactions
         SET status='pending_approval', submitted_by=:by, submitted_at=NOW()
         WHERE id=:id AND tenant_id=:tid AND status='draft'
-        RETURNING id
+        RETURNING id, serial, tx_type, amount
     """), {"id": str(tx_id), "tid": tid, "by": user.email})
-    if not r.fetchone(): raise HTTPException(400, "السند غير موجود أو ليس مسودة")
+    row = r.fetchone()
+    if not row: raise HTTPException(400, "السند غير موجود أو ليس مسودة")
     await db.commit()
+    # إنشاء إشعار
+    tx_labels = {"BR": "قبض بنكي", "BP": "دفعة بنكية", "BT": "تحويل بنكي"}
+    tx_label = tx_labels.get(row[2], "معاملة بنكية")
+    await _create_notification(
+        db, tid,
+        title=f"🔔 {tx_label} بانتظار الاعتماد",
+        body=f"السند {row[1]} بمبلغ {float(row[3] or 0):,.3f} ر.س — أرسله {user.email} للاعتماد",
+        ref_type="bank_transaction",
+        ref_id=str(tx_id),
+    )
     return ok(data={}, message="تم إرسال السند للاعتماد ✅")
 
 
