@@ -68,13 +68,11 @@ async def _next_serial(db: AsyncSession, tid: str, je_type: str, tx_date: date) 
 async def _post_je(db, tid: str, user_email: str, je_type: str, tx_date: date,
                    description: str, lines: list, reference: str = None) -> dict:
     """إنشاء قيد محاسبي مرتبط بعملية الخزينة — يرفع exception عند الفشل"""
-    # التحقق من وجود سطور صحيحة
     valid = [l for l in lines if l.get("account_code") and
              (Decimal(str(l.get("debit",0))) > 0 or Decimal(str(l.get("credit",0))) > 0)]
     if not valid:
         raise HTTPException(400, "لا توجد سطور قيد صحيحة للترحيل")
 
-    # التحقق من توازن القيد
     total_dr = sum(Decimal(str(l.get("debit",0)))  for l in valid)
     total_cr = sum(Decimal(str(l.get("credit",0))) for l in valid)
     if abs(total_dr - total_cr) > Decimal("0.01"):
@@ -92,6 +90,11 @@ async def _post_je(db, tid: str, user_email: str, je_type: str, tx_date: date,
             branch_code=l.get("branch_code"),
             cost_center=l.get("cost_center"),
             project_code=l.get("project_code"),
+            expense_classification_code=l.get("expense_classification_code"),
+            currency_code=l.get("currency_code", "SAR"),
+            # ── المتعامل / Party ──
+            party_id=l.get("party_id"),
+            party_role=l.get("party_role"),
         ) for l in valid]
         result = await engine.post(PostingRequest(
             tenant_id=t_id,
@@ -346,16 +349,22 @@ async def create_bank_account(
         raise HTTPException(400, "حساب الأستاذ العام مطلوب")
 
     ba_id = str(uuid.uuid4())
+    account_type = data.get("account_type") or "bank"
 
-    # ── Unique: حساب الأستاذ العام لا يُستخدم في أكثر من حساب بنكي ──
-    dup = await db.execute(text(
-        "SELECT account_name FROM tr_bank_accounts"
-        " WHERE tenant_id=:tid AND gl_account_code=:gl"
-    ), {"tid": tid, "gl": str(data["gl_account_code"]).strip()})
-    dup_row = dup.fetchone()
-    if dup_row:
-        raise HTTPException(400,
-            f"حساب الأستاذ العام مستخدم مسبقاً في '{dup_row[0]}' — اختر حساباً مختلفاً")
+    # ── Subledger Logic ──────────────────────────────────────────────────
+    # البنوك: كل بنك يجب أن يكون له GL account مستقل (1:1)
+    # الصناديق: يجوز لعدة صناديق مشاركة نفس GL account (Subledger)
+    # لأن الصناديق تُعتبر دفتر أستاذ مساعد لـ Control Account واحد
+    if account_type == "bank":
+        dup = await db.execute(text(
+            "SELECT account_name FROM tr_bank_accounts"
+            " WHERE tenant_id=:tid AND gl_account_code=:gl AND account_type='bank'"
+        ), {"tid": tid, "gl": str(data["gl_account_code"]).strip()})
+        dup_row = dup.fetchone()
+        if dup_row:
+            raise HTTPException(400,
+                f"حساب الأستاذ العام مستخدم مسبقاً في البنك '{dup_row[0]}' — "
+                f"كل حساب بنكي يجب أن يرتبط بحساب GL مستقل")
 
     # تحويل آمن للأرقام
     def to_decimal(v, default=0):
@@ -443,17 +452,29 @@ async def update_bank_account(
     if not safe:
         raise HTTPException(status_code=400, detail="لا توجد بيانات للتعديل")
 
-    # ── Unique: gl_account_code إذا تغيّر ──
+    # ── Subledger Logic في التعديل ──
+    # فقط للبنوك: تحقق من تفرد GL account
+    # الصناديق: يجوز المشاركة (Subledger)
     if "gl_account_code" in safe:
         new_gl = str(safe["gl_account_code"]).strip()
-        dup = await db.execute(text(
-            "SELECT account_name FROM tr_bank_accounts"
-            " WHERE tenant_id=:tid AND gl_account_code=:gl AND id != :skip"
-        ), {"tid": tid, "gl": new_gl, "skip": str(ba_id)})
-        dup_row = dup.fetchone()
-        if dup_row:
-            raise HTTPException(400,
-                f"حساب الأستاذ العام مستخدم مسبقاً في '{dup_row[0]}' — اختر حساباً مختلفاً")
+        # اجلب نوع الحساب الحالي
+        cur_type_r = await db.execute(text(
+            "SELECT account_type FROM tr_bank_accounts WHERE id=:id AND tenant_id=:tid"
+        ), {"id": str(ba_id), "tid": tid})
+        cur_type_row = cur_type_r.fetchone()
+        cur_account_type = cur_type_row[0] if cur_type_row else (safe.get("account_type") or "bank")
+
+        if cur_account_type == "bank":
+            dup = await db.execute(text(
+                "SELECT account_name FROM tr_bank_accounts"
+                " WHERE tenant_id=:tid AND gl_account_code=:gl"
+                " AND account_type='bank' AND id != :skip"
+            ), {"tid": tid, "gl": new_gl, "skip": str(ba_id)})
+            dup_row = dup.fetchone()
+            if dup_row:
+                raise HTTPException(400,
+                    f"حساب الأستاذ العام مستخدم مسبقاً في البنك '{dup_row[0]}' — "
+                    f"كل حساب بنكي يجب أن يرتبط بحساب GL مستقل")
 
     # ── تحويل الحقول الحساسة ────────────────────────────────
     # حقول التاريخ: string فارغ → None
@@ -629,6 +650,7 @@ async def create_cash_transaction(
                description,party_name,reference,payment_method,check_number,
                branch_code,cost_center,project_code,notes,
                vat_amount,vat_account_code,expense_classification_code,
+               party_id,party_role,
                status,created_by)
             VALUES
               (:id,:tid,:serial,:tx_type,:tx_date,:ba_id,:amount,
@@ -636,6 +658,7 @@ async def create_cash_transaction(
                :desc,:party,:ref,:method,:check_no,
                :branch,:cc,:proj,:notes,
                :vat_amount,:vat_acc,:exp_cls,
+               :party_id,:party_role,
                'draft',:by)
         """), {
             "id": tx_id, "tid": tid, "serial": serial,
@@ -652,6 +675,8 @@ async def create_cash_transaction(
             "vat_amount": Decimal(str(data.get("vat_amount") or 0)),
             "vat_acc":    data.get("vat_account_code") or None,
             "exp_cls":    data.get("expense_classification_code") or None,
+            "party_id":   data.get("party_id") or None,
+            "party_role": data.get("party_role") or None,
             "by": user.email,
         })
         await db.commit()
@@ -691,24 +716,31 @@ async def post_cash_transaction(
     total    = amt
     tx_date  = tx["tx_date"]
     desc     = tx["description"] or ""
+    # الأبعاد
     dims     = {
         "branch_code": tx.get("branch_code"),
         "cost_center": tx.get("cost_center"),
         "project_code": tx.get("project_code"),
         "expense_classification_code": tx.get("expense_classification_code"),
     }
+    # المتعامل — يُضاف للسطر المقابل (الحساب المقابل)
+    party_dims = {
+        **dims,
+        "party_id":   str(tx["party_id"]) if tx.get("party_id") else None,
+        "party_role": tx.get("party_role") or None,
+    }
 
     if tx["tx_type"] == "RV":
         lines = [
-            {"account_code": gl, "debit": float(total),    "credit": 0,            "description": desc},
-            {"account_code": cp, "debit": 0,               "credit": float(base_amt), "description": desc, **dims},
+            {"account_code": gl, "debit": float(total),    "credit": 0,               "description": desc},
+            {"account_code": cp, "debit": 0,               "credit": float(base_amt), "description": desc, **party_dims},
         ]
         if vat_amt > 0 and vat_acc:
             lines.append({"account_code": vat_acc, "debit": 0, "credit": float(vat_amt), "description": "ضريبة القيمة المضافة"})
         delta = total
     else:  # PV
         lines = [
-            {"account_code": cp, "debit": float(base_amt), "credit": 0,            "description": desc, **dims},
+            {"account_code": cp, "debit": float(base_amt), "credit": 0,            "description": desc, **party_dims},
             {"account_code": gl, "debit": 0,               "credit": float(total), "description": desc},
         ]
         if vat_amt > 0 and vat_acc:
@@ -812,6 +844,7 @@ async def create_bank_transaction(
            description,reference,payment_method,check_number,
            branch_code,cost_center,project_code,notes,
            vat_amount,vat_account_code,expense_classification_code,
+           party_id,party_role,
            status,created_by)
         VALUES
           (:id,:tid,:serial,:tx_type,:tx_date,:ba_id,:amount,
@@ -820,6 +853,7 @@ async def create_bank_transaction(
            :desc,:ref,:method,:check_no,
            :branch,:cc,:proj,:notes,
            :vat_amount,:vat_acc,:exp_cls,
+           :party_id,:party_role,
            'draft',:by)
     """), {
         "id": tx_id, "tid": tid, "serial": serial,
@@ -838,6 +872,8 @@ async def create_bank_transaction(
         "vat_amount": Decimal(str(data.get("vat_amount") or 0)),
         "vat_acc":    data.get("vat_account_code") or None,
         "exp_cls":    data.get("expense_classification_code") or None,
+        "party_id":   data.get("party_id") or None,
+        "party_role": data.get("party_role") or None,
     })
     await db.commit()
     return created(data={"id": tx_id, "serial": serial}, message=f"تم إنشاء {serial} ✅")
@@ -879,18 +915,23 @@ async def post_bank_transaction(
         "project_code": tx.get("project_code"),
         "expense_classification_code": tx.get("expense_classification_code"),
     }
+    party_dims = {
+        **dims,
+        "party_id":   str(tx["party_id"]) if tx.get("party_id") else None,
+        "party_role": tx.get("party_role") or None,
+    }
 
     if tx["tx_type"] == "BR":
         lines = [
             {"account_code": gl, "debit": float(total),    "credit": 0,               "description": desc},
-            {"account_code": cp, "debit": 0,               "credit": float(base_amt), "description": desc, **dims},
+            {"account_code": cp, "debit": 0,               "credit": float(base_amt), "description": desc, **party_dims},
         ]
         if vat_amt > 0 and vat_acc:
             lines.append({"account_code": vat_acc, "debit": 0, "credit": float(vat_amt), "description": "ضريبة"})
         delta = total
     else:  # BP or BT
         lines = [
-            {"account_code": cp, "debit": float(base_amt), "credit": 0,            "description": desc, **dims},
+            {"account_code": cp, "debit": float(base_amt), "credit": 0,            "description": desc, **party_dims},
             {"account_code": gl, "debit": 0,               "credit": float(total), "description": desc},
         ]
         if vat_amt > 0 and vat_acc:
@@ -1328,13 +1369,13 @@ async def create_petty_cash_fund(
         await db.execute(text("""
             INSERT INTO tr_petty_cash_funds
               (id,tenant_id,fund_code,fund_name,fund_type,
-               custodian_name,custodian_email,custodian_phone,
+               custodian_name,custodian_email,custodian_phone,custodian_party_id,
                currency_code,limit_amount,current_balance,gl_account_code,
                bank_account_id,branch_code,replenish_threshold,
                require_daily_close,notes,is_active,created_by)
             VALUES
               (:id,:tid,:code,:name,:fund_type,
-               :custodian,:custodian_email,:custodian_phone,
+               :custodian,:custodian_email,:custodian_phone,:custodian_party_id,
                :cur,:limit,:balance,:gl,
                :ba_id,:branch,:threshold,
                :daily_close,:notes,true,:by)
@@ -1347,6 +1388,7 @@ async def create_petty_cash_fund(
             "custodian":   data.get("custodian_name"),
             "custodian_email": data.get("custodian_email"),
             "custodian_phone": data.get("custodian_phone"),
+            "custodian_party_id": data.get("custodian_party_id") or None,
             "cur":         data.get("currency_code","SAR"),
             "limit":       Decimal(str(data["limit_amount"])),
             "balance":     Decimal(str(data.get("opening_balance",0))),
@@ -1375,7 +1417,7 @@ async def update_petty_cash_fund(
     tid = str(user.tenant_id)
     ALLOWED_PF = {
         "fund_code","fund_name","fund_type","custodian_name","custodian_email",
-        "custodian_phone","currency_code","limit_amount","gl_account_code",
+        "custodian_phone","custodian_party_id","currency_code","limit_amount","gl_account_code",
         "bank_account_id","branch_code","replenish_threshold","notes",
         "is_active","require_daily_close",
         "deactivated_at","deactivation_reason","deactivated_by",
@@ -1518,13 +1560,21 @@ async def post_petty_cash_expense(
     exp_lines = lr.mappings().all()
 
     # بناء القيد: DR مصاريف متعددة, CR حساب العهدة
+    # party_id من أمين صندوق العهدة إن وُجد
+    fund_party_id   = str(exp.get("party_id"))   if exp.get("party_id")   else (
+                      str(exp.get("fund_custodian_party_id")) if exp.get("fund_custodian_party_id") else None)
+    fund_party_role = exp.get("party_role") or "petty_cash_keeper"
+
     lines = [{"account_code": l["expense_account"],
                "debit": Decimal(str(l["amount"])),
                "credit": 0,
                "description": l.get("description") or exp["description"],
                "branch_code": l.get("branch_code"),
                "cost_center": l.get("cost_center"),
-               "project_code": l.get("project_code")}
+               "project_code": l.get("project_code"),
+               "party_id":   fund_party_id,
+               "party_role": fund_party_role,
+               }
              for l in exp_lines]
     total_amt = Decimal(str(exp["total_amount"]))
     lines.append({"account_code": exp["fund_gl"], "debit": 0, "credit": total_amt,
