@@ -227,8 +227,9 @@ async def dashboard(
 
     except Exception as e:
         import traceback
-        print(f"[Dashboard ERROR] {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"خطأ في لوحة التحكم: {str(e)}")
+        tb = traceback.format_exc()
+        print(f"[Dashboard ERROR] {tb}")
+        raise HTTPException(status_code=500, detail=f"خطأ في لوحة التحكم: {str(e)} | {tb[-300:]}")
 
 
 @router.get("/reports/cash-forecast")
@@ -2481,7 +2482,7 @@ async def account_statement(
             SELECT serial, tx_type, tx_date::text,
                    COALESCE(description,'') AS description,
                    COALESCE(reference,'')   AS reference,
-                   COALESCE(beneficiary_name, party_name, '') AS party,
+                   COALESCE(beneficiary_name, '') AS party,
                    COALESCE(amount,0) AS amount,
                    CASE WHEN tx_type='BR' THEN COALESCE(amount,0) ELSE 0 END AS debit,
                    CASE WHEN tx_type IN ('BP','BT') THEN COALESCE(amount,0) ELSE 0 END AS credit,
@@ -3024,14 +3025,29 @@ async def get_smart_import_settings(
 ):
     """إعدادات الحسابات الوسيطة للاستيراد الذكي"""
     tid = str(user.tenant_id)
-    r   = await db.execute(text("""
-        SELECT setting_key, setting_value
-        FROM company_settings
-        WHERE tenant_id=:tid AND setting_key LIKE 'smart_import_%'
-    """), {"tid": tid})
-    rows = r.fetchall()
-    settings = {row[0]: row[1] for row in rows}
-    return ok(data=settings)
+    try:
+        r = await db.execute(text("""
+            SELECT
+                transit_pay_account  AS smart_import_transit_pay,
+                transit_rec_account  AS smart_import_transit_rec,
+                transit_pay_name     AS smart_import_transit_pay_name,
+                transit_rec_name     AS smart_import_transit_rec_name
+            FROM smart_import_settings
+            WHERE tenant_id=:tid
+            LIMIT 1
+        """), {"tid": tid})
+        row = r.mappings().fetchone()
+        if not row:
+            return ok(data={
+                "smart_import_transit_pay": None,
+                "smart_import_transit_rec": None,
+                "smart_import_transit_pay_name": None,
+                "smart_import_transit_rec_name": None,
+            })
+        return ok(data=dict(row))
+    except Exception as e:
+        import traceback; print(f"[smart-import/settings GET] {traceback.format_exc()}")
+        raise HTTPException(500, f"خطأ في جلب الإعدادات: {str(e)}")
 
 
 @router.post("/smart-import/settings")
@@ -3042,33 +3058,32 @@ async def save_smart_import_settings(
 ):
     """حفظ إعدادات الحسابات الوسيطة"""
     tid = str(user.tenant_id)
-    allowed = {
-        "smart_import_transit_pay",
-        "smart_import_transit_rec",
-        "smart_import_transit_pay_name",
-        "smart_import_transit_rec_name",
-    }
-    for key, val in data.items():
-        if key not in allowed: continue
-        # تحقق من وجود الإعداد أولاً
-        r_check = await db.execute(text("""
-            SELECT id FROM company_settings
-            WHERE tenant_id=:tid AND setting_key=:key
-        """), {"tid": tid, "key": key})
-        existing = r_check.fetchone()
-        if existing:
-            await db.execute(text("""
-                UPDATE company_settings
-                SET setting_value=:val
-                WHERE tenant_id=:tid AND setting_key=:key
-            """), {"tid": tid, "key": key, "val": str(val)})
-        else:
-            await db.execute(text("""
-                INSERT INTO company_settings (tenant_id, setting_key, setting_value)
-                VALUES (:tid, :key, :val)
-            """), {"tid": tid, "key": key, "val": str(val)})
-    await db.commit()
-    return ok(data={}, message="✅ تم حفظ الإعدادات")
+    try:
+        await db.execute(text("""
+            INSERT INTO smart_import_settings
+                (id, tenant_id, transit_pay_account, transit_rec_account,
+                 transit_pay_name, transit_rec_name, updated_at)
+            VALUES
+                (gen_random_uuid(), :tid, :pay, :rec, :pay_name, :rec_name, NOW())
+            ON CONFLICT (tenant_id) DO UPDATE SET
+                transit_pay_account = EXCLUDED.transit_pay_account,
+                transit_rec_account = EXCLUDED.transit_rec_account,
+                transit_pay_name    = EXCLUDED.transit_pay_name,
+                transit_rec_name    = EXCLUDED.transit_rec_name,
+                updated_at          = NOW()
+        """), {
+            "tid":      tid,
+            "pay":      data.get("smart_import_transit_pay") or None,
+            "rec":      data.get("smart_import_transit_rec") or None,
+            "pay_name": data.get("smart_import_transit_pay_name") or None,
+            "rec_name": data.get("smart_import_transit_rec_name") or None,
+        })
+        await db.commit()
+        return ok(data={}, message="✅ تم حفظ الإعدادات")
+    except Exception as e:
+        await db.rollback()
+        import traceback; print(f"[smart-import/settings POST] {traceback.format_exc()}")
+        raise HTTPException(500, f"خطأ في حفظ الإعدادات: {str(e)}")
 
 # ══════════════════════════════════════════════════════════
 # ACTIVITY LOG — سجل الأحداث والـ Audit Trail للخزينة
