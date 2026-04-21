@@ -129,114 +129,106 @@ async def dashboard(
     user: CurrentUser = Depends(get_current_user),
 ):
     tid = str(user.tenant_id)
+    try:
+        # 1. أرصدة البنوك والصناديق
+        r = await db.execute(text("""
+            SELECT id, account_code, account_name, account_type, currency_code,
+                   COALESCE(current_balance,0)   AS current_balance,
+                   COALESCE(low_balance_alert,0) AS low_balance_alert
+            FROM tr_bank_accounts
+            WHERE tenant_id=:tid AND is_active=true
+            ORDER BY account_type, account_name
+        """), {"tid": tid})
+        accounts = []
+        for row in r.fetchall():
+            a = dict(row._mapping)
+            a["current_balance"]   = float(a.get("current_balance")   or 0)
+            a["low_balance_alert"] = float(a.get("low_balance_alert") or 0)
+            accounts.append(a)
 
-    # أرصدة البنوك والصناديق
-    r = await db.execute(text("""
-        SELECT id, account_code, account_name, account_type,
-               currency_code, current_balance, low_balance_alert, is_active
-        FROM tr_bank_accounts
-        WHERE tenant_id=:tid AND is_active=true
-        ORDER BY account_type, account_name
-    """), {"tid": tid})
-    accounts = [dict(row._mapping) for row in r.fetchall()]
+        total_bank = sum(a["current_balance"] for a in accounts if a["account_type"]=="bank")
+        total_cash = sum(a["current_balance"] for a in accounts if a["account_type"] in ("cash_fund","petty_cash"))
+        alerts = [a for a in accounts if a["low_balance_alert"]>0 and a["current_balance"]<=a["low_balance_alert"]]
 
-    # إجماليات
-    total_bank = sum(float(a["current_balance"]) for a in accounts if a["account_type"]=="bank")
-    total_cash = sum(float(a["current_balance"]) for a in accounts if a["account_type"]=="cash_fund")
-    alerts = [a for a in accounts if float(a["current_balance"]) <= float(a["low_balance_alert"] or 0)]
+        # 2. حركات اليوم
+        today = date.today().isoformat()
+        r2 = await db.execute(text("""
+            SELECT COALESCE(SUM(CASE WHEN tx_type='RV' THEN amount ELSE 0 END),0) AS receipts,
+                   COALESCE(SUM(CASE WHEN tx_type='PV' THEN amount ELSE 0 END),0) AS payments
+            FROM tr_cash_transactions
+            WHERE tenant_id=:tid AND tx_date=:today AND status='posted'
+        """), {"tid": tid, "today": today})
+        today_row = r2.fetchone()
+        today_receipts = float(today_row[0] or 0)
+        today_payments = float(today_row[1] or 0)
 
-    # حركات اليوم
-    today = date.today().isoformat()
-    r2 = await db.execute(text("""
-        SELECT COALESCE(SUM(amount),0) AS total
-        FROM tr_cash_transactions
-        WHERE tenant_id=:tid AND tx_date=:today AND tx_type='RV' AND status='posted'
-    """), {"tid": tid, "today": today})
-    today_receipts = float(r2.scalar() or 0)
+        # 3. الشيكات المستحقة (7 أيام)
+        r3 = await db.execute(text("""
+            SELECT COUNT(*) AS cnt, COALESCE(SUM(amount),0) AS total
+            FROM tr_checks
+            WHERE tenant_id=:tid AND status='issued'
+              AND due_date IS NOT NULL
+              AND due_date BETWEEN CURRENT_DATE AND CURRENT_DATE+7
+        """), {"tid": tid})
+        ck = r3.fetchone()
+        due_checks = {"count": int(ck[0] or 0), "total": float(ck[1] or 0)}
 
-    r3 = await db.execute(text("""
-        SELECT COALESCE(SUM(amount),0) AS total
-        FROM tr_cash_transactions
-        WHERE tenant_id=:tid AND tx_date=:today AND tx_type='PV' AND status='posted'
-    """), {"tid": tid, "today": today})
-    today_payments = float(r3.scalar() or 0)
+        # 4. تدفقات آخر 30 يوم
+        r4 = await db.execute(text("""
+            SELECT tx_date::text AS dt,
+                   SUM(CASE WHEN tx_type='RV' THEN amount ELSE 0 END) AS receipts,
+                   SUM(CASE WHEN tx_type='PV' THEN amount ELSE 0 END) AS payments
+            FROM tr_cash_transactions
+            WHERE tenant_id=:tid AND status='posted'
+              AND tx_date >= CURRENT_DATE - 29
+            GROUP BY tx_date ORDER BY tx_date
+        """), {"tid": tid})
+        cash_flow_chart = [{"date": row[0], "receipts": float(row[1] or 0), "payments": float(row[2] or 0)}
+                           for row in r4.fetchall()]
 
-    # الشيكات المستحقة (خلال 7 أيام)
-    r4 = await db.execute(text("""
-        SELECT COUNT(*), COALESCE(SUM(amount),0)
-        FROM tr_checks
-        WHERE tenant_id=:tid AND status='issued'
-          AND due_date BETWEEN CURRENT_DATE AND CURRENT_DATE+7
-    """), {"tid": tid})
-    ck = r4.fetchone()
-    due_checks = {"count": ck[0], "total": float(ck[1])}
+        # 5. KPI counts
+        r5 = await db.execute(text("""
+            SELECT
+              (SELECT COUNT(*) FROM tr_bank_accounts       WHERE tenant_id=:tid AND account_type='bank'    AND is_active=true) AS banks,
+              (SELECT COUNT(*) FROM tr_bank_accounts       WHERE tenant_id=:tid AND account_type='cash_fund' AND is_active=true) AS funds,
+              (SELECT COUNT(*) FROM tr_petty_cash_funds    WHERE tenant_id=:tid AND is_active=true)             AS petty_funds,
+              (SELECT COUNT(*) FROM tr_petty_cash_expenses WHERE tenant_id=:tid AND status='draft')             AS pending_expenses,
+              (SELECT COALESCE(SUM(COALESCE(total_amount,0)),0) FROM tr_petty_cash_expenses WHERE tenant_id=:tid AND status='draft') AS pending_amount,
+              (SELECT COUNT(*) FROM tr_cash_transactions   WHERE tenant_id=:tid AND status='draft')             AS pending_vouchers,
+              (SELECT COUNT(*) FROM tr_bank_transactions   WHERE tenant_id=:tid AND status='draft')             AS pending_bank_tx
+        """), {"tid": tid})
+        kpi = r5.mappings().fetchone() or {}
 
-    # عهد تحتاج تعبئة (بدون replenish_threshold)
-    r5 = await db.execute(text("""
-        SELECT COUNT(*) FROM tr_petty_cash_funds
-        WHERE tenant_id=:tid AND is_active=true
-    """), {"tid": tid})
-    need_replenish = int(r5.scalar() or 0)
+        return ok(data={
+            "kpis": {
+                "total_balance":     total_bank + total_cash,
+                "bank_balance":      total_bank,
+                "cash_balance":      total_cash,
+                "bank_count":        int(kpi.get("banks")         or 0),
+                "fund_count":        int(kpi.get("funds")         or 0),
+                "petty_fund_count":  int(kpi.get("petty_funds")   or 0),
+                "today_receipts":    today_receipts,
+                "today_payments":    today_payments,
+                "pending_vouchers":  int(kpi.get("pending_vouchers") or 0),
+                "pending_bank_tx":   int(kpi.get("pending_bank_tx")  or 0),
+                "pending_expenses":  int(kpi.get("pending_expenses") or 0),
+                "pending_expense_amount": float(kpi.get("pending_amount") or 0),
+                "need_replenish":    0,
+            },
+            "accounts":        accounts,
+            "alerts":          alerts,
+            "due_checks":      due_checks,
+            "cash_flow_chart": cash_flow_chart,
+            "reconciliation": {
+                "total_posted":0,"reconciled":0,"unreconciled":0,
+                "reconciled_amount":0.0,"unreconciled_amount":0.0,
+            },
+        })
 
-    # تدفقات آخر 30 يوم
-    r6 = await db.execute(text("""
-        SELECT tx_date::text, SUM(CASE WHEN tx_type='RV' THEN amount ELSE 0 END) AS receipts,
-               SUM(CASE WHEN tx_type='PV' THEN amount ELSE 0 END) AS payments
-        FROM tr_cash_transactions
-        WHERE tenant_id=:tid AND status='posted'
-          AND tx_date >= CURRENT_DATE - 29
-        GROUP BY tx_date ORDER BY tx_date
-    """), {"tid": tid})
-    cash_flow_chart = [{"date": row[0], "receipts": float(row[1]), "payments": float(row[2])}
-                       for row in r6.fetchall()]
-
-    # أعداد للـ KPI
-    r7 = await db.execute(text("""
-        SELECT
-          (SELECT COUNT(*) FROM tr_bank_accounts WHERE tenant_id=:tid AND account_type='bank' AND is_active=true) AS banks,
-          (SELECT COUNT(*) FROM tr_bank_accounts WHERE tenant_id=:tid AND account_type='cash_fund' AND is_active=true) AS funds,
-          (SELECT COUNT(*) FROM tr_petty_cash_funds WHERE tenant_id=:tid AND is_active=true) AS petty_funds,
-          (SELECT COUNT(*) FROM tr_petty_cash_expenses WHERE tenant_id=:tid AND status='draft') AS pending_expenses,
-          (SELECT COALESCE(SUM(total_amount),0) FROM tr_petty_cash_expenses WHERE tenant_id=:tid AND status='draft') AS pending_amount,
-          (SELECT COUNT(*) FROM tr_cash_transactions WHERE tenant_id=:tid AND status='draft') AS pending_vouchers,
-          (SELECT COUNT(*) FROM tr_bank_transactions WHERE tenant_id=:tid AND status='draft') AS pending_bank_tx
-    """), {"tid": tid})
-    kpi_row = r7.mappings().fetchone()
-
-    # ── إحصائيات التسوية البنكية (يدوية - من الـ frontend) ──
-    # is_reconciled يُحفظ client-side فقط حالياً
-    reconciliation_stats = {
-        "total_posted":        0,
-        "reconciled":          0,
-        "unreconciled":        0,
-        "reconciled_amount":   0.0,
-        "unreconciled_amount": 0.0,
-        "note": "التسوية يدوية من صفحة حركات البنك",
-    }
-
-
-    return ok(data={
-        "kpis": {
-            "total_balance":    total_bank + total_cash,
-            "bank_balance":     total_bank,
-            "cash_balance":     total_cash,
-            "bank_count":       kpi_row["banks"],
-            "fund_count":       kpi_row["funds"],
-            "petty_fund_count": kpi_row["petty_funds"],
-            "today_receipts":   today_receipts,
-            "today_payments":   today_payments,
-            "pending_vouchers": kpi_row["pending_vouchers"],
-            "pending_bank_tx":  kpi_row["pending_bank_tx"],
-            "pending_expenses": kpi_row["pending_expenses"],
-            "pending_expense_amount": float(kpi_row["pending_amount"]),
-            "need_replenish":   need_replenish,
-        },
-        "accounts":        accounts,
-        "alerts":          alerts,
-        "due_checks":      due_checks,
-        "cash_flow_chart": cash_flow_chart,
-        "reconciliation":  reconciliation_stats,
-    })
+    except Exception as e:
+        import traceback
+        print(f"[Dashboard ERROR] {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"خطأ في لوحة التحكم: {str(e)}")
 
 
 @router.get("/reports/cash-forecast")
