@@ -2461,47 +2461,57 @@ async def account_statement(
     if date_to:   where.append("tx_date<=:dt"); params["dt"] = date_to
     w = " AND ".join(where)
 
-    # سندات نقدية
-    r2 = await db.execute(text(f"""
-        SELECT serial, tx_type, tx_date, description, reference,
-               party_name AS party, amount, 0 AS vat_amount,
-               CASE WHEN tx_type='RV' THEN amount ELSE 0 END AS debit,
-               CASE WHEN tx_type='PV' THEN amount ELSE 0 END AS credit,
-               'cash' AS source
-        FROM tr_cash_transactions WHERE {w} ORDER BY tx_date, serial
-    """), params)
-    cash_rows = [dict(r._mapping) for r in r2.fetchall()]
+    try:
+        # سندات نقدية — COALESCE لكل عمود قد يكون مفقوداً
+        r2 = await db.execute(text(f"""
+            SELECT serial, tx_type, tx_date::text,
+                   COALESCE(description,'') AS description,
+                   COALESCE(reference,'')   AS reference,
+                   COALESCE(party_name,'')  AS party,
+                   COALESCE(amount,0)       AS amount,
+                   CASE WHEN tx_type='RV' THEN COALESCE(amount,0) ELSE 0 END AS debit,
+                   CASE WHEN tx_type='PV' THEN COALESCE(amount,0) ELSE 0 END AS credit,
+                   'cash' AS source
+            FROM tr_cash_transactions WHERE {w} ORDER BY tx_date, serial
+        """), params)
+        cash_rows = [dict(r._mapping) for r in r2.fetchall()]
 
-    # معاملات بنكية
-    r3 = await db.execute(text(f"""
-        SELECT serial, tx_type, tx_date, description, reference,
-               COALESCE(beneficiary_name, party_name, '') AS party,
-               amount, COALESCE(vat_amount,0) AS vat_amount,
-               CASE WHEN tx_type='BR' THEN amount ELSE 0 END AS debit,
-               CASE WHEN tx_type IN ('BP','BT') THEN amount ELSE 0 END AS credit,
-               'bank' AS source
-        FROM tr_bank_transactions WHERE {w} ORDER BY tx_date, serial
-    """), params)
-    bank_rows = [dict(r._mapping) for r in r3.fetchall()]
+        # معاملات بنكية
+        r3 = await db.execute(text(f"""
+            SELECT serial, tx_type, tx_date::text,
+                   COALESCE(description,'') AS description,
+                   COALESCE(reference,'')   AS reference,
+                   COALESCE(beneficiary_name, party_name, '') AS party,
+                   COALESCE(amount,0) AS amount,
+                   CASE WHEN tx_type='BR' THEN COALESCE(amount,0) ELSE 0 END AS debit,
+                   CASE WHEN tx_type IN ('BP','BT') THEN COALESCE(amount,0) ELSE 0 END AS credit,
+                   'bank' AS source
+            FROM tr_bank_transactions WHERE {w} ORDER BY tx_date, serial
+        """), params)
+        bank_rows = [dict(r._mapping) for r in r3.fetchall()]
 
-    all_rows = sorted(cash_rows + bank_rows, key=lambda x: (str(x["tx_date"]), str(x["serial"])))
-    opening = float(account.get("opening_balance") or 0)
-    balance = opening
-    for row in all_rows:
-        row["debit"]  = float(row["debit"] or 0)
-        row["credit"] = float(row["credit"] or 0)
-        row["amount"] = float(row["amount"] or 0)
-        balance += row["debit"] - row["credit"]
-        row["running_balance"] = round(balance, 3)
+        all_rows = sorted(cash_rows + bank_rows,
+                         key=lambda x: (str(x.get("tx_date","") or ""), str(x.get("serial","") or "")))
+        opening = float(account.get("opening_balance") or 0)
+        balance = opening
+        for row in all_rows:
+            row["debit"]  = float(row.get("debit")  or 0)
+            row["credit"] = float(row.get("credit") or 0)
+            row["amount"] = float(row.get("amount") or 0)
+            balance += row["debit"] - row["credit"]
+            row["running_balance"] = round(balance, 3)
 
-    return ok(data={
-        "account":  dict(account),
-        "rows":     all_rows,
-        "opening":  opening,
-        "closing":  round(balance, 3),
-        "total_debit":  round(sum(r["debit"]  for r in all_rows), 3),
-        "total_credit": round(sum(r["credit"] for r in all_rows), 3),
-    })
+        return ok(data={
+            "account":      dict(account),
+            "rows":         all_rows,
+            "opening":      opening,
+            "closing":      round(balance, 3),
+            "total_debit":  round(sum(r["debit"]  for r in all_rows), 3),
+            "total_credit": round(sum(r["credit"] for r in all_rows), 3),
+        })
+    except Exception as e:
+        import traceback; print(f"[account-statement] {traceback.format_exc()}")
+        raise HTTPException(500, f"خطأ في كشف الحساب: {str(e)}")
 
 
 @router.get("/reports/monthly-cash-flow")
@@ -2514,52 +2524,58 @@ async def monthly_cash_flow(
 ):
     """التدفق النقدي الشهري"""
     tid = str(user.tenant_id)
-    ba_filter = "AND bank_account_id=:ba_id" if bank_account_id else ""
-    params: dict = {"tid": tid, "year": year}
-    if bank_account_id: params["ba_id"] = bank_account_id
-    month_filter = "AND EXTRACT(MONTH FROM tx_date)=:month" if month else ""
-    if month: params["month"] = month
+    try:
+        ba_filter    = "AND bank_account_id=:ba_id" if bank_account_id else ""
+        month_filter = "AND EXTRACT(MONTH FROM tx_date)=:month" if month else ""
+        params: dict = {"tid": tid, "year": year}
+        if bank_account_id: params["ba_id"] = bank_account_id
+        if month:           params["month"] = month
 
-    r = await db.execute(text(f"""
-        SELECT
-            EXTRACT(MONTH FROM tx_date) AS month,
-            TO_CHAR(tx_date,'YYYY-MM') AS period,
-            SUM(CASE WHEN tx_type IN ('RV','BR') THEN amount ELSE 0 END) AS inflow,
-            SUM(CASE WHEN tx_type IN ('PV','BP','BT') THEN amount ELSE 0 END) AS outflow
-        FROM (
-            SELECT tx_type, tx_date, amount, bank_account_id
-            FROM tr_cash_transactions
-            WHERE tenant_id=:tid AND status='posted'
-              AND EXTRACT(YEAR FROM tx_date)=:year
-              {ba_filter} {month_filter}
-            UNION ALL
-            SELECT tx_type, tx_date, amount, bank_account_id
-            FROM tr_bank_transactions
-            WHERE tenant_id=:tid AND status='posted'
-              AND EXTRACT(YEAR FROM tx_date)=:year
-              {ba_filter} {month_filter}
-        ) t
-        GROUP BY EXTRACT(MONTH FROM tx_date), TO_CHAR(tx_date,'YYYY-MM')
-        ORDER BY period
-    """), params)
-    rows = []
-    for row in r.mappings().fetchall():
-        inflow  = float(row["inflow"]  or 0)
-        outflow = float(row["outflow"] or 0)
-        rows.append({
-            "month":   int(row["month"]),
-            "period":  row["period"],
-            "inflow":  round(inflow, 3),
-            "outflow": round(outflow, 3),
-            "net":     round(inflow - outflow, 3),
+        r = await db.execute(text(f"""
+            SELECT
+                EXTRACT(MONTH FROM tx_date)::int AS month,
+                TO_CHAR(tx_date,'YYYY-MM')       AS period,
+                COALESCE(SUM(CASE WHEN tx_type IN ('RV','BR') THEN amount ELSE 0 END),0) AS inflow,
+                COALESCE(SUM(CASE WHEN tx_type IN ('PV','BP','BT') THEN amount ELSE 0 END),0) AS outflow
+            FROM (
+                SELECT tx_type, tx_date, COALESCE(amount,0) AS amount, bank_account_id
+                FROM tr_cash_transactions
+                WHERE tenant_id=:tid AND status='posted'
+                  AND EXTRACT(YEAR FROM tx_date)=:year
+                  {ba_filter} {month_filter}
+                UNION ALL
+                SELECT tx_type, tx_date, COALESCE(amount,0) AS amount, bank_account_id
+                FROM tr_bank_transactions
+                WHERE tenant_id=:tid AND status='posted'
+                  AND EXTRACT(YEAR FROM tx_date)=:year
+                  {ba_filter} {month_filter}
+            ) t
+            GROUP BY EXTRACT(MONTH FROM tx_date), TO_CHAR(tx_date,'YYYY-MM')
+            ORDER BY period
+        """), params)
+
+        rows = []
+        for row in r.mappings().fetchall():
+            inflow  = float(row.get("inflow")  or 0)
+            outflow = float(row.get("outflow") or 0)
+            rows.append({
+                "month":   int(row.get("month") or 0),
+                "period":  row.get("period",""),
+                "inflow":  round(inflow, 3),
+                "outflow": round(outflow, 3),
+                "net":     round(inflow - outflow, 3),
+            })
+
+        return ok(data={
+            "rows":          rows,
+            "total_inflow":  round(sum(r["inflow"]  for r in rows), 3),
+            "total_outflow": round(sum(r["outflow"] for r in rows), 3),
+            "net":           round(sum(r["net"]     for r in rows), 3),
+            "year":          year,
         })
-    return ok(data={
-        "rows":         rows,
-        "total_inflow":  round(sum(r["inflow"]  for r in rows), 3),
-        "total_outflow": round(sum(r["outflow"] for r in rows), 3),
-        "net":           round(sum(r["net"]     for r in rows), 3),
-    })
-
+    except Exception as e:
+        import traceback; print(f"[monthly-cash-flow] {traceback.format_exc()}")
+        raise HTTPException(500, f"خطأ في التدفق الشهري: {str(e)}")
 
 @router.get("/reports/inactive-accounts")
 async def inactive_accounts(
@@ -2635,7 +2651,7 @@ async def list_bank_fees(
     rows = [dict(r._mapping) for r in r.fetchall()]
     for row in rows:
         if row.get("amount"): row["amount"] = float(row["amount"])
-    return ok(data={"items": rows, "total": len(rows)})
+    return ok(data={"items": rows, "total": len(rows), "total_amount": sum(float(r.get("amount") or 0) for r in rows)})
 
 
 @router.post("/bank-fees")
