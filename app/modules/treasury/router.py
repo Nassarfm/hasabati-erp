@@ -151,7 +151,7 @@ async def dashboard(
         alerts = [a for a in accounts if a["low_balance_alert"]>0 and a["current_balance"]<=a["low_balance_alert"]]
 
         # 2. حركات اليوم
-        today = date.today().isoformat()
+        today = date.today()   # asyncpg يحتاج date object وليس string
         r2 = await db.execute(text("""
             SELECT COALESCE(SUM(CASE WHEN tx_type='RV' THEN amount ELSE 0 END),0) AS receipts,
                    COALESCE(SUM(CASE WHEN tx_type='PV' THEN amount ELSE 0 END),0) AS payments
@@ -2721,6 +2721,84 @@ async def inactive_accounts(
             "days_inactive":   None,
         })
     return ok(data=rows, message=f"{len(rows)} حساب غير نشط")
+
+
+@router.get("/reports/balance-history")
+async def balance_history(
+    months: int = Query(default=6),
+    bank_account_id: Optional[str] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """تاريخ الأرصدة الشهرية للحسابات"""
+    tid = str(user.tenant_id)
+    try:
+        ba_filter = "AND (ct.bank_account_id=:ba_id OR bt.bank_account_id=:ba_id)" if bank_account_id else ""
+        params: dict = {"tid": tid, "months": months}
+        if bank_account_id: params["ba_id"] = bank_account_id
+
+        r = await db.execute(text(f"""
+            WITH monthly AS (
+                SELECT
+                    ba.id,
+                    ba.account_name,
+                    ba.account_type,
+                    ba.current_balance,
+                    TO_CHAR(DATE_TRUNC('month', gs.m), 'YYYY-MM') AS period,
+                    COALESCE((
+                        SELECT SUM(CASE WHEN ct2.tx_type='RV' THEN ct2.amount ELSE -ct2.amount END)
+                        FROM tr_cash_transactions ct2
+                        WHERE ct2.tenant_id=:tid AND ct2.bank_account_id=ba.id
+                          AND ct2.status='posted'
+                          AND TO_CHAR(DATE_TRUNC('month', ct2.tx_date),'YYYY-MM') = TO_CHAR(DATE_TRUNC('month', gs.m),'YYYY-MM')
+                    ),0) +
+                    COALESCE((
+                        SELECT SUM(CASE WHEN bt2.tx_type='BR' THEN bt2.amount ELSE -bt2.amount END)
+                        FROM tr_bank_transactions bt2
+                        WHERE bt2.tenant_id=:tid AND bt2.bank_account_id=ba.id
+                          AND bt2.status='posted'
+                          AND TO_CHAR(DATE_TRUNC('month', bt2.tx_date),'YYYY-MM') = TO_CHAR(DATE_TRUNC('month', gs.m),'YYYY-MM')
+                    ),0) AS net_change
+                FROM tr_bank_accounts ba
+                CROSS JOIN (
+                    SELECT generate_series(
+                        DATE_TRUNC('month', NOW()) - ((:months - 1) * INTERVAL '1 month'),
+                        DATE_TRUNC('month', NOW()),
+                        INTERVAL '1 month'
+                    ) AS m
+                ) gs
+                WHERE ba.tenant_id=:tid AND ba.is_active=true
+            )
+            SELECT id, account_name, account_type,
+                   period, COALESCE(net_change,0) AS net_change,
+                   current_balance AS balance
+            FROM monthly
+            ORDER BY id, period
+        """), params)
+
+        rows_raw = r.mappings().fetchall()
+        # تجميع حسب account_id
+        accounts_map: dict = {}
+        for row in rows_raw:
+            aid = str(row["id"])
+            if aid not in accounts_map:
+                accounts_map[aid] = {
+                    "id": aid,
+                    "account_name": row["account_name"],
+                    "account_type": row["account_type"],
+                    "current_balance": float(row["balance"] or 0),
+                    "history": [],
+                }
+            accounts_map[aid]["history"].append({
+                "period":     row["period"],
+                "net_change": float(row["net_change"] or 0),
+                "balance":    float(row["balance"] or 0),
+            })
+
+        return ok(data=list(accounts_map.values()))
+    except Exception as e:
+        import traceback; print(f"[balance-history] {traceback.format_exc()}")
+        raise HTTPException(500, f"خطأ في تاريخ الأرصدة: {str(e)}")
 
 
 # ── المصاريف البنكية ──────────────────────────────────────
