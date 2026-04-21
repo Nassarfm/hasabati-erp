@@ -3035,12 +3035,23 @@ async def save_smart_import_settings(
     }
     for key, val in data.items():
         if key not in allowed: continue
-        await db.execute(text("""
-            INSERT INTO company_settings (tenant_id, setting_key, setting_value)
-            VALUES (:tid, :key, :val)
-            ON CONFLICT (tenant_id, setting_key)
-            DO UPDATE SET setting_value=:val, updated_at=NOW()
-        """), {"tid": tid, "key": key, "val": str(val)})
+        # تحقق من وجود الإعداد أولاً
+        r_check = await db.execute(text("""
+            SELECT id FROM company_settings
+            WHERE tenant_id=:tid AND setting_key=:key
+        """), {"tid": tid, "key": key})
+        existing = r_check.fetchone()
+        if existing:
+            await db.execute(text("""
+                UPDATE company_settings
+                SET setting_value=:val
+                WHERE tenant_id=:tid AND setting_key=:key
+            """), {"tid": tid, "key": key, "val": str(val)})
+        else:
+            await db.execute(text("""
+                INSERT INTO company_settings (tenant_id, setting_key, setting_value)
+                VALUES (:tid, :key, :val)
+            """), {"tid": tid, "key": key, "val": str(val)})
     await db.commit()
     return ok(data={}, message="✅ تم حفظ الإعدادات")
 
