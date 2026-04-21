@@ -1610,13 +1610,18 @@ async def cash_position_report(
     r = await db.execute(text("""
         SELECT account_code, account_name, account_type,
                currency_code, current_balance, low_balance_alert,
-               CASE WHEN current_balance <= low_balance_alert THEN true ELSE false END AS is_low
+               CASE WHEN low_balance_alert IS NOT NULL AND current_balance <= low_balance_alert THEN true ELSE false END AS is_low
         FROM tr_bank_accounts
         WHERE tenant_id=:tid AND is_active=true
         ORDER BY account_type, account_name
     """), {"tid": tid})
-    accounts = [dict(row._mapping) for row in r.fetchall()]
-    total = sum(float(a["current_balance"]) for a in accounts)
+    accounts = []
+    for row in r.fetchall():
+        a = dict(row._mapping)
+        a["current_balance"] = float(a.get("current_balance") or 0)
+        a["low_balance_alert"] = float(a.get("low_balance_alert") or 0)
+        accounts.append(a)
+    total = sum(a["current_balance"] for a in accounts)
     return ok(data={"total": total, "accounts": accounts, "as_of": date.today().isoformat()})
 
 
@@ -1653,6 +1658,7 @@ async def check_aging(
             ba.account_name AS bank_account_name,
             (CURRENT_DATE - ch.due_date) AS days_overdue,
             CASE
+                WHEN ch.due_date IS NULL THEN 'unknown'
                 WHEN ch.due_date >= CURRENT_DATE THEN 'upcoming'
                 WHEN (CURRENT_DATE - ch.due_date) <= 30 THEN '0-30'
                 WHEN (CURRENT_DATE - ch.due_date) <= 60 THEN '31-60'
@@ -2281,13 +2287,14 @@ async def get_unlinked_gl_entries(
         WHERE je.tenant_id = :tid
           AND je.status = 'posted'
           AND jl.account_code IN ({codes_placeholder})
-          AND je.source_module != 'treasury'
-          AND NOT EXISTS (
-              SELECT 1 FROM tr_bank_transactions bt
-              WHERE bt.tenant_id = :tid AND bt.je_id = je.id
-              UNION ALL
-              SELECT 1 FROM tr_cash_transactions ct
-              WHERE ct.tenant_id = :tid AND ct.je_id = je.id
+          AND COALESCE(je.source_module, '') != 'treasury'
+          AND je.id NOT IN (
+              SELECT je_id FROM tr_bank_transactions
+              WHERE tenant_id = :tid AND je_id IS NOT NULL
+          )
+          AND je.id NOT IN (
+              SELECT je_id FROM tr_cash_transactions
+              WHERE tenant_id = :tid AND je_id IS NOT NULL
           )
           {where_date}
         ORDER BY je.entry_date DESC, je.serial DESC
@@ -2602,7 +2609,7 @@ async def inactive_accounts(
             "account_name":    row["account_name"],
             "account_type":    row["account_type"],
             "currency_code":   row["currency_code"],
-            "current_balance": float(row["current_balance"] or 0),
+            "current_balance": float(row["current_balance"] if row["current_balance"] is not None else 0),
             "is_active":       row["is_active"],
             "last_activity":   str(row["last_activity"]) if row["last_activity"] and str(row["last_activity"]) != "2000-01-01" else None,
             "days_inactive":   None,
