@@ -442,3 +442,124 @@ async def open_balances(
     except Exception as e:
         import traceback; print(f"[open-balances] {traceback.format_exc()}")
         raise HTTPException(500, f"خطأ في تقرير الأرصدة: {str(e)}")
+
+
+# ══════════════════════════════════════════════════════════
+# PARTY ROLE DEFINITIONS — أدوار المتعاملين
+# ══════════════════════════════════════════════════════════
+
+@router.get("/role-definitions")
+async def list_role_definitions(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """قائمة أدوار المتعاملين — النظامية والمخصصة"""
+    tid = str(user.tenant_id)
+    try:
+        r = await db.execute(text("""
+            SELECT id, role_code, role_name_ar, role_name_en,
+                   is_system, is_active, sort_order
+            FROM party_role_definitions
+            WHERE tenant_id = :tid AND is_active = true
+            ORDER BY sort_order, role_name_ar
+        """), {"tid": tid})
+        rows = [dict(row) for row in r.mappings().fetchall()]
+        return ok(data=rows)
+    except Exception:
+        # fallback to defaults if table doesn't exist yet
+        return ok(data=[
+            {"role_code":"employee_loan",    "role_name_ar":"سلفة موظف",       "role_name_en":"Employee Loan",     "is_system":True},
+            {"role_code":"petty_cash_keeper","role_name_ar":"أمين عهدة نثرية", "role_name_en":"Petty Cash Keeper", "is_system":True},
+            {"role_code":"fund_keeper",      "role_name_ar":"أمين صندوق",       "role_name_en":"Fund Keeper",       "is_system":True},
+            {"role_code":"customer",         "role_name_ar":"عميل",             "role_name_en":"Customer",          "is_system":True},
+            {"role_code":"vendor",           "role_name_ar":"مورد",             "role_name_en":"Vendor",            "is_system":True},
+            {"role_code":"shareholder",      "role_name_ar":"مساهم",            "role_name_en":"Shareholder",       "is_system":False},
+            {"role_code":"contractor",       "role_name_ar":"مقاول / متعاقد",   "role_name_en":"Contractor",        "is_system":False},
+            {"role_code":"government",       "role_name_ar":"جهة حكومية",       "role_name_en":"Government Entity", "is_system":False},
+            {"role_code":"other",            "role_name_ar":"أخرى",             "role_name_en":"Other",             "is_system":True},
+        ])
+
+
+@router.post("/role-definitions", status_code=201)
+async def create_role_definition(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """إضافة دور مخصص جديد"""
+    tid = str(user.tenant_id)
+    if not data.get("role_name_ar"):
+        raise HTTPException(400, "اسم الدور بالعربية مطلوب")
+    role_code = (data.get("role_code") or
+                 data["role_name_ar"].strip().replace(" ","_").lower())
+    rid = str(uuid.uuid4())
+    try:
+        await db.execute(text("""
+            INSERT INTO party_role_definitions
+              (id, tenant_id, role_code, role_name_ar, role_name_en,
+               is_system, is_active, sort_order)
+            VALUES (:id,:tid,:code,:name_ar,:name_en,FALSE,TRUE,:sort)
+        """), {"id":rid,"tid":tid,"code":role_code,
+               "name_ar":data["role_name_ar"].strip(),
+               "name_en":data.get("role_name_en") or None,
+               "sort":data.get("sort_order",50)})
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ: {str(e)}")
+    return created(data={"id":rid,"role_code":role_code}, message="تم إضافة الدور ✅")
+
+
+@router.put("/role-definitions/{role_id}")
+async def update_role_definition(
+    role_id: uuid.UUID,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """تعديل دور مخصص"""
+    tid = str(user.tenant_id)
+    ALLOWED = {"role_name_ar","role_name_en","is_active","sort_order"}
+    safe = {k:v for k,v in data.items() if k in ALLOWED}
+    if not safe:
+        raise HTTPException(400, "لا توجد بيانات للتعديل")
+    set_clause = ", ".join(f"{k}=:{k}" for k in safe)
+    safe.update({"id":str(role_id),"tid":tid})
+    try:
+        r = await db.execute(text(
+            f"UPDATE party_role_definitions SET {set_clause} "
+            "WHERE id=:id AND tenant_id=:tid AND is_system=FALSE"
+        ), safe)
+        if r.rowcount == 0:
+            raise HTTPException(404, "الدور غير موجود أو هو دور نظامي محمي")
+        await db.commit()
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ: {str(e)}")
+    return ok(message="تم التعديل ✅")
+
+
+@router.delete("/role-definitions/{role_id}")
+async def delete_role_definition(
+    role_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """حذف دور مخصص (غير النظامية فقط)"""
+    tid = str(user.tenant_id)
+    try:
+        r = await db.execute(text(
+            "DELETE FROM party_role_definitions "
+            "WHERE id=:id AND tenant_id=:tid AND is_system=FALSE"
+        ), {"id":str(role_id),"tid":tid})
+        if r.rowcount == 0:
+            raise HTTPException(404, "الدور غير موجود أو هو دور نظامي محمي")
+        await db.commit()
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ: {str(e)}")
+    return ok(message="تم الحذف ✅")
