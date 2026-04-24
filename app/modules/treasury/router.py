@@ -2929,17 +2929,23 @@ async def list_recurring(
     user: CurrentUser = Depends(get_current_user),
 ):
     tid = str(user.tenant_id)
-    r = await db.execute(text("""
-        SELECT rt.*, ba.account_name AS bank_account_name
-        FROM tr_recurring_transactions rt
-        LEFT JOIN tr_bank_accounts ba ON ba.id=rt.bank_account_id
-        WHERE rt.tenant_id=:tid
-        ORDER BY next_run_date, rt.created_at DESC
-    """), {"tid": tid})
-    rows = [dict(r._mapping) for r in r.fetchall()]
-    for row in rows:
-        if row.get("amount"): row["amount"] = float(row["amount"])
-    return ok(data={"items": rows, "total": len(rows)})
+    try:
+        r = await db.execute(text("""
+            SELECT rt.*, ba.account_name AS bank_account_name
+            FROM tr_recurring_transactions rt
+            LEFT JOIN tr_bank_accounts ba ON ba.id=rt.bank_account_id
+            WHERE rt.tenant_id=:tid
+            ORDER BY next_run_date, rt.created_at DESC
+        """), {"tid": tid})
+        rows = [dict(r._mapping) for r in r.fetchall()]
+        for row in rows:
+            if row.get("amount"): row["amount"] = float(row["amount"])
+        return ok(data={"items": rows, "total": len(rows)})
+    except Exception as e:
+        import traceback; print(f"[recurring-transactions] {traceback.format_exc()}")
+        # الجدول قد لا يكون موجوداً بعد — نُرجع قائمة فارغة
+        return ok(data={"items": [], "total": 0,
+                        "message": "جدول المعاملات المتكررة غير موجود — شغّل migration الخزينة"})
 
 
 @router.post("/recurring-transactions")
