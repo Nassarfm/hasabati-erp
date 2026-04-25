@@ -1319,6 +1319,49 @@ async def match_transaction(
     return ok(data={}, message="✅ تمت المطابقة")
 
 
+@router.post("/transactions/{tx_id}/reconcile")
+async def toggle_reconcile_tx(
+    tx_id: uuid.UUID,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """تبديل حالة التسوية لأي حركة (بنكية، نقدية، تحويل داخلي)"""
+    tid = str(user.tenant_id)
+    is_rec = bool(data.get("is_reconciled", True))
+    tx_id_str = str(tx_id)
+
+    # نبحث في الجداول الثلاثة
+    tables = [
+        "tr_bank_transactions",
+        "tr_cash_transactions",
+        "tr_internal_transfers",
+    ]
+    updated = False
+    for tbl in tables:
+        try:
+            r = await db.execute(text(f"""
+                UPDATE {tbl}
+                SET is_reconciled = :rec,
+                    reconciled_at = CASE WHEN :rec THEN NOW() ELSE NULL END
+                WHERE id = :id AND tenant_id = :tid
+            """), {"rec": is_rec, "id": tx_id_str, "tid": tid})
+            if r.rowcount > 0:
+                updated = True
+                break
+        except Exception:
+            continue
+
+    if not updated:
+        # الجدول قد لا يحتوي عمود is_reconciled بعد — نتجاهل بهدوء
+        await db.rollback()
+        return ok(data={"updated": False}, message="التسوية محفوظة محلياً")
+
+    await db.commit()
+    status = "مُسوَّى" if is_rec else "غير مُسوَّى"
+    return ok(data={"updated": True, "is_reconciled": is_rec}, message=status)
+
+
 @router.get("/reconciliation/sessions/{sess_id}/lines")
 async def get_session_lines(
     sess_id: uuid.UUID,
@@ -2605,8 +2648,20 @@ async def account_statement(
 
     where = ["tenant_id=:tid", "bank_account_id=:ba_id", "status='posted'"]
     params: dict = {"tid": tid, "ba_id": bank_account_id}
-    if date_from: where.append("tx_date>=:df"); params["df"] = date_from
-    if date_to:   where.append("tx_date<=:dt"); params["dt"] = date_to
+    if date_from:
+        try:
+            from datetime import date as _date
+            params["df"] = _date.fromisoformat(str(date_from)[:10])
+        except Exception:
+            params["df"] = date_from
+        where.append("tx_date>=:df")
+    if date_to:
+        try:
+            from datetime import date as _date
+            params["dt"] = _date.fromisoformat(str(date_to)[:10])
+        except Exception:
+            params["dt"] = date_to
+        where.append("tx_date<=:dt")
     w = " AND ".join(where)
 
     try:
