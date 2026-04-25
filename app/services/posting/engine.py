@@ -329,9 +329,10 @@ class PostingEngine:
                 await self.db.flush()  # نحتاج flush هنا للحصول على je_line.id
 
                 # ── Party (المتعامل) — Raw SQL لتجنب المساس بـ models.py ──
-                # يُكتب فقط إذا كان party_id موجوداً في السطر
+                # يُكتب إذا كان party_id موجوداً في السطر (من الـ schema أو PostingLine)
                 _party_id   = getattr(line, "party_id",   None)
                 _party_role = getattr(line, "party_role", None)
+                _party_name = getattr(line, "party_name", None)
                 if _party_id:
                     try:
                         from sqlalchemy import text as _txt
@@ -342,11 +343,10 @@ class PostingEngine:
                             WHERE id = :line_id
                         """), {
                             "pid":     str(_party_id),
-                            "prole":   _party_role or "unknown",
+                            "prole":   _party_role or "other",
                             "line_id": str(je_line.id),
                         })
                     except Exception as _pe:
-                        # إذا لم يكن العمود موجوداً بعد — لا نوقف الترحيل
                         logger.warning("party_update_skipped",
                                        reason=str(_pe), line_id=str(je_line.id))
 

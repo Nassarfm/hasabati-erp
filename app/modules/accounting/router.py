@@ -220,10 +220,53 @@ async def seed_default_coa(db: AsyncSession = Depends(get_db), user: CurrentUser
 # Journal Entries
 # ══════════════════════════════════════════════════════════
 @router.post("/je", status_code=201, summary="إنشاء قيد محاسبي (draft)")
-async def create_je(data: JournalEntryCreate, svc: AccountingService = Depends(_svc)):
+async def create_je(
+    data: JournalEntryCreate,
+    db:   AsyncSession = Depends(get_db),
+    user: CurrentUser  = Depends(get_current_user),
+    svc: AccountingService = Depends(_svc),
+):
+    from sqlalchemy import text as _txt
+
     je = await svc.create_draft_je(data)
-    return created(data={"id":str(je.id),"serial":je.serial,"status":je.status,"total_debit":float(je.total_debit),"total_credit":float(je.total_credit)},
-                   message=f"تم إنشاء القيد {je.serial}")
+
+    # ── حفظ party_id لكل سطر يحتوي متعاملاً ──────────────
+    lines_with_party = [l for l in data.lines if getattr(l, "party_id", None)]
+    if lines_with_party:
+        try:
+            # جلب je_lines المُنشأة بالترتيب
+            res = await db.execute(_txt("""
+                SELECT id, line_order FROM je_lines
+                WHERE je_id = :je_id
+                ORDER BY line_order
+            """), {"je_id": str(je.id)})
+            saved_lines = res.fetchall()
+            for idx, saved in enumerate(saved_lines):
+                if idx < len(data.lines):
+                    src = data.lines[idx]
+                    _pid  = getattr(src, "party_id",   None)
+                    _role = getattr(src, "party_role",  None)
+                    if _pid:
+                        await db.execute(_txt("""
+                            UPDATE je_lines
+                            SET party_id   = :pid,
+                                party_role = :prole
+                            WHERE id = :line_id
+                        """), {
+                            "pid":     str(_pid),
+                            "prole":   _role or "other",
+                            "line_id": str(saved[0]),
+                        })
+            await db.commit()
+        except Exception as e:
+            # لا نوقف الإنشاء إذا فشل حفظ الـ party
+            import logging; logging.getLogger(__name__).warning(f"party_save_skipped: {e}")
+
+    return created(
+        data={"id":str(je.id),"serial":je.serial,"status":je.status,
+              "total_debit":float(je.total_debit),"total_credit":float(je.total_credit)},
+        message=f"تم إنشاء القيد {je.serial}"
+    )
 
 
 @router.get("/je", summary="قائمة القيود المحاسبية")
@@ -233,14 +276,18 @@ async def list_je(
     date_from:   Optional[date]    = Query(None),
     date_to:     Optional[date]    = Query(None),
     fiscal_year: Optional[int]     = Query(None),
-    search:      Optional[str]     = Query(None),   # بحث في الـ serial والبيان
-    created_by:  Optional[str]     = Query(None),   # فلتر المنشئ
-    min_amount:  Optional[Decimal] = Query(None),   # فلتر المبلغ الأدنى
-    max_amount:  Optional[Decimal] = Query(None),   # فلتر المبلغ الأقصى
+    search:      Optional[str]     = Query(None),
+    created_by:  Optional[str]     = Query(None),
+    min_amount:  Optional[Decimal] = Query(None),
+    max_amount:  Optional[Decimal] = Query(None),
     limit:       int               = Query(20, ge=1, le=1000),
     offset:      int               = Query(0, ge=0),
+    db:  AsyncSession  = Depends(get_db),
+    user: CurrentUser  = Depends(get_current_user),
     svc: AccountingService = Depends(_svc),
 ):
+    from sqlalchemy import text as _txt
+
     items, total = await svc.list_je(
         status=status,
         je_type=je_type,
@@ -250,7 +297,7 @@ async def list_je(
         offset=offset,
         limit=limit,
     )
-    # فلترة إضافية client-side للحقول غير المدعومة في الـ repository
+    # فلترة client-side
     if search:
         s = search.lower()
         items = [j for j in items if s in (j.serial or '').lower() or s in (j.description or '').lower()]
@@ -260,8 +307,45 @@ async def list_je(
         items = [j for j in items if float(j.total_debit or 0) >= float(min_amount) or float(j.total_credit or 0) >= float(min_amount)]
     if max_amount is not None:
         items = [j for j in items if float(j.total_debit or 0) <= float(max_amount) or float(j.total_credit or 0) <= float(max_amount)]
+
+    # ── جلب بيانات المتعامل الأول لكل قيد ─────────────────
+    je_ids = [str(j.id) for j in items]
+    party_map: dict = {}
+    if je_ids:
+        try:
+            res = await db.execute(_txt("""
+                SELECT DISTINCT ON (jl.je_id)
+                    jl.je_id,
+                    jl.party_id,
+                    jl.party_role,
+                    p.party_name_ar AS party_name,
+                    p.party_code
+                FROM je_lines jl
+                LEFT JOIN parties p ON p.id = jl.party_id::uuid
+                WHERE jl.je_id = ANY(:ids)
+                  AND jl.party_id IS NOT NULL
+                ORDER BY jl.je_id, jl.line_order
+            """), {"ids": je_ids})
+            for row in res.mappings().fetchall():
+                party_map[str(row["je_id"])] = {
+                    "party_id":   str(row["party_id"])   if row["party_id"]   else None,
+                    "party_name": row["party_name"] or row["party_code"] or None,
+                    "party_role": row["party_role"] or None,
+                }
+        except Exception:
+            pass  # عمود party_id قد لا يكون موجوداً في بعض البيئات
+
+    result = []
+    for j in items:
+        d = j.to_dict()
+        pinfo = party_map.get(str(j.id), {})
+        d["first_party_id"]   = pinfo.get("party_id")
+        d["first_party_name"] = pinfo.get("party_name")
+        d["first_party_role"] = pinfo.get("party_role")
+        result.append(d)
+
     return {
-        "data":        [je.to_dict() for je in items],
+        "data":        result,
         "total_count": total,
         "total":       total,
         "count":       total,
@@ -271,17 +355,91 @@ async def list_je(
 
 
 @router.get("/je/{je_id}", summary="تفاصيل قيد محاسبي")
-async def get_je(je_id: uuid.UUID, svc: AccountingService = Depends(_svc)):
-    je = await svc.get_je(je_id)
+async def get_je(
+    je_id: uuid.UUID,
+    db:  AsyncSession  = Depends(get_db),
+    user: CurrentUser  = Depends(get_current_user),
+    svc: AccountingService = Depends(_svc),
+):
+    from sqlalchemy import text as _txt
+
+    je   = await svc.get_je(je_id)
     data = je.to_dict()
-    data["lines"] = [l.to_dict() for l in je.lines]
+
+    # ── جلب party_id / party_name لكل سطر ─────────────────
+    try:
+        res = await db.execute(_txt("""
+            SELECT
+                jl.id,
+                jl.party_id,
+                jl.party_role,
+                p.party_name_ar AS party_name,
+                p.party_code
+            FROM je_lines jl
+            LEFT JOIN parties p ON p.id = jl.party_id::uuid
+            WHERE jl.je_id = :je_id
+            ORDER BY jl.line_order
+        """), {"je_id": str(je_id)})
+        party_line_map = {}
+        for row in res.mappings().fetchall():
+            party_line_map[str(row["id"])] = {
+                "party_id":   str(row["party_id"]) if row["party_id"] else None,
+                "party_name": row["party_name"] or row["party_code"] or None,
+                "party_role": row["party_role"] or None,
+            }
+    except Exception:
+        party_line_map = {}
+
+    lines = []
+    for l in je.lines:
+        ld = l.to_dict()
+        pinfo = party_line_map.get(str(l.id), {})
+        ld["party_id"]   = pinfo.get("party_id")   or getattr(l, "party_id",   None)
+        ld["party_name"] = pinfo.get("party_name") or None
+        ld["party_role"] = pinfo.get("party_role") or getattr(l, "party_role", None)
+        lines.append(ld)
+
+    data["lines"] = lines
     return ok(data=data)
 
 
 @router.put("/je/{je_id}", summary="تعديل قيد مسودة")
-async def update_je(je_id: uuid.UUID, data: JournalEntryCreate, svc: AccountingService = Depends(_svc)):
+async def update_je(
+    je_id: uuid.UUID,
+    data:  JournalEntryCreate,
+    db:    AsyncSession = Depends(get_db),
+    user:  CurrentUser  = Depends(get_current_user),
+    svc:   AccountingService = Depends(_svc),
+):
+    from sqlalchemy import text as _txt
+
     je = await svc.update_draft_je(je_id, data)
-    return ok(data={"id":str(je.id),"serial":je.serial,"status":je.status}, message=f"تم تعديل القيد {je.serial}")
+
+    # ── تحديث party_id بعد تعديل المسودة ─────────────────
+    lines_with_party = [l for l in data.lines if getattr(l, "party_id", None)]
+    if lines_with_party:
+        try:
+            res = await db.execute(_txt("""
+                SELECT id, line_order FROM je_lines
+                WHERE je_id = :je_id ORDER BY line_order
+            """), {"je_id": str(je.id)})
+            saved_lines = res.fetchall()
+            for idx, saved in enumerate(saved_lines):
+                if idx < len(data.lines):
+                    src = data.lines[idx]
+                    _pid  = getattr(src, "party_id",  None)
+                    _role = getattr(src, "party_role", None)
+                    if _pid:
+                        await db.execute(_txt("""
+                            UPDATE je_lines SET party_id=:pid, party_role=:prole
+                            WHERE id=:line_id
+                        """), {"pid":str(_pid),"prole":_role or "other","line_id":str(saved[0])})
+            await db.commit()
+        except Exception as e:
+            import logging; logging.getLogger(__name__).warning(f"party_update_skipped: {e}")
+
+    return ok(data={"id":str(je.id),"serial":je.serial,"status":je.status},
+              message=f"تم تعديل القيد {je.serial}")
 
 
 @router.post("/je/{je_id}/submit", summary="إرسال للمراجعة")
