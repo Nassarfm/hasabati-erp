@@ -379,10 +379,10 @@ async def party_statement(
                 COALESCE(jl.debit,  0)   AS debit,
                 COALESCE(jl.credit, 0)   AS credit
             FROM je_lines jl
-            JOIN journal_entries je ON je.id = jl.journal_entry_id
-            WHERE jl.party_id = :pid
+            JOIN journal_entries je ON je.id = jl.je_id
+            WHERE jl.party_id::text = :pid
               AND je.tenant_id = :tid
-              AND je.status = 'posted'
+              AND je.status    = 'posted'
               {date_filter}
             ORDER BY je.entry_date, je.serial
         """), params)
@@ -443,8 +443,8 @@ async def party_balance(
                 COALESCE(SUM(jl.credit), 0) AS total_credit,
                 COALESCE(SUM(jl.debit - jl.credit), 0) AS net
             FROM je_lines jl
-            JOIN journal_entries je ON je.id = jl.journal_entry_id
-            WHERE jl.party_id = :pid
+            JOIN journal_entries je ON je.id = jl.je_id
+            WHERE jl.party_id::text = :pid
               AND je.tenant_id = :tid
               AND je.status = 'posted'
             GROUP BY jl.party_role
@@ -509,8 +509,8 @@ async def open_balances(
                 COALESCE(SUM(jl.credit), 0) AS total_credit,
                 COALESCE(SUM(jl.debit - jl.credit), 0) AS net_balance
             FROM parties p
-            LEFT JOIN je_lines jl ON jl.party_id = p.id
-            LEFT JOIN journal_entries je ON je.id = jl.journal_entry_id
+            LEFT JOIN je_lines jl ON jl.party_id::text = p.id::text
+            LEFT JOIN journal_entries je ON je.id = jl.je_id
                 AND je.status = 'posted' AND je.tenant_id = :tid
             WHERE p.tenant_id = :tid AND p.is_active = true
             {type_filter}
