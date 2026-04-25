@@ -388,19 +388,21 @@ async def party_statement(
         # نجرب الـ query بطرق مختلفة للتوافق مع أنواع البيانات
         r = await db.execute(text(f"""
             SELECT
-                je.entry_date::text      AS entry_date,
-                je.serial                AS je_serial,
-                je.je_type               AS je_type,
-                je.description           AS je_description,
-                je.source_module         AS source_module,
+                je.entry_date::text                      AS entry_date,
+                je.serial                                AS je_serial,
+                je.je_type                               AS je_type,
+                je.description                           AS je_description,
+                je.source_module                         AS source_module,
                 jl.account_code,
-                jl.description           AS line_description,
+                jl.description                           AS line_description,
                 jl.party_role,
-                COALESCE(jl.debit,  0)   AS debit,
-                COALESCE(jl.credit, 0)   AS credit
+                COALESCE(p.party_name_ar, jl.party_name) AS party_display_name,
+                COALESCE(jl.debit,  0)                   AS debit,
+                COALESCE(jl.credit, 0)                   AS credit
             FROM je_lines jl
             JOIN journal_entries je ON je.id = jl.journal_entry_id
-            WHERE jl.party_id::text = :pid
+            LEFT JOIN parties p ON p.id::text = jl.party_id
+            WHERE jl.party_id = :pid
               AND je.tenant_id = :tid
               AND je.status    = 'posted'
               {date_filter}

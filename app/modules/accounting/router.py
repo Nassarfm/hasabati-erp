@@ -250,11 +250,13 @@ async def create_je(
                         await db.execute(_txt("""
                             UPDATE je_lines
                             SET party_id   = :pid,
-                                party_role = :prole
+                                party_role = :prole,
+                                party_name = :pname
                             WHERE id = :line_id
                         """), {
                             "pid":     str(_pid),
                             "prole":   _role or "other",
+                            "pname":   getattr(src, "party_name", None),
                             "line_id": str(saved[0]),
                         })
             await db.commit()
@@ -375,7 +377,7 @@ async def get_je(
                 jl.id,
                 jl.party_id,
                 jl.party_role,
-                p.party_name_ar AS party_name,
+                COALESCE(p.party_name_ar, jl.party_name) AS party_name,
                 p.party_code
             FROM je_lines jl
             LEFT JOIN parties p ON p.id::text = jl.party_id
@@ -433,9 +435,11 @@ async def update_je(
                     _role = getattr(src, "party_role", None)
                     if _pid:
                         await db.execute(_txt("""
-                            UPDATE je_lines SET party_id=:pid, party_role=:prole
+                            UPDATE je_lines SET party_id=:pid, party_role=:prole, party_name=:pname
                             WHERE id=:line_id
-                        """), {"pid":str(_pid),"prole":_role or "other","line_id":str(saved[0])})
+                        """), {"pid":str(_pid),"prole":_role or "other",
+                               "pname": getattr(src,"party_name",None),
+                               "line_id":str(saved[0])})
             await db.commit()
         except Exception as e:
             import logging; logging.getLogger(__name__).warning(f"party_update_skipped: {e}")

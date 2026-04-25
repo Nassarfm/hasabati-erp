@@ -328,8 +328,7 @@ class PostingEngine:
                 self.db.add(je_line)
                 await self.db.flush()  # نحتاج flush هنا للحصول على je_line.id
 
-                # ── Party (المتعامل) — Raw SQL لتجنب المساس بـ models.py ──
-                # يُكتب إذا كان party_id موجوداً في السطر (من الـ schema أو PostingLine)
+                # ── Party (المتعامل) — Raw SQL ──
                 _party_id   = getattr(line, "party_id",   None)
                 _party_role = getattr(line, "party_role", None)
                 _party_name = getattr(line, "party_name", None)
@@ -339,11 +338,13 @@ class PostingEngine:
                         await self.db.execute(_txt("""
                             UPDATE je_lines
                             SET party_id   = :pid,
-                                party_role = :prole
+                                party_role = :prole,
+                                party_name = :pname
                             WHERE id = :line_id
                         """), {
                             "pid":     str(_party_id),
                             "prole":   _party_role or "other",
+                            "pname":   _party_name or None,
                             "line_id": str(je_line.id),
                         })
                     except Exception as _pe:
