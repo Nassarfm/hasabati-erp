@@ -237,7 +237,7 @@ async def create_je(
             # جلب je_lines المُنشأة بالترتيب
             res = await db.execute(_txt("""
                 SELECT id, line_order FROM je_lines
-                WHERE je_id = :je_id
+                WHERE journal_entry_id = :je_id
                 ORDER BY line_order
             """), {"je_id": str(je.id)})
             saved_lines = res.fetchall()
@@ -313,27 +313,29 @@ async def list_je(
     party_map: dict = {}
     if je_ids:
         try:
-            res = await db.execute(_txt("""
-                SELECT DISTINCT ON (jl.je_id)
-                    jl.je_id,
+            # نبني IN clause يدوياً لتجنب مشكلة asyncpg مع ANY
+            placeholders = ','.join([f"'{_id}'" for _id in je_ids])
+            res = await db.execute(_txt(f"""
+                SELECT DISTINCT ON (jl.journal_entry_id)
+                    jl.journal_entry_id AS je_id,
                     jl.party_id,
                     jl.party_role,
                     p.party_name_ar AS party_name,
                     p.party_code
                 FROM je_lines jl
-                LEFT JOIN parties p ON p.id = jl.party_id::uuid
-                WHERE jl.je_id = ANY(:ids)
+                LEFT JOIN parties p ON p.id::text = jl.party_id
+                WHERE jl.journal_entry_id::text IN ({placeholders})
                   AND jl.party_id IS NOT NULL
-                ORDER BY jl.je_id, jl.line_order
-            """), {"ids": je_ids})
+                ORDER BY jl.journal_entry_id, jl.line_order
+            """))
             for row in res.mappings().fetchall():
                 party_map[str(row["je_id"])] = {
-                    "party_id":   str(row["party_id"])   if row["party_id"]   else None,
+                    "party_id":   str(row["party_id"]) if row["party_id"] else None,
                     "party_name": row["party_name"] or row["party_code"] or None,
                     "party_role": row["party_role"] or None,
                 }
-        except Exception:
-            pass  # عمود party_id قد لا يكون موجوداً في بعض البيئات
+        except Exception as _e:
+            import logging; logging.getLogger(__name__).warning(f"party_map_failed: {_e}")
 
     result = []
     for j in items:
@@ -376,8 +378,8 @@ async def get_je(
                 p.party_name_ar AS party_name,
                 p.party_code
             FROM je_lines jl
-            LEFT JOIN parties p ON p.id = jl.party_id::uuid
-            WHERE jl.je_id = :je_id
+            LEFT JOIN parties p ON p.id::text = jl.party_id
+            WHERE jl.journal_entry_id = :je_id
             ORDER BY jl.line_order
         """), {"je_id": str(je_id)})
         party_line_map = {}
@@ -421,7 +423,7 @@ async def update_je(
         try:
             res = await db.execute(_txt("""
                 SELECT id, line_order FROM je_lines
-                WHERE je_id = :je_id ORDER BY line_order
+                WHERE journal_entry_id = :je_id ORDER BY line_order
             """), {"je_id": str(je.id)})
             saved_lines = res.fetchall()
             for idx, saved in enumerate(saved_lines):
