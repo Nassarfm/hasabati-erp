@@ -364,8 +364,28 @@ async def party_statement(
         date_filter += " AND je.entry_date <= :dt"
         params["dt"] = date_to
 
+    # ── تشخيص: تحقق من وجود بيانات party_id في je_lines ────
+    try:
+        diag = await db.execute(text("""
+            SELECT
+                jl.party_id,
+                pg_typeof(jl.party_id) AS party_id_type,
+                COUNT(*) AS cnt
+            FROM je_lines jl
+            WHERE jl.party_id IS NOT NULL
+              AND jl.tenant_id = :tid
+            GROUP BY jl.party_id, pg_typeof(jl.party_id)
+            LIMIT 10
+        """), {"tid": tid})
+        diag_rows = diag.mappings().fetchall()
+        print(f"[party-statement DEBUG] party_id samples: {[dict(r) for r in diag_rows]}")
+        print(f"[party-statement DEBUG] searching for pid={str(party_id)} type={type(str(party_id))}")
+    except Exception as de:
+        print(f"[party-statement DEBUG] diag failed: {de}")
+
     # جلب سطور القيود المرتبطة بالمتعامل
     try:
+        # نجرب الـ query بطرق مختلفة للتوافق مع أنواع البيانات
         r = await db.execute(text(f"""
             SELECT
                 je.entry_date::text      AS entry_date,
@@ -380,7 +400,7 @@ async def party_statement(
                 COALESCE(jl.credit, 0)   AS credit
             FROM je_lines jl
             JOIN journal_entries je ON je.id = jl.journal_entry_id
-            WHERE jl.party_id = :pid
+            WHERE jl.party_id::text = :pid
               AND je.tenant_id = :tid
               AND je.status    = 'posted'
               {date_filter}
