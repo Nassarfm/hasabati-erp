@@ -72,17 +72,73 @@ RESET_BALANCES = [
 ]
 
 def _require_admin(user: CurrentUser):
-    """التحقق من صلاحية المدير - يتحقق من الـ email أو الـ role"""
-    # تحقق من خاصية is_admin إن وجدت
+    """التحقق من صلاحية المدير"""
     if hasattr(user, 'is_admin') and user.is_admin:
         return True
-    # أو تحقق من الـ role
     if hasattr(user, 'role') and user.role in ('admin', 'system_admin', 'superadmin'):
         return True
-    # أو تحقق إذا كان أول مستخدم (owner)
     if hasattr(user, 'is_owner') and user.is_owner:
         return True
     raise HTTPException(403, "هذه العملية تتطلب صلاحية مدير النظام")
+
+
+@router.get("/is-admin")
+async def check_is_admin(
+    db:   AsyncSession = Depends(get_db),
+    user: CurrentUser  = Depends(get_current_user),
+):
+    """التحقق إذا كان المستخدم مديراً — يُستدعى من الـ Frontend"""
+    tid = str(user.tenant_id)
+    email = str(user.email)
+
+    # 1. تحقق من خصائص الـ CurrentUser object
+    if hasattr(user, 'is_admin') and user.is_admin:
+        return {"data": {"is_admin": True, "method": "user_object"}}
+    if hasattr(user, 'role') and user.role in ('admin', 'system_admin', 'superadmin'):
+        return {"data": {"is_admin": True, "method": "user_role"}}
+
+    # 2. تحقق من جدول user_roles في قاعدة البيانات
+    try:
+        r = await db.execute(text("""
+            SELECT ur.role_name
+            FROM user_roles ur
+            WHERE ur.tenant_id = :tid
+              AND ur.user_email = :email
+              AND ur.role_name IN ('admin','system_admin','superadmin','owner')
+            LIMIT 1
+        """), {"tid": tid, "email": email})
+        row = r.fetchone()
+        if row:
+            return {"data": {"is_admin": True, "method": "user_roles_table"}}
+    except Exception:
+        pass
+
+    # 3. تحقق إذا كان أول مستخدم في الـ tenant (المالك)
+    try:
+        r = await db.execute(text("""
+            SELECT COUNT(*) FROM user_roles WHERE tenant_id = :tid
+        """), {"tid": tid})
+        count = r.scalar() or 0
+        # إذا لا يوجد أي أدوار محددة = المستخدم الوحيد هو المالك
+        if count == 0:
+            return {"data": {"is_admin": True, "method": "sole_user"}}
+    except Exception:
+        pass
+
+    # 4. تحقق من جدول users إن وُجد
+    try:
+        r = await db.execute(text("""
+            SELECT role FROM users
+            WHERE tenant_id = :tid AND email = :email
+            LIMIT 1
+        """), {"tid": tid, "email": email})
+        row = r.mappings().fetchone()
+        if row and row.get("role") in ('admin', 'system_admin', 'owner', 'superadmin'):
+            return {"data": {"is_admin": True, "method": "users_table"}}
+    except Exception:
+        pass
+
+    return {"data": {"is_admin": False}}
 
 
 # ══════════════════════════════════════════════════════════
