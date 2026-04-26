@@ -493,10 +493,90 @@ async def reject_je(je_id: uuid.UUID, body: dict = Body(default={}), svc: Accoun
 
 
 @router.post("/je/{je_id}/post", summary="ترحيل قيد محاسبي")
-async def post_je(je_id: uuid.UUID, body: PostJERequest, svc: AccountingService = Depends(_svc)):
+async def post_je(
+    je_id:  uuid.UUID,
+    body:   PostJERequest,
+    db:     AsyncSession = Depends(get_db),
+    user:   CurrentUser  = Depends(get_current_user),
+    svc: AccountingService = Depends(_svc),
+):
+    from sqlalchemy import text as _txt
+
+    # ── 1. احفظ party_id من je_lines قبل الترحيل (قد تُعاد كتابتها) ──
+    party_map: dict = {}
+    try:
+        res = await db.execute(_txt("""
+            SELECT line_order, party_id, party_role, party_name
+            FROM je_lines
+            WHERE journal_entry_id = :jid
+              AND party_id IS NOT NULL
+            ORDER BY line_order
+        """), {"jid": str(je_id)})
+        for row in res.mappings().fetchall():
+            party_map[int(row["line_order"])] = {
+                "party_id":   str(row["party_id"]) if row["party_id"] else None,
+                "party_role": row["party_role"],
+                "party_name": row["party_name"],
+            }
+    except Exception:
+        pass  # العمود قد لا يكون موجوداً بعد
+
+    # ── 2. نفّذ الترحيل ──────────────────────────────────
     je = await svc.post_je(je_id, force=body.force)
-    return ok(data={"id":str(je.id),"serial":je.serial,"status":je.status,"posted_at":str(je.posted_at),"total_debit":float(je.total_debit),"total_credit":float(je.total_credit)},
-              message=f"✅ تم ترحيل القيد {je.serial}")
+
+    # ── 3. أعد حفظ party_id على الـ je_lines الجديدة بعد الترحيل ──
+    if party_map:
+        try:
+            res = await db.execute(_txt("""
+                SELECT id, line_order FROM je_lines
+                WHERE journal_entry_id = :jid
+                ORDER BY line_order
+            """), {"jid": str(je.id)})
+            saved_lines = res.mappings().fetchall()
+            for saved in saved_lines:
+                order = int(saved["line_order"])
+                pinfo = party_map.get(order)
+                if not pinfo or not pinfo["party_id"]:
+                    continue
+                pid = pinfo["party_id"]
+                try:
+                    await db.execute(_txt(f"""
+                        UPDATE je_lines
+                        SET party_id   = '{pid}'::uuid,
+                            party_role = :prole,
+                            party_name = :pname
+                        WHERE id = :lid
+                    """), {
+                        "prole": pinfo["party_role"] or "other",
+                        "pname": pinfo["party_name"],
+                        "lid":   str(saved["id"]),
+                    })
+                except Exception:
+                    try:
+                        await db.execute(_txt(f"""
+                            UPDATE je_lines
+                            SET party_id = '{pid}'::uuid, party_role = :prole
+                            WHERE id = :lid
+                        """), {"prole": pinfo["party_role"] or "other", "lid": str(saved["id"])})
+                    except Exception as e2:
+                        import logging
+                        logging.getLogger(__name__).warning(f"post_je_party_restore_failed: {e2}")
+            await db.commit()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"post_je_party_map_failed: {e}")
+
+    return ok(
+        data={
+            "id":           str(je.id),
+            "serial":       je.serial,
+            "status":       je.status,
+            "posted_at":    str(je.posted_at),
+            "total_debit":  float(je.total_debit),
+            "total_credit": float(je.total_credit),
+        },
+        message="تم ترحيل القيد " + je.serial
+    )
 
 
 @router.post("/je/{je_id}/reverse", summary="عكس قيد محاسبي")
