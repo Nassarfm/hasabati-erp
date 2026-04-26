@@ -247,14 +247,14 @@ async def create_je(
                     _pid  = getattr(src, "party_id",   None)
                     _role = getattr(src, "party_role",  None)
                     if _pid:
-                        await db.execute(_txt("""
+                        _pid_s = str(_pid)
+                        await db.execute(_txt(f"""
                             UPDATE je_lines
-                            SET party_id   = :pid,
+                            SET party_id   = '{_pid_s}',
                                 party_role = :prole,
                                 party_name = :pname
                             WHERE id = :line_id
                         """), {
-                            "pid":     str(_pid),
                             "prole":   _role or "other",
                             "pname":   getattr(src, "party_name", None),
                             "line_id": str(saved[0]),
@@ -325,7 +325,7 @@ async def list_je(
                     p.party_name_ar AS party_name,
                     p.party_code
                 FROM je_lines jl
-                LEFT JOIN parties p ON p.id::text = jl.party_id
+                LEFT JOIN parties p ON p.id::text = jl.party_id::text
                 WHERE jl.journal_entry_id::text IN ({placeholders})
                   AND jl.party_id IS NOT NULL
                 ORDER BY jl.journal_entry_id, jl.line_order
@@ -380,7 +380,7 @@ async def get_je(
                 COALESCE(p.party_name_ar, jl.party_name) AS party_name,
                 p.party_code
             FROM je_lines jl
-            LEFT JOIN parties p ON p.id::text = jl.party_id
+            LEFT JOIN parties p ON p.id::text = jl.party_id::text
             WHERE jl.journal_entry_id = :je_id
             ORDER BY jl.line_order
         """), {"je_id": str(je_id)})
@@ -434,10 +434,12 @@ async def update_je(
                     _pid  = getattr(src, "party_id",  None)
                     _role = getattr(src, "party_role", None)
                     if _pid:
-                        await db.execute(_txt("""
-                            UPDATE je_lines SET party_id=:pid, party_role=:prole, party_name=:pname
+                        _pid_s = str(_pid)
+                        await db.execute(_txt(f"""
+                            UPDATE je_lines
+                            SET party_id='{_pid_s}', party_role=:prole, party_name=:pname
                             WHERE id=:line_id
-                        """), {"pid":str(_pid),"prole":_role or "other",
+                        """), {"prole":_role or "other",
                                "pname": getattr(src,"party_name",None),
                                "line_id":str(saved[0])})
             await db.commit()

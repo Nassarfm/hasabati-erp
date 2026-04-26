@@ -335,14 +335,15 @@ class PostingEngine:
                 if _party_id:
                     try:
                         from sqlalchemy import text as _txt
-                        await self.db.execute(_txt("""
+                        _pid_str = str(_party_id)
+                        # نستخدم CAST لتجنب مشكلة نوع البيانات (UUID vs TEXT)
+                        await self.db.execute(_txt(f"""
                             UPDATE je_lines
-                            SET party_id   = :pid,
+                            SET party_id   = '{_pid_str}',
                                 party_role = :prole,
                                 party_name = :pname
                             WHERE id = :line_id
                         """), {
-                            "pid":     str(_party_id),
                             "prole":   _party_role or "other",
                             "pname":   _party_name or None,
                             "line_id": str(je_line.id),

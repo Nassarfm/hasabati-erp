@@ -378,13 +378,13 @@ async def party_statement(
                 jl.account_code,
                 jl.description                           AS line_description,
                 jl.party_role,
-                COALESCE(p.party_name_ar, jl.party_name) AS party_display_name,
+                COALESCE(p.party_name_ar, jl.party_name::text) AS party_display_name,
                 COALESCE(jl.debit,  0)                   AS debit,
                 COALESCE(jl.credit, 0)                   AS credit
             FROM je_lines jl
             JOIN journal_entries je ON je.id = jl.journal_entry_id
-            LEFT JOIN parties p ON p.id::text = jl.party_id
-            WHERE jl.party_id = '{pid_str}'
+            LEFT JOIN parties p ON p.id::text = jl.party_id::text
+            WHERE jl.party_id::text = '{pid_str}'
               AND je.tenant_id = :tid
               AND je.status    = 'posted'
               {date_filter}
@@ -449,7 +449,7 @@ async def party_balance(
                 COALESCE(SUM(jl.debit - jl.credit), 0) AS net
             FROM je_lines jl
             JOIN journal_entries je ON je.id = jl.journal_entry_id
-            WHERE jl.party_id = '{pid_str}'
+            WHERE jl.party_id::text = '{pid_str}'
               AND je.tenant_id = :tid
               AND je.status = 'posted'
             GROUP BY jl.party_role
@@ -514,7 +514,7 @@ async def open_balances(
                 COALESCE(SUM(jl.credit), 0) AS total_credit,
                 COALESCE(SUM(jl.debit - jl.credit), 0) AS net_balance
             FROM parties p
-            LEFT JOIN je_lines jl ON jl.party_id = p.id::text
+            LEFT JOIN je_lines jl ON jl.party_id::text = p.id::text
             LEFT JOIN journal_entries je ON je.id = jl.journal_entry_id
                 AND je.status = 'posted' AND je.tenant_id = :tid
             WHERE p.tenant_id = :tid AND p.is_active = true
