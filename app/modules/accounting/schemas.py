@@ -110,6 +110,10 @@ class JELineCreate(BaseModel):
     currency_code:  Optional[str]     = "SAR"
     exchange_rate:  Optional[Decimal] = Decimal("1.0")
     amount_foreign: Optional[Decimal] = Decimal("0")
+    # ── المتعامل المالي (Party / Subledger) ──
+    party_id:   Optional[str] = None
+    party_name: Optional[str] = None
+    party_role: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_one_side_only(self) -> "JELineCreate":
