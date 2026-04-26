@@ -248,17 +248,29 @@ async def create_je(
                     _role = getattr(src, "party_role",  None)
                     if _pid:
                         _pid_s = str(_pid)
-                        await db.execute(_txt(f"""
-                            UPDATE je_lines
-                            SET party_id   = '{_pid_s}',
-                                party_role = :prole,
-                                party_name = :pname
-                            WHERE id = :line_id
-                        """), {
-                            "prole":   _role or "other",
-                            "pname":   getattr(src, "party_name", None),
-                            "line_id": str(saved[0]),
-                        })
+                        _role_v = _role or "other"
+                        _name_v = getattr(src, "party_name", None)
+                        try:
+                            # محاولة مع party_name
+                            await db.execute(_txt(f"""
+                                UPDATE je_lines
+                                SET party_id   = '{_pid_s}'::uuid,
+                                    party_role = :prole,
+                                    party_name = :pname
+                                WHERE id = :line_id
+                            """), {"prole": _role_v, "pname": _name_v, "line_id": str(saved[0])})
+                        except Exception:
+                            try:
+                                # محاولة بدون party_name إذا كان العمود غير موجود
+                                await db.execute(_txt(f"""
+                                    UPDATE je_lines
+                                    SET party_id   = '{_pid_s}'::uuid,
+                                        party_role = :prole
+                                    WHERE id = :line_id
+                                """), {"prole": _role_v, "line_id": str(saved[0])})
+                            except Exception as e2:
+                                import logging
+                                logging.getLogger(__name__).warning(f"party_save_failed: {e2}")
             await db.commit()
         except Exception as e:
             # لا نوقف الإنشاء إذا فشل حفظ الـ party
@@ -435,13 +447,24 @@ async def update_je(
                     _role = getattr(src, "party_role", None)
                     if _pid:
                         _pid_s = str(_pid)
-                        await db.execute(_txt(f"""
-                            UPDATE je_lines
-                            SET party_id='{_pid_s}', party_role=:prole, party_name=:pname
-                            WHERE id=:line_id
-                        """), {"prole":_role or "other",
-                               "pname": getattr(src,"party_name",None),
-                               "line_id":str(saved[0])})
+                        _role_v = _role or "other"
+                        _name_v = getattr(src, "party_name", None)
+                        try:
+                            await db.execute(_txt(f"""
+                                UPDATE je_lines
+                                SET party_id='{_pid_s}'::uuid, party_role=:prole, party_name=:pname
+                                WHERE id=:line_id
+                            """), {"prole":_role_v, "pname":_name_v, "line_id":str(saved[0])})
+                        except Exception:
+                            try:
+                                await db.execute(_txt(f"""
+                                    UPDATE je_lines
+                                    SET party_id='{_pid_s}'::uuid, party_role=:prole
+                                    WHERE id=:line_id
+                                """), {"prole":_role_v, "line_id":str(saved[0])})
+                            except Exception as e2:
+                                import logging
+                                logging.getLogger(__name__).warning(f"party_update_failed: {e2}")
             await db.commit()
         except Exception as e:
             import logging; logging.getLogger(__name__).warning(f"party_update_skipped: {e}")
