@@ -1606,26 +1606,43 @@ async def update_petty_cash_expense(
     total = sum(Decimal(str(l["amount"])) for l in lines if float(l.get("amount",0)) > 0)
     vat_total = sum(Decimal(str(l.get("vat_amount",0))) for l in lines)
 
-    # تحديث بيانات المصروف الرئيسية
-    await db.execute(text("""
-        UPDATE tr_petty_cash_expenses
-        SET fund_id=:fund_id, expense_date=:exp_date,
-            total_amount=:total, vat_total=:vat,
-            description=:desc, reference=:ref, notes=:notes,
-            party_id=:party_id, party_name=:party_name,
-            updated_at=NOW()
-        WHERE id=:id AND tenant_id=:tid
-    """), {
-        "id": str(exp_id), "tid": tid,
-        "fund_id": str(data["fund_id"]),
-        "exp_date": date.fromisoformat(str(data["expense_date"])),
-        "total": total, "vat": vat_total,
-        "desc": data["description"],
-        "ref": data.get("reference"),
-        "notes": data.get("notes"),
-        "party_id": data.get("party_id") or None,
-        "party_name": data.get("party_name") or None,
-    })
+    # تحديث بيانات المصروف — نحاول مع party ثم بدونه إذا لم تكن الأعمدة موجودة
+    try:
+        await db.execute(text("""
+            UPDATE tr_petty_cash_expenses
+            SET fund_id=:fund_id, expense_date=:exp_date,
+                total_amount=:total, vat_total=:vat,
+                description=:desc, reference=:ref, notes=:notes,
+                party_id=:party_id, party_name=:party_name
+            WHERE id=:id AND tenant_id=:tid
+        """), {
+            "id": str(exp_id), "tid": tid,
+            "fund_id": str(data["fund_id"]),
+            "exp_date": date.fromisoformat(str(data["expense_date"])),
+            "total": total, "vat": vat_total,
+            "desc": data["description"],
+            "ref": data.get("reference"),
+            "notes": data.get("notes"),
+            "party_id": data.get("party_id") or None,
+            "party_name": data.get("party_name") or None,
+        })
+    except Exception:
+        # fallback بدون party إذا لم تكن الأعمدة موجودة
+        await db.execute(text("""
+            UPDATE tr_petty_cash_expenses
+            SET fund_id=:fund_id, expense_date=:exp_date,
+                total_amount=:total, vat_total=:vat,
+                description=:desc, reference=:ref, notes=:notes
+            WHERE id=:id AND tenant_id=:tid
+        """), {
+            "id": str(exp_id), "tid": tid,
+            "fund_id": str(data["fund_id"]),
+            "exp_date": date.fromisoformat(str(data["expense_date"])),
+            "total": total, "vat": vat_total,
+            "desc": data["description"],
+            "ref": data.get("reference"),
+            "notes": data.get("notes"),
+        })
 
     # حذف السطور القديمة وإعادة إدراجها
     await db.execute(text(
