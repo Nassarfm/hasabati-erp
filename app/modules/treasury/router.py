@@ -1664,6 +1664,68 @@ async def update_petty_cash_expense(
               message="تم تحديث المصروف ✅")
 
 
+@router.post("/petty-cash/expenses/{exp_id}/submit", summary="إرسال للمراجعة")
+async def submit_petty_cash_expense(
+    exp_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text(
+        "SELECT status FROM tr_petty_cash_expenses WHERE id=:id AND tenant_id=:tid"
+    ), {"id": str(exp_id), "tid": tid})
+    row = r.fetchone()
+    if not row: raise HTTPException(404, "غير موجود")
+    if row[0] != "draft": raise HTTPException(400, "يجب أن يكون المصروف في حالة مسودة")
+    await db.execute(text("""
+        UPDATE tr_petty_cash_expenses
+        SET status='review', submitted_by=:by, submitted_at=NOW()
+        WHERE id=:id AND tenant_id=:tid
+    """), {"by": user.email, "id": str(exp_id), "tid": tid})
+    await db.commit()
+    return ok(message="تم الإرسال للمراجعة ✅")
+
+
+@router.post("/petty-cash/expenses/{exp_id}/approve", summary="اعتماد المصروف")
+async def approve_petty_cash_expense(
+    exp_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text(
+        "SELECT status FROM tr_petty_cash_expenses WHERE id=:id AND tenant_id=:tid"
+    ), {"id": str(exp_id), "tid": tid})
+    row = r.fetchone()
+    if not row: raise HTTPException(404, "غير موجود")
+    if row[0] not in ("review", "draft"): raise HTTPException(400, "لا يمكن اعتماد هذا المصروف")
+    await db.execute(text("""
+        UPDATE tr_petty_cash_expenses
+        SET status='approved', approved_by=:by, approved_at=NOW()
+        WHERE id=:id AND tenant_id=:tid
+    """), {"by": user.email, "id": str(exp_id), "tid": tid})
+    await db.commit()
+    return ok(message="تم الاعتماد ✅")
+
+
+@router.post("/petty-cash/expenses/{exp_id}/reject", summary="رفض المصروف")
+async def reject_petty_cash_expense(
+    exp_id: uuid.UUID,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    await db.execute(text("""
+        UPDATE tr_petty_cash_expenses
+        SET status='rejected', rejected_by=:by, rejected_at=NOW(), rejection_reason=:reason
+        WHERE id=:id AND tenant_id=:tid
+    """), {"by": user.email, "id": str(exp_id), "tid": tid,
+           "reason": body.get("reason", "")})
+    await db.commit()
+    return ok(message="تم الرفض")
+
+
 @router.post("/petty-cash/expenses/{exp_id}/post")
 async def post_petty_cash_expense(
     exp_id: uuid.UUID,
@@ -1679,7 +1741,7 @@ async def post_petty_cash_expense(
     """), {"id": str(exp_id), "tid": tid})
     exp = r.mappings().fetchone()
     if not exp: raise Exception("المصروف غير موجود")
-    if exp["status"] != "draft": raise Exception("مُرحَّل مسبقاً")
+    if exp["status"] not in ("draft", "approved"): raise Exception("لا يمكن ترحيل هذا المصروف")
 
     lr = await db.execute(text("""
         SELECT * FROM tr_petty_cash_expense_lines
