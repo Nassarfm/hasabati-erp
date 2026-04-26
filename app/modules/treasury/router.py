@@ -1537,16 +1537,18 @@ async def create_petty_cash_expense(
     await db.execute(text("""
         INSERT INTO tr_petty_cash_expenses
           (id,tenant_id,serial,fund_id,expense_date,total_amount,vat_total,
-           description,reference,notes,status,created_by)
+           description,reference,notes,party_id,party_name,status,created_by)
         VALUES
           (:id,:tid,:serial,:fund_id,:exp_date,:total,:vat,
-           :desc,:ref,:notes,'draft',:by)
+           :desc,:ref,:notes,:party_id,:party_name,'draft',:by)
     """), {
         "id": exp_id, "tid": tid, "serial": serial,
         "fund_id": str(data["fund_id"]),
         "exp_date": exp_date, "total": total, "vat": vat_total,
         "desc": data["description"], "ref": data.get("reference"),
         "notes": data.get("notes"), "by": user.email,
+        "party_id": data.get("party_id") or None,
+        "party_name": data.get("party_name") or None,
     })
 
     for i, line in enumerate(lines):
@@ -1554,11 +1556,11 @@ async def create_petty_cash_expense(
             INSERT INTO tr_petty_cash_expense_lines
               (id,tenant_id,expense_id,line_order,expense_account,expense_account_name,
                description,amount,vat_amount,net_amount,vendor_name,
-               branch_code,cost_center,project_code,attachment_url)
+               branch_code,cost_center,project_code,expense_classification_code,attachment_url)
             VALUES
               (gen_random_uuid(),:tid,:exp_id,:order,:acc,:acc_name,
                :desc,:amount,:vat,:net,:vendor,
-               :branch,:cc,:proj,:attach)
+               :branch,:cc,:proj,:exp_cls,:attach)
         """), {
             "tid": tid, "exp_id": exp_id, "order": i+1,
             "acc": line["expense_account"],
@@ -1571,12 +1573,95 @@ async def create_petty_cash_expense(
             "branch": line.get("branch_code"),
             "cc": line.get("cost_center"),
             "proj": line.get("project_code"),
+            "exp_cls": line.get("expense_classification_code"),
             "attach": line.get("attachment_url"),
         })
 
     await db.commit()
     return created(data={"id": exp_id, "serial": serial, "total": float(total)},
                    message=f"تم إنشاء {serial} ✅")
+
+
+@router.put("/petty-cash/expenses/{exp_id}", summary="تعديل مصروف نثري مسودة")
+async def update_petty_cash_expense(
+    exp_id: uuid.UUID,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+
+    # التحقق من أن المصروف مسودة وينتمي لنفس الـ tenant
+    r = await db.execute(text("""
+        SELECT id, status FROM tr_petty_cash_expenses
+        WHERE id=:id AND tenant_id=:tid
+    """), {"id": str(exp_id), "tid": tid})
+    exp = r.mappings().fetchone()
+    if not exp:
+        raise HTTPException(404, "المصروف غير موجود")
+    if exp["status"] != "draft":
+        raise HTTPException(400, "لا يمكن تعديل مصروف تم ترحيله")
+
+    lines = data.get("lines", [])
+    total = sum(Decimal(str(l["amount"])) for l in lines if float(l.get("amount",0)) > 0)
+    vat_total = sum(Decimal(str(l.get("vat_amount",0))) for l in lines)
+
+    # تحديث بيانات المصروف الرئيسية
+    await db.execute(text("""
+        UPDATE tr_petty_cash_expenses
+        SET fund_id=:fund_id, expense_date=:exp_date,
+            total_amount=:total, vat_total=:vat,
+            description=:desc, reference=:ref, notes=:notes,
+            party_id=:party_id, party_name=:party_name,
+            updated_at=NOW()
+        WHERE id=:id AND tenant_id=:tid
+    """), {
+        "id": str(exp_id), "tid": tid,
+        "fund_id": str(data["fund_id"]),
+        "exp_date": date.fromisoformat(str(data["expense_date"])),
+        "total": total, "vat": vat_total,
+        "desc": data["description"],
+        "ref": data.get("reference"),
+        "notes": data.get("notes"),
+        "party_id": data.get("party_id") or None,
+        "party_name": data.get("party_name") or None,
+    })
+
+    # حذف السطور القديمة وإعادة إدراجها
+    await db.execute(text(
+        "DELETE FROM tr_petty_cash_expense_lines WHERE expense_id=:id AND tenant_id=:tid"
+    ), {"id": str(exp_id), "tid": tid})
+
+    for i, line in enumerate(lines):
+        if not line.get("expense_account") or float(line.get("amount",0)) <= 0:
+            continue
+        await db.execute(text("""
+            INSERT INTO tr_petty_cash_expense_lines
+              (id,tenant_id,expense_id,line_order,expense_account,expense_account_name,
+               description,amount,vat_amount,net_amount,vendor_name,
+               branch_code,cost_center,project_code,expense_classification_code)
+            VALUES
+              (gen_random_uuid(),:tid,:exp_id,:order,:acc,:acc_name,
+               :desc,:amount,:vat,:net,:vendor,
+               :branch,:cc,:proj,:exp_cls)
+        """), {
+            "tid": tid, "exp_id": str(exp_id), "order": i+1,
+            "acc": line["expense_account"],
+            "acc_name": line.get("expense_account_name",""),
+            "desc": line.get("description"),
+            "amount": Decimal(str(line["amount"])),
+            "vat": Decimal(str(line.get("vat_amount",0))),
+            "net": Decimal(str(line.get("net_amount", line["amount"]))),
+            "vendor": line.get("vendor_name"),
+            "branch": line.get("branch_code"),
+            "cc": line.get("cost_center"),
+            "proj": line.get("project_code"),
+            "exp_cls": line.get("expense_classification_code"),
+        })
+
+    await db.commit()
+    return ok(data={"id": str(exp_id), "total": float(total)},
+              message="تم تحديث المصروف ✅")
 
 
 @router.post("/petty-cash/expenses/{exp_id}/post")
