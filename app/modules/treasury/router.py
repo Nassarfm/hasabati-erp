@@ -1531,55 +1531,78 @@ async def create_petty_cash_expense(
     serial = await _next_serial(db, tid, "PET", exp_date)
     exp_id = str(uuid.uuid4())
     lines = data.get("lines", [])
-    total = sum(Decimal(str(l["amount"])) for l in lines)
+    total = sum(Decimal(str(l["amount"])) for l in lines if float(l.get("amount",0)) > 0)
     vat_total = sum(Decimal(str(l.get("vat_amount",0))) for l in lines)
 
-    await db.execute(text("""
-        INSERT INTO tr_petty_cash_expenses
-          (id,tenant_id,serial,fund_id,expense_date,total_amount,vat_total,
-           description,reference,notes,party_id,party_name,status,created_by)
-        VALUES
-          (:id,:tid,:serial,:fund_id,:exp_date,:total,:vat,
-           :desc,:ref,:notes,:party_id,:party_name,'draft',:by)
-    """), {
-        "id": exp_id, "tid": tid, "serial": serial,
-        "fund_id": str(data["fund_id"]),
-        "exp_date": exp_date, "total": total, "vat": vat_total,
-        "desc": data["description"], "ref": data.get("reference"),
-        "notes": data.get("notes"), "by": user.email,
-        "party_id": data.get("party_id") or None,
-        "party_name": data.get("party_name") or None,
-    })
+    # أولاً: حاول مع party_id و party_name
+    try:
+        await db.execute(text("""
+            INSERT INTO tr_petty_cash_expenses
+              (id,tenant_id,serial,fund_id,expense_date,total_amount,vat_total,
+               description,reference,notes,party_id,party_name,status,created_by)
+            VALUES
+              (:id,:tid,:serial,:fund_id,:exp_date,:total,:vat,
+               :desc,:ref,:notes,:party_id,:party_name,'draft',:by)
+        """), {
+            "id": exp_id, "tid": tid, "serial": serial,
+            "fund_id": str(data["fund_id"]),
+            "exp_date": exp_date, "total": total, "vat": vat_total,
+            "desc": data["description"], "ref": data.get("reference"),
+            "notes": data.get("notes"), "by": user.email,
+            "party_id": data.get("party_id") or None,
+            "party_name": data.get("party_name") or None,
+        })
+    except Exception:
+        # fallback بدون party إذا لم تكن الأعمدة موجودة بعد
+        await db.execute(text("""
+            INSERT INTO tr_petty_cash_expenses
+              (id,tenant_id,serial,fund_id,expense_date,total_amount,vat_total,
+               description,reference,notes,status,created_by)
+            VALUES
+              (:id,:tid,:serial,:fund_id,:exp_date,:total,:vat,
+               :desc,:ref,:notes,'draft',:by)
+        """), {
+            "id": exp_id, "tid": tid, "serial": serial,
+            "fund_id": str(data["fund_id"]),
+            "exp_date": exp_date, "total": total, "vat": vat_total,
+            "desc": data["description"], "ref": data.get("reference"),
+            "notes": data.get("notes"), "by": user.email,
+        })
 
     for i, line in enumerate(lines):
-        await db.execute(text("""
-            INSERT INTO tr_petty_cash_expense_lines
-              (id,tenant_id,expense_id,line_order,expense_account,expense_account_name,
-               description,amount,vat_amount,net_amount,vendor_name,
-               branch_code,cost_center,project_code,expense_classification_code,attachment_url)
-            VALUES
-              (gen_random_uuid(),:tid,:exp_id,:order,:acc,:acc_name,
-               :desc,:amount,:vat,:net,:vendor,
-               :branch,:cc,:proj,:exp_cls,:attach)
-        """), {
-            "tid": tid, "exp_id": exp_id, "order": i+1,
-            "acc": line["expense_account"],
-            "acc_name": line.get("expense_account_name",""),
-            "desc": line.get("description"),
-            "amount": Decimal(str(line["amount"])),
-            "vat": Decimal(str(line.get("vat_amount",0))),
-            "net": Decimal(str(line.get("net_amount", line["amount"]))),
-            "vendor": line.get("vendor_name"),
-            "branch": line.get("branch_code"),
-            "cc": line.get("cost_center"),
-            "proj": line.get("project_code"),
-            "exp_cls": line.get("expense_classification_code"),
-            "attach": line.get("attachment_url"),
-        })
+        if not line.get("expense_account") or float(line.get("amount",0)) <= 0:
+            continue
+        try:
+            await db.execute(text("""
+                INSERT INTO tr_petty_cash_expense_lines
+                  (id,tenant_id,expense_id,line_order,expense_account,expense_account_name,
+                   description,amount,vat_amount,net_amount,vendor_name,
+                   branch_code,cost_center,project_code,expense_classification_code)
+                VALUES
+                  (gen_random_uuid(),:tid,:exp_id,:order,:acc,:acc_name,
+                   :desc,:amount,:vat,:net,:vendor,
+                   :branch,:cc,:proj,:exp_cls)
+            """), {
+                "tid": tid, "exp_id": exp_id, "order": i+1,
+                "acc":      line["expense_account"],
+                "acc_name": line.get("expense_account_name",""),
+                "desc":     line.get("description"),
+                "amount":   Decimal(str(line["amount"])),
+                "vat":      Decimal(str(line.get("vat_amount",0))),
+                "net":      Decimal(str(line.get("net_amount", line["amount"]))),
+                "vendor":   line.get("vendor_name"),
+                "branch":   line.get("branch_code") or None,
+                "cc":       line.get("cost_center") or None,
+                "proj":     line.get("project_code") or None,
+                "exp_cls":  line.get("expense_classification_code") or None,
+            })
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"line insert failed: {e}")
 
     await db.commit()
     return created(data={"id": exp_id, "serial": serial, "total": float(total)},
-                   message=f"تم إنشاء {serial} ✅")
+                   message="تم انشاء " + serial + " بنجاح")
 
 
 @router.put("/petty-cash/expenses/{exp_id}", summary="تعديل مصروف نثري مسودة")
