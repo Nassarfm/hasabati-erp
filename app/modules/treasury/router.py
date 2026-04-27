@@ -3541,24 +3541,28 @@ async def create_recurring(
     try:
         await db.execute(text("""
             INSERT INTO tr_recurring_transactions
-              (id,tenant_id,tx_type,bank_account_id,counterpart_account,
-               amount,description,frequency,start_date,next_run_date,
+              (id,tenant_id,name,source,tx_type,bank_account_id,counterpart_account,
+               amount,currency_code,description,frequency,start_date,next_run_date,
                is_active,created_by)
             VALUES
-              (:id,:tid,:tt,:ba,:cp,
-               :amt,:desc,:freq,:start,:next,
+              (:id,:tid,:name,:source,:tt,:ba,:cp,
+               :amt,:curr,:desc,:freq,:start,:next,
                true,:by)
         """), {
             "id": rec_id, "tid": tid,
-            "tt":    data.get("tx_type","BP"),
-            "ba":    data.get("bank_account_id"),
-            "cp":    data.get("counterpart_account"),
-            "amt":   Decimal(str(data.get("amount",0))),
-            "desc":  data.get("description",""),
-            "freq":  data.get("frequency","monthly"),
-            "start": data.get("start_date"),
-            "next":  data.get("start_date"),
-            "by":    user.email,
+            "name":   data.get("name") or data.get("description","")[:50],
+            "source": data.get("source","bank"),
+            "tt":     data.get("tx_type","BP"),
+            "ba":     data.get("bank_account_id"),
+            "cp":     data.get("counterpart_account"),
+            "amt":    Decimal(str(data.get("amount",0))),
+            "curr":   data.get("currency_code","SAR"),
+            "desc":   data.get("description",""),
+            "freq":   data.get("frequency","monthly"),
+            "start":  date.fromisoformat(str(data["start_date"])) if data.get("start_date") else None,
+            "next":   date.fromisoformat(str(data["next_due_date"])) if data.get("next_due_date") else
+                      date.fromisoformat(str(data["start_date"])) if data.get("start_date") else None,
+            "by":     user.email,
         })
         await db.commit()
     except Exception as e:
