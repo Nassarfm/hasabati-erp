@@ -1587,7 +1587,7 @@ async def create_petty_cash_expense(
 ):
     tid = str(user.tenant_id)
     exp_date = date.fromisoformat(str(data["expense_date"]))
-    serial = await _next_serial(db, tid, "PET", exp_date)
+    serial = await _next_serial(db, tid, "PCR", exp_date)
     exp_id = str(uuid.uuid4())
     lines = data.get("lines", [])
     total = sum(Decimal(str(l["amount"])) for l in lines if float(l.get("amount",0)) > 0)
