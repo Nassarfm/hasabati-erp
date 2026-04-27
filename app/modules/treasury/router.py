@@ -1412,10 +1412,10 @@ async def post_check(ck_id: uuid.UUID, db: AsyncSession=Depends(get_db), user: C
         SET status='posted', posted_by=:by, posted_at=NOW(),
             je_id=:je_id, je_serial=:je_serial
         WHERE id=:id AND tenant_id=:tid
-    """), {"by": user.email, "je_id": str(je["id"]), "je_serial": je["serial"],
+    """), {"by": user.email, "je_id": je["je_id"], "je_serial": je["je_serial"],
            "id": str(ck_id), "tid": tid})
     await db.commit()
-    return ok(data={"je_serial": je["serial"]}, message="تم الترحيل — " + je["serial"])
+    return ok(data={"je_serial": je["je_serial"]}, message="تم الترحيل — " + je["je_serial"])
 
 
 @router.post("/checks/{ck_id}/clear")
