@@ -1211,6 +1211,79 @@ async def create_check(
                    message="تم انشاء الشيك " + serial)
 
 
+@router.get("/checks/books")
+async def list_cheque_books(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT cb.*,
+               ba.account_name AS bank_account_name,
+               ba.account_code AS bank_account_code,
+               (cb.series_to - cb.next_number + 1) AS remaining_leaves
+        FROM tr_cheque_books cb
+        LEFT JOIN tr_bank_accounts ba ON ba.id = cb.bank_account_id
+        WHERE cb.tenant_id = :tid
+        ORDER BY cb.created_at DESC
+    """), {"tid": tid})
+    return ok(data=[dict(row._mapping) for row in r.fetchall()])
+
+
+@router.post("/checks/books", status_code=201)
+async def create_cheque_book(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    book_id = str(uuid.uuid4())
+    series_from = int(data["series_from"])
+    series_to   = int(data["series_to"])
+    if series_from >= series_to:
+        raise HTTPException(400, "رقم البداية يجب أن يكون أصغر من رقم النهاية")
+    await db.execute(text("""
+        INSERT INTO tr_cheque_books
+          (id, tenant_id, book_code, bank_account_id, bank_name,
+           series_from, series_to, next_number, currency_code, notes, created_by)
+        VALUES
+          (:id, :tid, :code, :ba_id, :bank_name,
+           :s_from, :s_to, :s_from, :currency, :notes, :by)
+    """), {
+        "id": book_id, "tid": tid,
+        "code":      data.get("book_code") or data.get("bank_name","BK")[:3]+"-"+str(series_from),
+        "ba_id":     str(data["bank_account_id"]) if data.get("bank_account_id") else None,
+        "bank_name": data.get("bank_name"),
+        "s_from":    series_from,
+        "s_to":      series_to,
+        "currency":  data.get("currency_code","SAR"),
+        "notes":     data.get("notes"),
+        "by":        user.email,
+    })
+    await db.commit()
+    return created(data={"id": book_id}, message="تم انشاء دفتر الشيكات")
+
+
+@router.put("/checks/books/{book_id}")
+async def update_cheque_book(
+    book_id: uuid.UUID,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    await db.execute(text("""
+        UPDATE tr_cheque_books
+        SET bank_name=:bank_name, notes=:notes, status=:status
+        WHERE id=:id AND tenant_id=:tid
+    """), {"bank_name": data.get("bank_name"), "notes": data.get("notes"),
+           "status": data.get("status","active"), "id": str(book_id), "tid": tid})
+    await db.commit()
+    return ok(message="تم التحديث")
+
+
+
+
 @router.get("/checks/{ck_id}")
 async def get_check(
     ck_id: uuid.UUID,
@@ -1377,77 +1450,6 @@ async def return_check(ck_id: uuid.UUID, body: dict, db: AsyncSession=Depends(ge
 # ══════════════════════════════════════════════════════════
 # CHEQUE BOOKS — جداول الشيكات
 # ══════════════════════════════════════════════════════════
-@router.get("/checks/books")
-async def list_cheque_books(
-    db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),
-):
-    tid = str(user.tenant_id)
-    r = await db.execute(text("""
-        SELECT cb.*,
-               ba.account_name AS bank_account_name,
-               ba.account_code AS bank_account_code,
-               (cb.series_to - cb.next_number + 1) AS remaining_leaves
-        FROM tr_cheque_books cb
-        LEFT JOIN tr_bank_accounts ba ON ba.id = cb.bank_account_id
-        WHERE cb.tenant_id = :tid
-        ORDER BY cb.created_at DESC
-    """), {"tid": tid})
-    return ok(data=[dict(row._mapping) for row in r.fetchall()])
-
-
-@router.post("/checks/books", status_code=201)
-async def create_cheque_book(
-    data: dict,
-    db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),
-):
-    tid = str(user.tenant_id)
-    book_id = str(uuid.uuid4())
-    series_from = int(data["series_from"])
-    series_to   = int(data["series_to"])
-    if series_from >= series_to:
-        raise HTTPException(400, "رقم البداية يجب أن يكون أصغر من رقم النهاية")
-    await db.execute(text("""
-        INSERT INTO tr_cheque_books
-          (id, tenant_id, book_code, bank_account_id, bank_name,
-           series_from, series_to, next_number, currency_code, notes, created_by)
-        VALUES
-          (:id, :tid, :code, :ba_id, :bank_name,
-           :s_from, :s_to, :s_from, :currency, :notes, :by)
-    """), {
-        "id": book_id, "tid": tid,
-        "code":      data.get("book_code") or data.get("bank_name","BK")[:3]+"-"+str(series_from),
-        "ba_id":     str(data["bank_account_id"]) if data.get("bank_account_id") else None,
-        "bank_name": data.get("bank_name"),
-        "s_from":    series_from,
-        "s_to":      series_to,
-        "currency":  data.get("currency_code","SAR"),
-        "notes":     data.get("notes"),
-        "by":        user.email,
-    })
-    await db.commit()
-    return created(data={"id": book_id}, message="تم انشاء دفتر الشيكات")
-
-
-@router.put("/checks/books/{book_id}")
-async def update_cheque_book(
-    book_id: uuid.UUID,
-    data: dict,
-    db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),
-):
-    tid = str(user.tenant_id)
-    await db.execute(text("""
-        UPDATE tr_cheque_books
-        SET bank_name=:bank_name, notes=:notes, status=:status
-        WHERE id=:id AND tenant_id=:tid
-    """), {"bank_name": data.get("bank_name"), "notes": data.get("notes"),
-           "status": data.get("status","active"), "id": str(book_id), "tid": tid})
-    await db.commit()
-    return ok(message="تم التحديث")
-
-
 @router.put("/checks/{ck_id}/status")
 async def update_check_status(
     ck_id: uuid.UUID,
