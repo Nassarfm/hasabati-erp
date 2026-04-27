@@ -1190,7 +1190,7 @@ async def create_check(
             "ck_no":     check_number,
             "ck_type":   data.get("check_type","outgoing"),
             "ck_date":   check_date,
-            "due_date":  data.get("due_date"),
+            "due_date":  date.fromisoformat(str(data["due_date"])) if data.get("due_date") else None,
             "ba_id":     str(data["bank_account_id"]) if data.get("bank_account_id") else None,
             "book_id":   str(book_id) if book_id else None,
             "amount":    Decimal(str(data["amount"])),
