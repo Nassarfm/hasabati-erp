@@ -1378,6 +1378,65 @@ async def get_session_lines(
 
 
 # ══════════════════════════════════════════════════════════
+# EXPENSE CLASSIFICATIONS (تصنيفات المصاريف)
+# ══════════════════════════════════════════════════════════
+@router.get("/settings/expense-classifications")
+async def list_expense_classifications(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    try:
+        r = await db.execute(text("""
+            SELECT id, code, name_ar, name_en, description, is_active, created_at
+            FROM settings_expense_classifications
+            WHERE tenant_id = :tid
+            ORDER BY code
+        """), {"tid": tid})
+        rows = [dict(row) for row in r.mappings().fetchall()]
+        return ok(data=rows)
+    except Exception:
+        # جدول غير موجود بعد — أرجع قائمة افتراضية
+        defaults = [
+            {"id":"1","code":"ADM","name_ar":"مصاريف إدارية وعمومية","name_en":"Admin & General","is_active":True},
+            {"id":"2","code":"MKT","name_ar":"مصاريف تسويقية","name_en":"Marketing","is_active":True},
+            {"id":"3","code":"OPS","name_ar":"مصاريف تشغيلية","name_en":"Operational","is_active":True},
+            {"id":"4","code":"TRV","name_ar":"مصاريف سفر وانتقالات","name_en":"Travel","is_active":True},
+            {"id":"5","code":"ENT","name_ar":"مصاريف ضيافة واستضافة","name_en":"Entertainment","is_active":True},
+            {"id":"6","code":"MNT","name_ar":"مصاريف صيانة","name_en":"Maintenance","is_active":True},
+            {"id":"7","code":"TRN","name_ar":"مصاريف تدريب وتطوير","name_en":"Training","is_active":True},
+            {"id":"8","code":"OTH","name_ar":"مصاريف أخرى","name_en":"Other","is_active":True},
+        ]
+        return ok(data=defaults)
+
+
+@router.post("/settings/expense-classifications", status_code=201)
+async def create_expense_classification(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    try:
+        new_id = str(uuid.uuid4())
+        await db.execute(text("""
+            INSERT INTO settings_expense_classifications
+              (id, tenant_id, code, name_ar, name_en, description, is_active)
+            VALUES (:id, :tid, :code, :name_ar, :name_en, :desc, true)
+        """), {
+            "id": new_id, "tid": tid,
+            "code": data.get("code","").upper(),
+            "name_ar": data["name_ar"],
+            "name_en": data.get("name_en",""),
+            "desc": data.get("description",""),
+        })
+        await db.commit()
+        return created(data={"id": new_id}, message="تم الإنشاء ✅")
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+# ══════════════════════════════════════════════════════════
 # PETTY CASH FUNDS
 # ══════════════════════════════════════════════════════════
 @router.get("/petty-cash/funds")
