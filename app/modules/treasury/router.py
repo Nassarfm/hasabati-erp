@@ -1840,7 +1840,7 @@ async def post_petty_cash_expense(
     """), {"id": str(exp_id), "tid": tid})
     exp = r.mappings().fetchone()
     if not exp: raise Exception("المصروف غير موجود")
-    if exp["status"] not in ("draft", "approved"): raise Exception("لا يمكن ترحيل هذا المصروف")
+    if exp["status"] not in ("draft", "review", "approved"): raise Exception("لا يمكن ترحيل هذا المصروف — الحالة: " + str(exp["status"]))
 
     lr = await db.execute(text("""
         SELECT * FROM tr_petty_cash_expense_lines
