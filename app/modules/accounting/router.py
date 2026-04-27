@@ -409,10 +409,18 @@ async def get_je(
     lines = []
     for l in je.lines:
         ld = l.to_dict()
+        # Party info
         pinfo = party_line_map.get(str(l.id), {})
         ld["party_id"]   = pinfo.get("party_id")   or getattr(l, "party_id",   None)
         ld["party_name"] = pinfo.get("party_name") or None
         ld["party_role"] = pinfo.get("party_role") or getattr(l, "party_role", None)
+        # الابعاد المحاسبية - نضمن وجودها في الـ response
+        ld["branch_code"]      = getattr(l, "branch_code",      None)
+        ld["branch_name"]      = getattr(l, "branch_name",      None)
+        ld["cost_center"]      = getattr(l, "cost_center",      None)
+        ld["cost_center_name"] = getattr(l, "cost_center_name", None)
+        ld["project_code"]     = getattr(l, "project_code",     None)
+        ld["project_name"]     = getattr(l, "project_name",     None)
         lines.append(ld)
 
     data["lines"] = lines
