@@ -1114,6 +1114,7 @@ async def list_checks(
     status:     Optional[str]  = Query(None),
     date_from:  Optional[date] = Query(None),
     date_to:    Optional[date] = Query(None),
+    book_id:    Optional[uuid.UUID] = Query(None),
     limit: int = Query(50), offset: int = Query(0),
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
@@ -1121,17 +1122,21 @@ async def list_checks(
     tid = str(user.tenant_id)
     conds = ["ck.tenant_id=:tid"]
     params: dict = {"tid": tid, "limit": limit, "offset": offset}
-    if check_type: conds.append("ck.check_type=:ct");   params["ct"] = check_type
-    if status:     conds.append("ck.status=:status");   params["status"] = status
-    if date_from:  conds.append("ck.check_date>=:df");  params["df"] = str(date_from)
-    if date_to:    conds.append("ck.check_date<=:dt");  params["dt"] = str(date_to)
+    if check_type: conds.append("ck.check_type=:ct");     params["ct"]    = check_type
+    if status:     conds.append("ck.status=:status");     params["status"]= status
+    if date_from:  conds.append("ck.check_date>=:df");    params["df"]    = str(date_from)
+    if date_to:    conds.append("ck.check_date<=:dt");    params["dt"]    = str(date_to)
+    if book_id:    conds.append("ck.cheque_book_id=:bid");params["bid"]   = str(book_id)
     where = " AND ".join(conds)
-
     cnt = await db.execute(text(f"SELECT COUNT(*) FROM tr_checks ck WHERE {where}"), params)
     r = await db.execute(text(f"""
-        SELECT ck.*, ba.account_name AS bank_account_name
+        SELECT ck.*,
+               ba.account_name  AS bank_account_name,
+               ba.account_code  AS bank_account_code,
+               cb.book_code     AS cheque_book_code
         FROM tr_checks ck
-        LEFT JOIN tr_bank_accounts ba ON ba.id=ck.bank_account_id
+        LEFT JOIN tr_bank_accounts ba ON ba.id = ck.bank_account_id
+        LEFT JOIN tr_cheque_books  cb ON cb.id = ck.cheque_book_id
         WHERE {where}
         ORDER BY ck.check_date DESC
         LIMIT :limit OFFSET :offset
@@ -1148,43 +1153,317 @@ async def create_check(
     tid = str(user.tenant_id)
     check_date = date.fromisoformat(str(data["check_date"]))
     serial = await _next_serial(db, tid, "CHK", check_date)
-    ck_id = str(uuid.uuid4())
+    ck_id  = str(uuid.uuid4())
 
+    # إذا تم تحديد دفتر شيكات — خذ الرقم التالي منه تلقائياً
+    check_number = data.get("check_number")
+    book_id = data.get("cheque_book_id")
+    if book_id and not check_number:
+        r = await db.execute(text("""
+            SELECT next_number, series_to FROM tr_cheque_books
+            WHERE id=:id AND tenant_id=:tid AND status='active'
+        """), {"id": str(book_id), "tid": tid})
+        book = r.mappings().fetchone()
+        if book:
+            check_number = str(book["next_number"])
+            if book["next_number"] <= book["series_to"]:
+                await db.execute(text("""
+                    UPDATE tr_cheque_books
+                    SET next_number = next_number + 1,
+                        used_leaves  = used_leaves  + 1,
+                        status = CASE WHEN next_number >= series_to THEN 'exhausted' ELSE status END
+                    WHERE id=:id AND tenant_id=:tid
+                """), {"id": str(book_id), "tid": tid})
+
+    try:
+        await db.execute(text("""
+            INSERT INTO tr_checks
+              (id,tenant_id,serial,check_number,check_type,check_date,due_date,
+               bank_account_id,cheque_book_id,amount,payee_name,party_id,party_name,
+               description,gl_account_code,status,notes,created_by)
+            VALUES
+              (:id,:tid,:serial,:ck_no,:ck_type,:ck_date,:due_date,
+               :ba_id,:book_id,:amount,:payee,:party_id,:party_name,
+               :desc,:gl_code,'draft',:notes,:by)
+        """), {
+            "id": ck_id, "tid": tid, "serial": serial,
+            "ck_no":     check_number,
+            "ck_type":   data.get("check_type","outgoing"),
+            "ck_date":   check_date,
+            "due_date":  data.get("due_date"),
+            "ba_id":     str(data["bank_account_id"]) if data.get("bank_account_id") else None,
+            "book_id":   str(book_id) if book_id else None,
+            "amount":    Decimal(str(data["amount"])),
+            "payee":     data.get("payee_name"),
+            "party_id":  data.get("party_id") or None,
+            "party_name":data.get("party_name"),
+            "desc":      data.get("description"),
+            "gl_code":   data.get("gl_account_code"),
+            "notes":     data.get("notes"),
+            "by":        user.email,
+        })
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, str(e))
+
+    return created(data={"id": ck_id, "serial": serial, "check_number": check_number},
+                   message="تم انشاء الشيك " + serial)
+
+
+@router.get("/checks/{ck_id}")
+async def get_check(
+    ck_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT ck.*, ba.account_name AS bank_account_name, ba.account_code AS bank_account_code,
+               cb.book_code AS cheque_book_code
+        FROM tr_checks ck
+        LEFT JOIN tr_bank_accounts ba ON ba.id = ck.bank_account_id
+        LEFT JOIN tr_cheque_books  cb ON cb.id = ck.cheque_book_id
+        WHERE ck.id=:id AND ck.tenant_id=:tid
+    """), {"id": str(ck_id), "tid": tid})
+    row = r.mappings().fetchone()
+    if not row: raise HTTPException(404, "الشيك غير موجود")
+    return ok(data=dict(row))
+
+
+@router.put("/checks/{ck_id}")
+async def update_check(
+    ck_id: uuid.UUID,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text(
+        "SELECT status FROM tr_checks WHERE id=:id AND tenant_id=:tid"
+    ), {"id": str(ck_id), "tid": tid})
+    row = r.fetchone()
+    if not row: raise HTTPException(404, "الشيك غير موجود")
+    if row[0] not in ("draft","submitted"): raise HTTPException(400, "لا يمكن تعديل شيك مُرحَّل")
     await db.execute(text("""
-        INSERT INTO tr_checks
-          (id,tenant_id,serial,check_number,check_type,check_date,due_date,
-           bank_account_id,amount,payee_name,description,status,notes,created_by)
-        VALUES
-          (:id,:tid,:serial,:ck_no,:ck_type,:ck_date,:due_date,
-           :ba_id,:amount,:payee,:desc,'issued',:notes,:by)
+        UPDATE tr_checks SET
+            check_date=:ck_date, due_date=:due_date,
+            bank_account_id=:ba_id, amount=:amount,
+            payee_name=:payee, party_id=:party_id, party_name=:party_name,
+            description=:desc, gl_account_code=:gl_code,
+            notes=:notes, updated_at=NOW()
+        WHERE id=:id AND tenant_id=:tid
     """), {
-        "id": ck_id, "tid": tid, "serial": serial,
-        "ck_no": data["check_number"], "ck_type": data["check_type"],
-        "ck_date": check_date, "due_date": data.get("due_date"),
-        "ba_id": str(data["bank_account_id"]) if data.get("bank_account_id") else None,
-        "amount": Decimal(str(data["amount"])),
-        "payee": data.get("payee_name"), "desc": data.get("description"),
-        "notes": data.get("notes"), "by": user.email,
+        "ck_date":    data.get("check_date"),
+        "due_date":   data.get("due_date"),
+        "ba_id":      str(data["bank_account_id"]) if data.get("bank_account_id") else None,
+        "amount":     Decimal(str(data["amount"])),
+        "payee":      data.get("payee_name"),
+        "party_id":   data.get("party_id") or None,
+        "party_name": data.get("party_name"),
+        "desc":       data.get("description"),
+        "gl_code":    data.get("gl_account_code"),
+        "notes":      data.get("notes"),
+        "id": str(ck_id), "tid": tid,
     })
     await db.commit()
-    return created(data={"id": ck_id, "serial": serial}, message=f"تم إنشاء الشيك {serial} ✅")
+    return ok(message="تم التحديث")
+
+
+@router.post("/checks/{ck_id}/submit")
+async def submit_check(ck_id: uuid.UUID, db: AsyncSession=Depends(get_db), user: CurrentUser=Depends(get_current_user)):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("SELECT status FROM tr_checks WHERE id=:id AND tenant_id=:tid"), {"id":str(ck_id),"tid":tid})
+    row = r.fetchone()
+    if not row: raise HTTPException(404, "غير موجود")
+    if row[0] != "draft": raise HTTPException(400, "يجب أن يكون الشيك في حالة مسودة")
+    await db.execute(text("UPDATE tr_checks SET status='submitted', submitted_by=:by, submitted_at=NOW() WHERE id=:id AND tenant_id=:tid"),
+                     {"by": user.email, "id": str(ck_id), "tid": tid})
+    await db.commit()
+    return ok(message="تم الإرسال للمراجعة")
+
+
+@router.post("/checks/{ck_id}/approve")
+async def approve_check(ck_id: uuid.UUID, db: AsyncSession=Depends(get_db), user: CurrentUser=Depends(get_current_user)):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("SELECT status FROM tr_checks WHERE id=:id AND tenant_id=:tid"), {"id":str(ck_id),"tid":tid})
+    row = r.fetchone()
+    if not row: raise HTTPException(404, "غير موجود")
+    if row[0] not in ("submitted","draft"): raise HTTPException(400, "لا يمكن اعتماد هذا الشيك")
+    await db.execute(text("UPDATE tr_checks SET status='approved', approved_by=:by, approved_at=NOW() WHERE id=:id AND tenant_id=:tid"),
+                     {"by": user.email, "id": str(ck_id), "tid": tid})
+    await db.commit()
+    return ok(message="تم الاعتماد")
+
+
+@router.post("/checks/{ck_id}/reject")
+async def reject_check(ck_id: uuid.UUID, body: dict, db: AsyncSession=Depends(get_db), user: CurrentUser=Depends(get_current_user)):
+    tid = str(user.tenant_id)
+    await db.execute(text("""
+        UPDATE tr_checks SET status='rejected', rejected_by=:by, rejected_at=NOW(), rejection_reason=:reason
+        WHERE id=:id AND tenant_id=:tid
+    """), {"by": user.email, "reason": body.get("reason",""), "id": str(ck_id), "tid": tid})
+    await db.commit()
+    return ok(message="تم الرفض")
+
+
+@router.post("/checks/{ck_id}/post")
+async def post_check(ck_id: uuid.UUID, db: AsyncSession=Depends(get_db), user: CurrentUser=Depends(get_current_user)):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT ck.*, ba.gl_account_code AS bank_gl
+        FROM tr_checks ck
+        LEFT JOIN tr_bank_accounts ba ON ba.id=ck.bank_account_id
+        WHERE ck.id=:id AND ck.tenant_id=:tid
+    """), {"id": str(ck_id), "tid": tid})
+    ck = r.mappings().fetchone()
+    if not ck: raise HTTPException(404, "غير موجود")
+    if ck["status"] not in ("draft","submitted","approved"):
+        raise HTTPException(400, "لا يمكن ترحيل هذا الشيك")
+
+    ck_date = ck["check_date"]
+    amount  = Decimal(str(ck["amount"]))
+    bank_gl = ck["bank_gl"] or ck["gl_account_code"] or "11010201"
+    payee_gl = ck["gl_account_code"] or "21010101"  # ذمم دائنة افتراضية
+
+    # القيد: مدين ذمم دائنة ← دائن البنك
+    je = await _post_je(db, tid, user.email, "CHK", ck_date,
+        description="شيك صادر " + str(ck["check_number"]) + " — " + (ck["payee_name"] or ""),
+        lines=[
+            {"account_code": payee_gl, "debit": float(amount), "credit": 0, "description": ck["description"] or ""},
+            {"account_code": bank_gl,  "debit": 0, "credit": float(amount), "description": ck["description"] or ""},
+        ]
+    )
+    await db.execute(text("""
+        UPDATE tr_checks
+        SET status='posted', posted_by=:by, posted_at=NOW(),
+            je_id=:je_id, je_serial=:je_serial
+        WHERE id=:id AND tenant_id=:tid
+    """), {"by": user.email, "je_id": str(je["id"]), "je_serial": je["serial"],
+           "id": str(ck_id), "tid": tid})
+    await db.commit()
+    return ok(data={"je_serial": je["serial"]}, message="تم الترحيل — " + je["serial"])
+
+
+@router.post("/checks/{ck_id}/clear")
+async def clear_check(ck_id: uuid.UUID, body: dict, db: AsyncSession=Depends(get_db), user: CurrentUser=Depends(get_current_user)):
+    """تسوية الشيك — يُظهر في التسوية البنكية"""
+    tid = str(user.tenant_id)
+    r = await db.execute(text("SELECT status FROM tr_checks WHERE id=:id AND tenant_id=:tid"), {"id":str(ck_id),"tid":tid})
+    row = r.fetchone()
+    if not row: raise HTTPException(404, "غير موجود")
+    if row[0] != "posted": raise HTTPException(400, "يجب ترحيل الشيك قبل التسوية")
+    await db.execute(text("""
+        UPDATE tr_checks
+        SET status='cleared', cleared_at=NOW(), cleared_by=:by, cleared_reference=:ref
+        WHERE id=:id AND tenant_id=:tid
+    """), {"by": user.email, "ref": body.get("reference",""), "id": str(ck_id), "tid": tid})
+    await db.commit()
+    return ok(message="تم التسوية")
+
+
+@router.post("/checks/{ck_id}/return")
+async def return_check(ck_id: uuid.UUID, body: dict, db: AsyncSession=Depends(get_db), user: CurrentUser=Depends(get_current_user)):
+    tid = str(user.tenant_id)
+    await db.execute(text("""
+        UPDATE tr_checks
+        SET status='returned', returned_at=NOW(), return_reason=:reason
+        WHERE id=:id AND tenant_id=:tid
+    """), {"reason": body.get("reason",""), "id": str(ck_id), "tid": tid})
+    await db.commit()
+    return ok(message="تم تسجيل إعادة الشيك")
+
+
+# ══════════════════════════════════════════════════════════
+# CHEQUE BOOKS — جداول الشيكات
+# ══════════════════════════════════════════════════════════
+@router.get("/checks/books")
+async def list_cheque_books(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT cb.*,
+               ba.account_name AS bank_account_name,
+               ba.account_code AS bank_account_code,
+               (cb.series_to - cb.next_number + 1) AS remaining_leaves
+        FROM tr_cheque_books cb
+        LEFT JOIN tr_bank_accounts ba ON ba.id = cb.bank_account_id
+        WHERE cb.tenant_id = :tid
+        ORDER BY cb.created_at DESC
+    """), {"tid": tid})
+    return ok(data=[dict(row._mapping) for row in r.fetchall()])
+
+
+@router.post("/checks/books", status_code=201)
+async def create_cheque_book(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    book_id = str(uuid.uuid4())
+    series_from = int(data["series_from"])
+    series_to   = int(data["series_to"])
+    if series_from >= series_to:
+        raise HTTPException(400, "رقم البداية يجب أن يكون أصغر من رقم النهاية")
+    await db.execute(text("""
+        INSERT INTO tr_cheque_books
+          (id, tenant_id, book_code, bank_account_id, bank_name,
+           series_from, series_to, next_number, currency_code, notes, created_by)
+        VALUES
+          (:id, :tid, :code, :ba_id, :bank_name,
+           :s_from, :s_to, :s_from, :currency, :notes, :by)
+    """), {
+        "id": book_id, "tid": tid,
+        "code":      data.get("book_code") or data.get("bank_name","BK")[:3]+"-"+str(series_from),
+        "ba_id":     str(data["bank_account_id"]) if data.get("bank_account_id") else None,
+        "bank_name": data.get("bank_name"),
+        "s_from":    series_from,
+        "s_to":      series_to,
+        "currency":  data.get("currency_code","SAR"),
+        "notes":     data.get("notes"),
+        "by":        user.email,
+    })
+    await db.commit()
+    return created(data={"id": book_id}, message="تم انشاء دفتر الشيكات")
+
+
+@router.put("/checks/books/{book_id}")
+async def update_cheque_book(
+    book_id: uuid.UUID,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    await db.execute(text("""
+        UPDATE tr_cheque_books
+        SET bank_name=:bank_name, notes=:notes, status=:status
+        WHERE id=:id AND tenant_id=:tid
+    """), {"bank_name": data.get("bank_name"), "notes": data.get("notes"),
+           "status": data.get("status","active"), "id": str(book_id), "tid": tid})
+    await db.commit()
+    return ok(message="تم التحديث")
 
 
 @router.put("/checks/{ck_id}/status")
 async def update_check_status(
     ck_id: uuid.UUID,
-    status: str = Query(..., regex="^(issued|deposited|cleared|bounced|cancelled)$"),
+    status: str = Query(...),
     notes: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """Legacy endpoint للتوافق مع الكود القديم"""
     tid = str(user.tenant_id)
     await db.execute(text("""
         UPDATE tr_checks SET status=:status, notes=:notes, updated_at=NOW()
         WHERE id=:id AND tenant_id=:tid
     """), {"status": status, "notes": notes, "id": str(ck_id), "tid": tid})
     await db.commit()
-    return ok(data={}, message=f"تم تحديث حالة الشيك إلى: {status}")
+    return ok(message="تم التحديث")
 
 
 # ══════════════════════════════════════════════════════════
