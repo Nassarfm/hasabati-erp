@@ -4149,3 +4149,142 @@ async def cash_flow_statement(
         "quarterly": quarters,
         "forecast":  forecast,
     })
+
+
+# ══════════════════════════════════════════════════════════════
+# AUTHORITY MATRIX — موقعو الشيكات لكل بنك
+# ══════════════════════════════════════════════════════════════
+
+@router.get("/signatories", summary="قائمة موقعي الشيكات")
+async def list_signatories(
+    bank_account_id: Optional[str] = Query(None),
+    is_active: Optional[bool]      = Query(None),
+    db:  AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = TID
+    where = ["s.tenant_id = :tid"]
+    params: dict = {"tid": tid}
+    if bank_account_id:
+        where.append("s.bank_account_id = :ba_id")
+        params["ba_id"] = bank_account_id
+    if is_active is not None:
+        where.append("s.is_active = :active")
+        params["active"] = is_active
+    clause = " AND ".join(where)
+    r = await db.execute(text(f"""
+        SELECT
+            s.id, s.bank_account_id,
+            b.account_name  AS bank_name,
+            b.bank_name     AS bank_label,
+            b.account_number,
+            s.signatory_name, s.signatory_title, s.signatory_email,
+            s.authorization_type,
+            s.min_amount, s.max_amount,
+            s.valid_from, s.valid_to,
+            s.is_active, s.notes,
+            s.created_by, s.created_at
+        FROM cheque_signatories s
+        LEFT JOIN tr_bank_accounts b ON b.id = s.bank_account_id
+        WHERE {clause}
+        ORDER BY b.account_name, s.authorization_type, s.min_amount
+    """), params)
+    rows = [dict(row) for row in r.mappings().fetchall()]
+    return ok(data=rows)
+
+
+@router.post("/signatories", summary="إضافة موقع جديد")
+async def create_signatory(
+    data: dict = Body(...),
+    db:   AsyncSession = Depends(get_db),
+    user: CurrentUser  = Depends(get_current_user),
+):
+    tid = TID
+    r = await db.execute(text("""
+        INSERT INTO cheque_signatories
+            (tenant_id, bank_account_id, signatory_name, signatory_title,
+             signatory_email, authorization_type,
+             min_amount, max_amount, valid_from, valid_to,
+             is_active, notes, created_by)
+        VALUES
+            (:tid, :ba_id, :name, :title,
+             :email, :auth_type,
+             :min_amt, :max_amt,
+             :valid_from::date, :valid_to::date,
+             :is_active, :notes, :created_by)
+        RETURNING id
+    """), {
+        "tid":        tid,
+        "ba_id":      data["bank_account_id"],
+        "name":       data["signatory_name"],
+        "title":      data.get("signatory_title", ""),
+        "email":      data.get("signatory_email", ""),
+        "auth_type":  data.get("authorization_type", "single"),
+        "min_amt":    float(data.get("min_amount", 0)),
+        "max_amt":    float(data["max_amount"]) if data.get("max_amount") else None,
+        "valid_from": data.get("valid_from") or str(date.today()),
+        "valid_to":   data.get("valid_to") or None,
+        "is_active":  data.get("is_active", True),
+        "notes":      data.get("notes", ""),
+        "created_by": user.email if user else "",
+    })
+    await db.commit()
+    new_id = r.scalar()
+    return created(data={"id": str(new_id)})
+
+
+@router.put("/signatories/{sig_id}", summary="تعديل موقع")
+async def update_signatory(
+    sig_id: uuid.UUID,
+    data: dict = Body(...),
+    db:   AsyncSession = Depends(get_db),
+    user: CurrentUser  = Depends(get_current_user),
+):
+    await db.execute(text("""
+        UPDATE cheque_signatories SET
+            bank_account_id  = :ba_id,
+            signatory_name   = :name,
+            signatory_title  = :title,
+            signatory_email  = :email,
+            authorization_type = :auth_type,
+            min_amount       = :min_amt,
+            max_amount       = :max_amt,
+            valid_from       = :valid_from::date,
+            valid_to         = :valid_to::date,
+            is_active        = :is_active,
+            notes            = :notes,
+            updated_by       = :updated_by,
+            updated_at       = NOW()
+        WHERE id = :sig_id AND tenant_id = :tid
+    """), {
+        "sig_id":   str(sig_id),
+        "tid":      TID,
+        "ba_id":    data["bank_account_id"],
+        "name":     data["signatory_name"],
+        "title":    data.get("signatory_title", ""),
+        "email":    data.get("signatory_email", ""),
+        "auth_type":data.get("authorization_type", "single"),
+        "min_amt":  float(data.get("min_amount", 0)),
+        "max_amt":  float(data["max_amount"]) if data.get("max_amount") else None,
+        "valid_from": data.get("valid_from") or str(date.today()),
+        "valid_to": data.get("valid_to") or None,
+        "is_active":data.get("is_active", True),
+        "notes":    data.get("notes", ""),
+        "updated_by": user.email if user else "",
+    })
+    await db.commit()
+    return ok(data={"updated": True})
+
+
+@router.delete("/signatories/{sig_id}", summary="حذف موقع")
+async def delete_signatory(
+    sig_id: uuid.UUID,
+    db:   AsyncSession = Depends(get_db),
+    user: CurrentUser  = Depends(get_current_user),
+):
+    await db.execute(text("""
+        DELETE FROM cheque_signatories
+        WHERE id = :sig_id AND tenant_id = :tid
+    """), {"sig_id": str(sig_id), "tid": TID})
+    await db.commit()
+    return ok(data={"deleted": True})
