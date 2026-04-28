@@ -985,8 +985,6 @@ async def list_internal_transfers(
                 it.je_serial,
                 it.created_by, it.created_at,
                 it.posted_by,  it.posted_at,
-                COALESCE(it.is_reconciled, false) AS is_reconciled,
-                it.reconciled_at,
                 fa.account_name AS from_account_name,
                 ta.account_name AS to_account_name
             FROM tr_internal_transfers it
@@ -3577,6 +3575,68 @@ async def create_recurring(
     return created(data={"id": rec_id})
 
 
+@router.put("/recurring-transactions/{rec_id}")
+async def update_recurring(
+    rec_id: uuid.UUID,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    ALLOWED = {
+        "name","source","tx_type","bank_account_id","counterpart_account",
+        "amount","currency_code","description","frequency",
+        "next_run_date","start_date","is_active","notes",
+    }
+    safe = {k: v for k, v in data.items() if k in ALLOWED}
+    if not safe:
+        raise HTTPException(400, "لا توجد بيانات للتعديل")
+
+    # تحويل المبلغ
+    if "amount" in safe:
+        try: safe["amount"] = Decimal(str(safe["amount"]))
+        except: raise HTTPException(400, "المبلغ غير صحيح")
+
+    # تحويل التواريخ
+    for df in ("next_run_date", "start_date"):
+        if df in safe and safe[df]:
+            try: safe[df] = date.fromisoformat(str(safe[df]))
+            except: safe[df] = None
+
+    safe["updated_at"] = datetime.utcnow()
+    set_clause = ", ".join([f"{k}=:{k}" for k in safe.keys()])
+    safe.update({"id": str(rec_id), "tid": tid})
+
+    try:
+        await db.execute(text(
+            f"UPDATE tr_recurring_transactions SET {set_clause} WHERE id=:id AND tenant_id=:tid"
+        ), safe)
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ في التعديل: {str(e)}")
+
+    return ok(data={"id": str(rec_id)}, message="تم التعديل ✅")
+
+
+@router.delete("/recurring-transactions/{rec_id}")
+async def delete_recurring(
+    rec_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    try:
+        await db.execute(text(
+            "DELETE FROM tr_recurring_transactions WHERE id=:id AND tenant_id=:tid"
+        ), {"id": str(rec_id), "tid": tid})
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ في الحذف: {str(e)}")
+    return ok(data={}, message="تم الحذف ✅")
+
+
 @router.post("/recurring-transactions/{rec_id}/execute")
 async def execute_recurring(
     rec_id: uuid.UUID,
@@ -3595,32 +3655,62 @@ async def execute_recurring(
     tx_id   = str(uuid.uuid4())
     amt     = Decimal(str(rec["amount"]))
     try:
-        await db.execute(text("""
-            INSERT INTO tr_bank_transactions
-              (id,tenant_id,serial,tx_type,tx_date,bank_account_id,
-               amount,currency_code,amount_sar,counterpart_account,
-               description,payment_method,status,created_by)
-            VALUES
-              (:id,:tid,:serial,:tt,:dt,:ba,
-               :amt,'SAR',:amt,:cp,
-               :desc,'wire','draft',:by)
-        """), {
-            "id": tx_id, "tid": tid, "serial": serial,
-            "tt": rec["tx_type"], "dt": tx_date,
-            "ba": str(rec["bank_account_id"]) if rec["bank_account_id"] else None,
-            "amt": amt, "cp": rec["counterpart_account"],
-            "desc": rec["description"], "by": user.email,
-        })
-        # تحديث next_run_date
+        source = rec.get("source", "bank")
+        if source == "cash":
+            await db.execute(text("""
+                INSERT INTO tr_cash_transactions
+                  (id,tenant_id,serial,tx_type,tx_date,bank_account_id,
+                   amount,currency_code,amount_sar,counterpart_account,
+                   description,payment_method,status,created_by)
+                VALUES
+                  (:id,:tid,:serial,:tt,:dt,:ba,
+                   :amt,'SAR',:amt,:cp,
+                   :desc,'cash','draft',:by)
+            """), {
+                "id": tx_id, "tid": tid, "serial": serial,
+                "tt": rec["tx_type"], "dt": tx_date,
+                "ba": str(rec["bank_account_id"]) if rec["bank_account_id"] else None,
+                "amt": amt, "cp": rec["counterpart_account"],
+                "desc": rec["description"], "by": user.email,
+            })
+        else:
+            await db.execute(text("""
+                INSERT INTO tr_bank_transactions
+                  (id,tenant_id,serial,tx_type,tx_date,bank_account_id,
+                   amount,currency_code,amount_sar,counterpart_account,
+                   description,payment_method,status,created_by)
+                VALUES
+                  (:id,:tid,:serial,:tt,:dt,:ba,
+                   :amt,'SAR',:amt,:cp,
+                   :desc,'wire','draft',:by)
+            """), {
+                "id": tx_id, "tid": tid, "serial": serial,
+                "tt": rec["tx_type"], "dt": tx_date,
+                "ba": str(rec["bank_account_id"]) if rec["bank_account_id"] else None,
+                "amt": amt, "cp": rec["counterpart_account"],
+                "desc": rec["description"], "by": user.email,
+            })
+        # تحديث next_run_date — يدعم كل ترددات FREQ_LABELS
         from datetime import timedelta
+        from calendar import monthrange
+
+        def add_months(d, n):
+            """إضافة n شهر لتاريخ مع معالجة نهاية الشهر"""
+            month = d.month - 1 + n
+            year  = d.year + month // 12
+            month = month % 12 + 1
+            day   = min(d.day, monthrange(year, month)[1])
+            return d.replace(year=year, month=month, day=day)
+
         freq = rec["frequency"]
-        if freq == "daily":   next_d = tx_date + timedelta(days=1)
-        elif freq == "weekly": next_d = tx_date + timedelta(weeks=1)
-        elif freq == "monthly":
-            m = tx_date.month % 12 + 1
-            y = tx_date.year + (1 if tx_date.month == 12 else 0)
-            next_d = tx_date.replace(year=y, month=m)
-        else: next_d = tx_date + timedelta(days=30)
+        if   freq == "daily":      next_d = tx_date + timedelta(days=1)
+        elif freq == "weekly":     next_d = tx_date + timedelta(weeks=1)
+        elif freq == "biweekly":   next_d = tx_date + timedelta(weeks=2)
+        elif freq == "monthly":    next_d = add_months(tx_date, 1)
+        elif freq == "quarterly":  next_d = add_months(tx_date, 3)
+        elif freq == "semiannual": next_d = add_months(tx_date, 6)
+        elif freq == "annual":     next_d = add_months(tx_date, 12)
+        else:                      next_d = tx_date + timedelta(days=30)
         await db.execute(text("""
             UPDATE tr_recurring_transactions
             SET last_run_date=:last, next_run_date=:next
