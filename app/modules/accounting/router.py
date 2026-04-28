@@ -406,6 +406,50 @@ async def get_je(
     except Exception:
         party_line_map = {}
 
+    # ── جلب أسماء الأبعاد المحاسبية لكل سطر ──────────────────
+    try:
+        dim_res = await db.execute(_txt("""
+            SELECT
+                jl.id,
+                jl.branch_code,
+                jl.cost_center,
+                jl.project_code,
+                -- أسماء الأبعاد: من العمود المحفوظ أو من الجدول المرجعي
+                COALESCE(
+                    NULLIF(jl.branch_name, ''),
+                    b.name, b.branch_name
+                ) AS branch_name,
+                COALESCE(
+                    NULLIF(jl.cost_center_name, ''),
+                    cc.name, cc.center_name
+                ) AS cost_center_name,
+                COALESCE(
+                    NULLIF(jl.project_name, ''),
+                    pr.name, pr.project_name
+                ) AS project_name
+            FROM je_lines jl
+            LEFT JOIN branches   b  ON b.code  = jl.branch_code
+                                    AND b.tenant_id = :tid
+            LEFT JOIN cost_centers cc ON cc.code = jl.cost_center
+                                      AND cc.tenant_id = :tid
+            LEFT JOIN projects    pr ON pr.code  = jl.project_code
+                                     AND pr.tenant_id = :tid
+            WHERE jl.journal_entry_id = :je_id
+            ORDER BY jl.line_order
+        """), {"je_id": str(je_id), "tid": "00000000-0000-0000-0000-000000000001"})
+        dim_map = {}
+        for row in dim_res.mappings().fetchall():
+            dim_map[str(row["id"])] = {
+                "branch_code":      row["branch_code"],
+                "branch_name":      row["branch_name"],
+                "cost_center":      row["cost_center"],
+                "cost_center_name": row["cost_center_name"],
+                "project_code":     row["project_code"],
+                "project_name":     row["project_name"],
+            }
+    except Exception:
+        dim_map = {}
+
     lines = []
     for l in je.lines:
         ld = l.to_dict()
@@ -414,13 +458,14 @@ async def get_je(
         ld["party_id"]   = pinfo.get("party_id")   or getattr(l, "party_id",   None)
         ld["party_name"] = pinfo.get("party_name") or None
         ld["party_role"] = pinfo.get("party_role") or getattr(l, "party_role", None)
-        # الابعاد المحاسبية - نضمن وجودها في الـ response
-        ld["branch_code"]      = getattr(l, "branch_code",      None)
-        ld["branch_name"]      = getattr(l, "branch_name",      None)
-        ld["cost_center"]      = getattr(l, "cost_center",      None)
-        ld["cost_center_name"] = getattr(l, "cost_center_name", None)
-        ld["project_code"]     = getattr(l, "project_code",     None)
-        ld["project_name"]     = getattr(l, "project_name",     None)
+        # الأبعاد المحاسبية — اسم من الجدول المرجعي أو من العمود المحفوظ
+        dinfo = dim_map.get(str(l.id), {})
+        ld["branch_code"]      = dinfo.get("branch_code")      or getattr(l, "branch_code",      None)
+        ld["branch_name"]      = dinfo.get("branch_name")      or getattr(l, "branch_name",      None)
+        ld["cost_center"]      = dinfo.get("cost_center")      or getattr(l, "cost_center",      None)
+        ld["cost_center_name"] = dinfo.get("cost_center_name") or getattr(l, "cost_center_name", None)
+        ld["project_code"]     = dinfo.get("project_code")     or getattr(l, "project_code",     None)
+        ld["project_name"]     = dinfo.get("project_name")     or getattr(l, "project_name",     None)
         lines.append(ld)
 
     data["lines"] = lines
