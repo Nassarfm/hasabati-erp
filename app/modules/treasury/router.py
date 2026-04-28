@@ -1133,6 +1133,7 @@ async def list_checks(
         SELECT ck.*,
                ba.account_name  AS bank_account_name,
                ba.account_code  AS bank_account_code,
+               ba.gl_account_code AS bank_gl_code,
                cb.book_code     AS cheque_book_code
         FROM tr_checks ck
         LEFT JOIN tr_bank_accounts ba ON ba.id = ck.bank_account_id
@@ -1292,7 +1293,9 @@ async def get_check(
 ):
     tid = str(user.tenant_id)
     r = await db.execute(text("""
-        SELECT ck.*, ba.account_name AS bank_account_name, ba.account_code AS bank_account_code,
+        SELECT ck.*, ba.account_name AS bank_account_name,
+               ba.account_code AS bank_account_code,
+               ba.gl_account_code AS bank_gl_code,
                cb.book_code AS cheque_book_code
         FROM tr_checks ck
         LEFT JOIN tr_bank_accounts ba ON ba.id = ck.bank_account_id
