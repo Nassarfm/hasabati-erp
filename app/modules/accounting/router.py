@@ -406,47 +406,47 @@ async def get_je(
     except Exception:
         party_line_map = {}
 
-    # ── جلب أسماء الأبعاد المحاسبية لكل سطر ──────────────────
+    # ── جلب الأبعاد المحاسبية الديناميكية لكل سطر ─────────────
+    # أولاً: من je_line_dimensions (الجدول الديناميكي الجديد)
+    # ثانياً: fallback للأعمدة القديمة + JOIN مع الجداول المرجعية
     try:
         dim_res = await db.execute(_txt("""
             SELECT
-                jl.id,
+                jl.id AS line_id,
+                -- الأعمدة الثابتة القديمة مع JOIN لأسماء
                 jl.branch_code,
+                COALESCE(NULLIF(jl.branch_name,''), b.name)   AS branch_name,
                 jl.cost_center,
+                COALESCE(NULLIF(jl.cost_center_name,''), cc.name) AS cost_center_name,
                 jl.project_code,
-                -- أسماء الأبعاد: من العمود المحفوظ أو من الجدول المرجعي
+                COALESCE(NULLIF(jl.project_name,''), pr.name) AS project_name,
+                -- الأبعاد الديناميكية كـ JSON array
                 COALESCE(
-                    NULLIF(jl.branch_name, ''),
-                    b.name, b.branch_name
-                ) AS branch_name,
-                COALESCE(
-                    NULLIF(jl.cost_center_name, ''),
-                    cc.name, cc.center_name
-                ) AS cost_center_name,
-                COALESCE(
-                    NULLIF(jl.project_name, ''),
-                    pr.name, pr.project_name
-                ) AS project_name
+                    (
+                        SELECT json_agg(json_build_object(
+                            'dimension_code', d.dimension_code,
+                            'dimension_name', COALESCE(d.dimension_name, dim.name_ar),
+                            'value_code',     d.value_code,
+                            'value_name',     COALESCE(d.value_name, dv.name_ar)
+                        ) ORDER BY dim.sort_order)
+                        FROM je_line_dimensions d
+                        LEFT JOIN dimensions dim ON dim.code = d.dimension_code
+                            AND dim.tenant_id = :tid
+                        LEFT JOIN dimension_values dv ON dv.id = d.value_id
+                        WHERE d.je_line_id = jl.id
+                    ),
+                    '[]'::json
+                ) AS extra_dimensions
             FROM je_lines jl
-            LEFT JOIN branches   b  ON b.code  = jl.branch_code
-                                    AND b.tenant_id = :tid
-            LEFT JOIN cost_centers cc ON cc.code = jl.cost_center
-                                      AND cc.tenant_id = :tid
-            LEFT JOIN projects    pr ON pr.code  = jl.project_code
-                                     AND pr.tenant_id = :tid
+            LEFT JOIN branches     b  ON b.code  = jl.branch_code  AND b.tenant_id  = :tid
+            LEFT JOIN cost_centers cc ON cc.code = jl.cost_center  AND cc.tenant_id = :tid
+            LEFT JOIN projects     pr ON pr.code = jl.project_code AND pr.tenant_id = :tid
             WHERE jl.journal_entry_id = :je_id
             ORDER BY jl.line_order
         """), {"je_id": str(je_id), "tid": "00000000-0000-0000-0000-000000000001"})
         dim_map = {}
         for row in dim_res.mappings().fetchall():
-            dim_map[str(row["id"])] = {
-                "branch_code":      row["branch_code"],
-                "branch_name":      row["branch_name"],
-                "cost_center":      row["cost_center"],
-                "cost_center_name": row["cost_center_name"],
-                "project_code":     row["project_code"],
-                "project_name":     row["project_name"],
-            }
+            dim_map[str(row["line_id"])] = dict(row)
     except Exception:
         dim_map = {}
 
@@ -458,14 +458,21 @@ async def get_je(
         ld["party_id"]   = pinfo.get("party_id")   or getattr(l, "party_id",   None)
         ld["party_name"] = pinfo.get("party_name") or None
         ld["party_role"] = pinfo.get("party_role") or getattr(l, "party_role", None)
-        # الأبعاد المحاسبية — اسم من الجدول المرجعي أو من العمود المحفوظ
+        # الأبعاد — ثابتة + ديناميكية
         dinfo = dim_map.get(str(l.id), {})
-        ld["branch_code"]      = dinfo.get("branch_code")      or getattr(l, "branch_code",      None)
-        ld["branch_name"]      = dinfo.get("branch_name")      or getattr(l, "branch_name",      None)
-        ld["cost_center"]      = dinfo.get("cost_center")      or getattr(l, "cost_center",      None)
-        ld["cost_center_name"] = dinfo.get("cost_center_name") or getattr(l, "cost_center_name", None)
-        ld["project_code"]     = dinfo.get("project_code")     or getattr(l, "project_code",     None)
-        ld["project_name"]     = dinfo.get("project_name")     or getattr(l, "project_name",     None)
+        ld["branch_code"]       = dinfo.get("branch_code")      or getattr(l, "branch_code",      None)
+        ld["branch_name"]       = dinfo.get("branch_name")      or getattr(l, "branch_name",      None)
+        ld["cost_center"]       = dinfo.get("cost_center")      or getattr(l, "cost_center",      None)
+        ld["cost_center_name"]  = dinfo.get("cost_center_name") or getattr(l, "cost_center_name", None)
+        ld["project_code"]      = dinfo.get("project_code")     or getattr(l, "project_code",     None)
+        ld["project_name"]      = dinfo.get("project_name")     or getattr(l, "project_name",     None)
+        # الأبعاد الإضافية الديناميكية (expense_classification وغيرها)
+        raw_extra = dinfo.get("extra_dimensions") or []
+        if isinstance(raw_extra, str):
+            import json as _json
+            try: raw_extra = _json.loads(raw_extra)
+            except: raw_extra = []
+        ld["extra_dimensions"] = raw_extra if raw_extra else []
         lines.append(ld)
 
     data["lines"] = lines
