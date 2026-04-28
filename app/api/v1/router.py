@@ -115,3 +115,9 @@ v1_router.include_router(assets_router)
 # ══════════════════════════════════════════════════════
 from app.modules.reports.router import router as reports_router
 v1_router.include_router(reports_router)
+
+# ══════════════════════════════════════════════════════
+# MODULE 9 — أدوات المدير (Admin Tools)
+# ══════════════════════════════════════════════════════
+from app.modules.admin.router import router as admin_router
+v1_router.include_router(admin_router)

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 import io
 
-from app.core.db import get_db
+from app.db.session import get_db
 from app.core.tenant import CurrentUser, get_current_user
 
 router = APIRouter(prefix="/admin", tags=["Admin Tools"])
