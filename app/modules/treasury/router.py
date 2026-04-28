@@ -3517,21 +3517,96 @@ async def list_recurring(
     tid = str(user.tenant_id)
     try:
         r = await db.execute(text("""
-            SELECT rt.*, ba.account_name AS bank_account_name
+            SELECT
+              rt.*,
+              ba.account_name AS bank_account_name,
+              COALESCE(inst.total,0)   AS total_instances,
+              COALESCE(inst.posted,0)  AS posted_count,
+              COALESCE(inst.draft,0)   AS draft_count,
+              COALESCE(inst.pending,0) AS pending_count,
+              COALESCE(inst.skipped,0) AS skipped_count
             FROM tr_recurring_transactions rt
-            LEFT JOIN tr_bank_accounts ba ON ba.id=rt.bank_account_id
+            LEFT JOIN tr_bank_accounts ba ON ba.id = rt.bank_account_id
+            LEFT JOIN LATERAL (
+              SELECT
+                COUNT(*)                                        AS total,
+                COUNT(*) FILTER (WHERE status='posted')        AS posted,
+                COUNT(*) FILTER (WHERE status='draft')         AS draft,
+                COUNT(*) FILTER (WHERE status='pending')       AS pending,
+                COUNT(*) FILTER (WHERE status='skipped')       AS skipped
+              FROM tr_recurring_instances
+              WHERE recurring_id = rt.id
+            ) inst ON true
             WHERE rt.tenant_id=:tid
-            ORDER BY next_run_date, rt.created_at DESC
+            ORDER BY rt.created_at DESC
         """), {"tid": tid})
-        rows = [dict(r._mapping) for r in r.fetchall()]
-        for row in rows:
-            if row.get("amount"): row["amount"] = float(row["amount"])
+        rows = []
+        for row in r.mappings().fetchall():
+            d = dict(row)
+            if d.get("amount"):
+                d["amount"] = float(d["amount"])
+            rows.append(d)
         return ok(data={"items": rows, "total": len(rows)})
     except Exception as e:
         import traceback; print(f"[recurring-transactions] {traceback.format_exc()}")
-        # الجدول قد لا يكون موجوداً بعد — نُرجع قائمة فارغة
-        return ok(data={"items": [], "total": 0,
-                        "message": "جدول المعاملات المتكررة غير موجود — شغّل migration الخزينة"})
+        return ok(data={"items": [], "total": 0})
+
+
+@router.get("/recurring-transactions/{rec_id}")
+async def get_recurring(
+    rec_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT rt.*, ba.account_name AS bank_account_name
+        FROM tr_recurring_transactions rt
+        LEFT JOIN tr_bank_accounts ba ON ba.id = rt.bank_account_id
+        WHERE rt.id=:id AND rt.tenant_id=:tid
+    """), {"id": str(rec_id), "tid": tid})
+    row = r.mappings().fetchone()
+    if not row: raise HTTPException(404, "القالب غير موجود")
+    rec = dict(row)
+    if rec.get("amount"): rec["amount"] = float(rec["amount"])
+
+    # الأقساط
+    r2 = await db.execute(text("""
+        SELECT * FROM tr_recurring_instances
+        WHERE recurring_id=:rid
+        ORDER BY instance_number
+    """), {"rid": str(rec_id)})
+    instances = []
+    for row in r2.mappings().fetchall():
+        d = dict(row)
+        if d.get("amount"): d["amount"] = float(d["amount"])
+        instances.append(d)
+
+    rec["instances"] = instances
+    return ok(data=rec)
+
+
+@router.get("/recurring-transactions/{rec_id}/instances")
+async def list_instances(
+    rec_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT ri.* FROM tr_recurring_instances ri
+        JOIN tr_recurring_transactions rt ON rt.id = ri.recurring_id
+        WHERE ri.recurring_id=:rid AND rt.tenant_id=:tid
+        ORDER BY ri.instance_number
+    """), {"rid": str(rec_id), "tid": tid})
+    rows = []
+    for row in r.mappings().fetchall():
+        d = dict(row)
+        if d.get("amount"): d["amount"] = float(d["amount"])
+        rows.append(d)
+    return ok(data={"items": rows, "total": len(rows)})
+
+
 
 
 @router.post("/recurring-transactions")
@@ -3540,39 +3615,107 @@ async def create_recurring(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """إنشاء قالب متكرر مع توليد جدول الأقساط تلقائياً"""
     tid = str(user.tenant_id)
     rec_id = str(uuid.uuid4())
+
+    # الترقيم FBT
+    serial = await _next_serial(db, tid, "FBT", date.today())
+
+    # حساب تاريخ البداية وعدد الأقساط
+    total_installments = int(data.get("total_installments") or 1)
+    start_d = date.fromisoformat(str(data["start_date"])) if data.get("start_date") else date.today()
+    freq     = data.get("frequency", "monthly")
+    amt      = Decimal(str(data.get("amount", 0)))
+
+    # حساب تواريخ الأقساط
+    from calendar import monthrange
+    def add_months(d, n):
+        month = d.month - 1 + n
+        year  = d.year + month // 12
+        month = month % 12 + 1
+        day   = min(d.day, monthrange(year, month)[1])
+        return d.replace(year=year, month=month, day=day)
+
+    def next_date(d, f):
+        from datetime import timedelta
+        if   f == "daily":      return d + timedelta(days=1)
+        elif f == "weekly":     return d + timedelta(weeks=1)
+        elif f == "biweekly":   return d + timedelta(weeks=2)
+        elif f == "monthly":    return add_months(d, 1)
+        elif f == "quarterly":  return add_months(d, 3)
+        elif f == "semiannual": return add_months(d, 6)
+        elif f == "annual":     return add_months(d, 12)
+        return add_months(d, 1)
+
+    instance_dates = []
+    cur = start_d
+    for i in range(total_installments):
+        instance_dates.append(cur)
+        cur = next_date(cur, freq)
+    end_date_val = instance_dates[-1] if instance_dates else start_d
+
     try:
         await db.execute(text("""
             INSERT INTO tr_recurring_transactions
-              (id,tenant_id,name,source,tx_type,bank_account_id,counterpart_account,
-               amount,currency_code,description,frequency,start_date,next_run_date,
-               is_active,created_by)
+              (id,tenant_id,serial,name,source,tx_type,bank_account_id,counterpart_account,
+               amount,currency_code,description,frequency,start_date,end_date,
+               total_installments,next_run_date,
+               branch_code,cost_center,project_code,expense_classification_code,
+               status,is_active,created_by)
             VALUES
-              (:id,:tid,:name,:source,:tt,:ba,:cp,
-               :amt,:curr,:desc,:freq,:start,:next,
-               true,:by)
+              (:id,:tid,:serial,:name,:source,:tt,:ba,:cp,
+               :amt,:curr,:desc,:freq,:start,:end_date,
+               :total,:next,
+               :branch,:cc,:proj,:exp_cls,
+               'active',true,:by)
         """), {
-            "id": rec_id, "tid": tid,
-            "name":   data.get("name") or data.get("description","")[:50],
-            "source": data.get("source","bank"),
-            "tt":     data.get("tx_type","BP"),
-            "ba":     data.get("bank_account_id"),
-            "cp":     data.get("counterpart_account"),
-            "amt":    Decimal(str(data.get("amount",0))),
-            "curr":   data.get("currency_code","SAR"),
-            "desc":   data.get("description",""),
-            "freq":   data.get("frequency","monthly"),
-            "start":  date.fromisoformat(str(data["start_date"])) if data.get("start_date") else None,
-            "next":   date.fromisoformat(str(data["next_due_date"])) if data.get("next_due_date") else
-                      date.fromisoformat(str(data["start_date"])) if data.get("start_date") else None,
-            "by":     user.email,
+            "id": rec_id, "tid": tid, "serial": serial,
+            "name":     data.get("name",""),
+            "source":   data.get("source","bank"),
+            "tt":       data.get("tx_type","BP"),
+            "ba":       data.get("bank_account_id") or None,
+            "cp":       data.get("counterpart_account") or None,
+            "amt":      amt,
+            "curr":     data.get("currency_code","SAR"),
+            "desc":     data.get("description",""),
+            "freq":     freq,
+            "start":    start_d,
+            "end_date": end_date_val,
+            "total":    total_installments,
+            "next":     instance_dates[0] if instance_dates else start_d,
+            "branch":   data.get("branch_code") or None,
+            "cc":       data.get("cost_center") or None,
+            "proj":     data.get("project_code") or None,
+            "exp_cls":  data.get("expense_classification_code") or None,
+            "by":       user.email,
         })
+
+        # توليد جدول الأقساط تلقائياً
+        for i, inst_date in enumerate(instance_dates, 1):
+            await db.execute(text("""
+                INSERT INTO tr_recurring_instances
+                  (id,tenant_id,recurring_id,instance_number,due_date,amount,currency_code,status)
+                VALUES
+                  (:id,:tid,:rid,:num,:due,:amt,:curr,'pending')
+            """), {
+                "id":   str(uuid.uuid4()),
+                "tid":  tid,
+                "rid":  rec_id,
+                "num":  i,
+                "due":  inst_date,
+                "amt":  amt,
+                "curr": data.get("currency_code","SAR"),
+            })
+
         await db.commit()
     except Exception as e:
         await db.rollback()
         raise HTTPException(400, f"خطأ: {str(e)}")
-    return created(data={"id": rec_id})
+
+    return created(data={"id": rec_id, "serial": serial,
+                         "total_installments": total_installments},
+                   message=f"تم إنشاء {serial} مع {total_installments} قسط")
 
 
 @router.put("/recurring-transactions/{rec_id}")
@@ -3583,39 +3726,24 @@ async def update_recurring(
     user: CurrentUser = Depends(get_current_user),
 ):
     tid = str(user.tenant_id)
-    ALLOWED = {
-        "name","source","tx_type","bank_account_id","counterpart_account",
-        "amount","currency_code","description","frequency",
-        "next_run_date","start_date","is_active","notes",
-    }
-    safe = {k: v for k, v in data.items() if k in ALLOWED}
-    if not safe:
-        raise HTTPException(400, "لا توجد بيانات للتعديل")
-
-    # تحويل المبلغ
+    ALLOWED = {"name","source","tx_type","bank_account_id","counterpart_account",
+               "amount","currency_code","description","frequency","is_active","notes",
+               "branch_code","cost_center","project_code","expense_classification_code"}
+    safe = {k:v for k,v in data.items() if k in ALLOWED}
+    if not safe: raise HTTPException(400, "لا بيانات للتعديل")
     if "amount" in safe:
         try: safe["amount"] = Decimal(str(safe["amount"]))
         except: raise HTTPException(400, "المبلغ غير صحيح")
-
-    # تحويل التواريخ
-    for df in ("next_run_date", "start_date"):
-        if df in safe and safe[df]:
-            try: safe[df] = date.fromisoformat(str(safe[df]))
-            except: safe[df] = None
-
     safe["updated_at"] = datetime.utcnow()
     set_clause = ", ".join([f"{k}=:{k}" for k in safe.keys()])
     safe.update({"id": str(rec_id), "tid": tid})
-
     try:
         await db.execute(text(
             f"UPDATE tr_recurring_transactions SET {set_clause} WHERE id=:id AND tenant_id=:tid"
         ), safe)
         await db.commit()
     except Exception as e:
-        await db.rollback()
-        raise HTTPException(400, f"خطأ في التعديل: {str(e)}")
-
+        await db.rollback(); raise HTTPException(400, f"خطأ: {str(e)}")
     return ok(data={"id": str(rec_id)}, message="تم التعديل ✅")
 
 
@@ -3632,95 +3760,140 @@ async def delete_recurring(
         ), {"id": str(rec_id), "tid": tid})
         await db.commit()
     except Exception as e:
-        await db.rollback()
-        raise HTTPException(400, f"خطأ في الحذف: {str(e)}")
+        await db.rollback(); raise HTTPException(400, f"خطأ: {str(e)}")
     return ok(data={}, message="تم الحذف ✅")
 
 
-@router.post("/recurring-transactions/{rec_id}/execute")
-async def execute_recurring(
-    rec_id: uuid.UUID,
+@router.post("/recurring-instances/{inst_id}/execute")
+async def execute_instance(
+    inst_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """تنفيذ قسط — ينشئ سند مسودة"""
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT ri.*, rt.tx_type, rt.source, rt.bank_account_id,
+               rt.counterpart_account, rt.description, rt.currency_code,
+               rt.branch_code, rt.cost_center, rt.project_code,
+               rt.expense_classification_code, rt.name AS rec_name,
+               rt.id AS recurring_id
+        FROM tr_recurring_instances ri
+        JOIN tr_recurring_transactions rt ON rt.id = ri.recurring_id
+        WHERE ri.id=:id AND rt.tenant_id=:tid
+    """), {"id": str(inst_id), "tid": tid})
+    inst = r.mappings().fetchone()
+    if not inst: raise HTTPException(404, "القسط غير موجود")
+    if inst["status"] != "pending":
+        raise HTTPException(400, f"حالة القسط ({inst['status']}) لا تسمح بالتنفيذ")
+
+    tx_date = inst["due_date"]
+    serial  = await _next_serial(db, tid, inst["tx_type"], tx_date)
+    tx_id   = str(uuid.uuid4())
+    amt     = Decimal(str(inst["amount"]))
+    source  = inst.get("source","bank")
+    tx_tbl  = "tr_cash_transactions" if source == "cash" else "tr_bank_transactions"
+
+    try:
+        await db.execute(text(f"""
+            INSERT INTO {tx_tbl}
+              (id,tenant_id,serial,tx_type,tx_date,bank_account_id,
+               amount,currency_code,amount_sar,counterpart_account,
+               description,payment_method,
+               branch_code,cost_center,project_code,expense_classification_code,
+               status,created_by)
+            VALUES
+              (:id,:tid,:serial,:tt,:dt,:ba,
+               :amt,:curr,:amt,:cp,:desc,:pm,
+               :branch,:cc,:proj,:exp_cls,
+               'draft',:by)
+        """), {
+            "id": tx_id, "tid": tid, "serial": serial,
+            "tt":       inst["tx_type"],
+            "dt":       tx_date,
+            "ba":       str(inst["bank_account_id"]) if inst.get("bank_account_id") else None,
+            "amt":      amt,
+            "curr":     inst.get("currency_code","SAR"),
+            "cp":       inst.get("counterpart_account"),
+            "desc":     f"[{inst['rec_name']}] قسط {inst['instance_number']} — {inst.get('description','')}",
+            "pm":       "cash" if source == "cash" else "wire",
+            "branch":   inst.get("branch_code"),
+            "cc":       inst.get("cost_center"),
+            "proj":     inst.get("project_code"),
+            "exp_cls":  inst.get("expense_classification_code"),
+            "by":       user.email,
+        })
+        await db.execute(text("""
+            UPDATE tr_recurring_instances
+            SET status='draft', tx_id=:tx_id, tx_serial=:serial,
+                tx_table=:tbl, executed_by=:by, executed_at=NOW()
+            WHERE id=:id
+        """), {"tx_id": tx_id, "serial": serial, "tbl": tx_tbl,
+               "by": user.email, "id": str(inst_id)})
+        # next_run_date
+        r2 = await db.execute(text("""
+            SELECT due_date FROM tr_recurring_instances
+            WHERE recurring_id=:rid AND status='pending'
+            ORDER BY instance_number LIMIT 1
+        """), {"rid": str(inst["recurring_id"])})
+        nxt = r2.mappings().fetchone()
+        await db.execute(text("""
+            UPDATE tr_recurring_transactions
+            SET last_run_date=:last, next_run_date=:next
+            WHERE id=:rid AND tenant_id=:tid
+        """), {"last": tx_date, "next": nxt["due_date"] if nxt else None,
+               "rid": str(inst["recurring_id"]), "tid": tid})
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ: {str(e)}")
+    return ok(data={"serial": serial, "tx_id": tx_id},
+              message=f"✅ سند مسودة {serial}")
+
+
+@router.post("/recurring-instances/{inst_id}/skip")
+async def skip_instance(
+    inst_id: uuid.UUID,
+    data: dict,
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
     tid = str(user.tenant_id)
     r = await db.execute(text("""
-        SELECT * FROM tr_recurring_transactions
-        WHERE id=:id AND tenant_id=:tid AND is_active=true
-    """), {"id": str(rec_id), "tid": tid})
-    rec = r.mappings().fetchone()
-    if not rec: raise HTTPException(404, "المعاملة غير موجودة")
-    tx_date = date.today()
-    serial  = await _next_serial(db, tid, rec["tx_type"], tx_date)
-    tx_id   = str(uuid.uuid4())
-    amt     = Decimal(str(rec["amount"]))
-    try:
-        source = rec.get("source", "bank")
-        if source == "cash":
-            await db.execute(text("""
-                INSERT INTO tr_cash_transactions
-                  (id,tenant_id,serial,tx_type,tx_date,bank_account_id,
-                   amount,currency_code,amount_sar,counterpart_account,
-                   description,payment_method,status,created_by)
-                VALUES
-                  (:id,:tid,:serial,:tt,:dt,:ba,
-                   :amt,'SAR',:amt,:cp,
-                   :desc,'cash','draft',:by)
-            """), {
-                "id": tx_id, "tid": tid, "serial": serial,
-                "tt": rec["tx_type"], "dt": tx_date,
-                "ba": str(rec["bank_account_id"]) if rec["bank_account_id"] else None,
-                "amt": amt, "cp": rec["counterpart_account"],
-                "desc": rec["description"], "by": user.email,
-            })
-        else:
-            await db.execute(text("""
-                INSERT INTO tr_bank_transactions
-                  (id,tenant_id,serial,tx_type,tx_date,bank_account_id,
-                   amount,currency_code,amount_sar,counterpart_account,
-                   description,payment_method,status,created_by)
-                VALUES
-                  (:id,:tid,:serial,:tt,:dt,:ba,
-                   :amt,'SAR',:amt,:cp,
-                   :desc,'wire','draft',:by)
-            """), {
-                "id": tx_id, "tid": tid, "serial": serial,
-                "tt": rec["tx_type"], "dt": tx_date,
-                "ba": str(rec["bank_account_id"]) if rec["bank_account_id"] else None,
-                "amt": amt, "cp": rec["counterpart_account"],
-                "desc": rec["description"], "by": user.email,
-            })
-        # تحديث next_run_date — يدعم كل ترددات FREQ_LABELS
-        from datetime import timedelta
-        from calendar import monthrange
+        SELECT ri.* FROM tr_recurring_instances ri
+        JOIN tr_recurring_transactions rt ON rt.id = ri.recurring_id
+        WHERE ri.id=:id AND rt.tenant_id=:tid
+    """), {"id": str(inst_id), "tid": tid})
+    inst = r.mappings().fetchone()
+    if not inst: raise HTTPException(404, "القسط غير موجود")
+    if inst["status"] != "pending":
+        raise HTTPException(400, "لا يمكن تخطي هذا القسط")
+    await db.execute(text("""
+        UPDATE tr_recurring_instances
+        SET status='skipped', skipped_by=:by, skipped_at=NOW(), skip_reason=:reason
+        WHERE id=:id
+    """), {"by": user.email, "reason": data.get("reason",""), "id": str(inst_id)})
+    await db.commit()
+    return ok(data={}, message="تم تخطي القسط")
 
-        def add_months(d, n):
-            """إضافة n شهر لتاريخ مع معالجة نهاية الشهر"""
-            month = d.month - 1 + n
-            year  = d.year + month // 12
-            month = month % 12 + 1
-            day   = min(d.day, monthrange(year, month)[1])
-            return d.replace(year=year, month=month, day=day)
 
-        freq = rec["frequency"]
-        if   freq == "daily":      next_d = tx_date + timedelta(days=1)
-        elif freq == "weekly":     next_d = tx_date + timedelta(weeks=1)
-        elif freq == "biweekly":   next_d = tx_date + timedelta(weeks=2)
-        elif freq == "monthly":    next_d = add_months(tx_date, 1)
-        elif freq == "quarterly":  next_d = add_months(tx_date, 3)
-        elif freq == "semiannual": next_d = add_months(tx_date, 6)
-        elif freq == "annual":     next_d = add_months(tx_date, 12)
-        else:                      next_d = tx_date + timedelta(days=30)
-        await db.execute(text("""
-            UPDATE tr_recurring_transactions
-            SET last_run_date=:last, next_run_date=:next
-            WHERE id=:id AND tenant_id=:tid
-        """), {"last": tx_date, "next": next_d, "id": str(rec_id), "tid": tid})
-        await db.commit()
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(400, f"خطأ: {str(e)}")
-    return ok(data={"serial": serial}, message=f"✅ تم إنشاء {serial}")
+@router.post("/recurring-transactions/{rec_id}/execute")
+async def execute_recurring_legacy(
+    rec_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """تنفيذ القسط التالي المعلق — للتوافق مع الكود القديم"""
+    tid = str(user.tenant_id)
+    r = await db.execute(text("""
+        SELECT ri.id FROM tr_recurring_instances ri
+        JOIN tr_recurring_transactions rt ON rt.id = ri.recurring_id
+        WHERE ri.recurring_id=:rid AND rt.tenant_id=:tid AND ri.status='pending'
+        ORDER BY ri.instance_number LIMIT 1
+    """), {"rid": str(rec_id), "tid": tid})
+    inst = r.mappings().fetchone()
+    if not inst: raise HTTPException(400, "لا يوجد قسط معلق للتنفيذ")
+    return await execute_instance(inst["id"], db, user)
 
 # ══════════════════════════════════════════════════════════
 # SMART BANK IMPORT — استيراد كشف البنك الذكي
