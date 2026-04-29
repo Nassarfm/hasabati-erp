@@ -648,6 +648,44 @@ async def reverse_je(je_id: uuid.UUID, data: ReverseJERequest, svc: AccountingSe
 # ══════════════════════════════════════════════════════════
 # Recurring Entries — القيود المتكررة
 # ══════════════════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════════════════
+# الأستاذ المساعد — جلب المتعاملين الماليين
+# ══════════════════════════════════════════════════════════
+@router.get("/parties")
+async def list_parties(
+    search: Optional[str] = Query(None),
+    limit:  int = Query(100),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """جلب المتعاملين الماليين للأستاذ المساعد"""
+    tid = str(user.tenant_id)
+    try:
+        from sqlalchemy import text
+        conds = ["p.tenant_id=:tid", "p.is_active=true"]
+        params: dict = {"tid": tid, "limit": limit}
+        if search:
+            conds.append("(p.name ILIKE :s OR p.code ILIKE :s OR p.tax_number ILIKE :s)")
+            params["s"] = f"%{search}%"
+        r = await db.execute(text(f"""
+            SELECT p.id, p.name, p.code, p.tax_number,
+                   p.party_type,
+                   COALESCE(STRING_AGG(DISTINCT pr.role_code, ','), '') AS roles
+            FROM parties p
+            LEFT JOIN party_roles pr ON pr.party_id = p.id
+            WHERE {" AND ".join(conds)}
+            GROUP BY p.id, p.name, p.code, p.tax_number, p.party_type
+            ORDER BY p.name
+            LIMIT :limit
+        """), params)
+        rows = [dict(r._mapping) for r in r.fetchall()]
+        return ok(data=rows)
+    except Exception as e:
+        import traceback; print(f"[accounting/parties] {traceback.format_exc()}")
+        return ok(data=[], message=str(e))
+
 from app.modules.accounting.recurring_router import router as recurring_router
 router.include_router(recurring_router)
 
