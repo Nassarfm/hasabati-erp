@@ -3895,6 +3895,125 @@ async def execute_recurring_legacy(
     if not inst: raise HTTPException(400, "لا يوجد قسط معلق للتنفيذ")
     return await execute_instance(inst["id"], db, user)
 
+
+# ══════════════════════════════════════════════════════════
+# AUTHORITY MATRIX — مصفوفة التفويض / موقعو الشيكات
+# ══════════════════════════════════════════════════════════
+
+@router.get("/signatories")
+async def list_signatories(
+    bank_account_id: Optional[str] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    try:
+        where = ["s.tenant_id=:tid"]
+        params = {"tid": tid}
+        if bank_account_id:
+            where.append("s.bank_account_id=:ba_id")
+            params["ba_id"] = bank_account_id
+        r = await db.execute(text("""
+            SELECT s.*, ba.account_name AS bank_name, ba.account_code AS bank_label
+            FROM cheque_signatories s
+            LEFT JOIN tr_bank_accounts ba ON ba.id = s.bank_account_id
+            WHERE """ + " AND ".join(where) + """
+            ORDER BY ba.account_name, s.signatory_name
+        """), params)
+        rows = [dict(row._mapping) for row in r.fetchall()]
+        return ok(data=rows)
+    except Exception as e:
+        import traceback; print(f"[signatories] {traceback.format_exc()}")
+        return ok(data=[], message="جدول التفويضات غير موجود — شغّل migration الشيكات")
+
+
+@router.post("/signatories")
+async def create_signatory(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    sig_id = str(uuid.uuid4())
+    try:
+        await db.execute(text("""
+            INSERT INTO cheque_signatories
+              (id, tenant_id, bank_account_id, signatory_name, signatory_title,
+               signatory_email, authorization_type, min_amount, max_amount,
+               valid_from, valid_to, is_active, notes, created_by)
+            VALUES
+              (:id, :tid, :ba_id, :name, :title,
+               :email, :auth_type, :min_amt, :max_amt,
+               :valid_from, :valid_to, :is_active, :notes, :by)
+        """), {
+            "id":        sig_id,
+            "tid":       tid,
+            "ba_id":     data.get("bank_account_id") or None,
+            "name":      data.get("signatory_name",""),
+            "title":     data.get("signatory_title",""),
+            "email":     data.get("signatory_email",""),
+            "auth_type": data.get("authorization_type","single"),
+            "min_amt":   Decimal(str(data.get("min_amount",0))),
+            "max_amt":   Decimal(str(data["max_amount"])) if data.get("max_amount") not in (None,"") else None,
+            "valid_from":date.fromisoformat(str(data["valid_from"])) if data.get("valid_from") else date.today(),
+            "valid_to":  date.fromisoformat(str(data["valid_to"])) if data.get("valid_to") else None,
+            "is_active": data.get("is_active", True),
+            "notes":     data.get("notes",""),
+            "by":        user.email,
+        })
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"خطأ: {str(e)}")
+    return created(data={"id": sig_id}, message="تمت إضافة الموقع ✅")
+
+
+@router.put("/signatories/{sig_id}")
+async def update_signatory(
+    sig_id: uuid.UUID,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    ALLOWED = {"bank_account_id","signatory_name","signatory_title","signatory_email",
+               "authorization_type","min_amount","max_amount","valid_from","valid_to",
+               "is_active","notes"}
+    safe = {k:v for k,v in data.items() if k in ALLOWED}
+    if "min_amount" in safe: safe["min_amount"] = Decimal(str(safe["min_amount"]))
+    if "max_amount" in safe: safe["max_amount"] = Decimal(str(safe["max_amount"])) if safe["max_amount"] not in (None,"") else None
+    if "valid_from" in safe and safe["valid_from"]: safe["valid_from"] = date.fromisoformat(str(safe["valid_from"]))
+    if "valid_to"   in safe and safe["valid_to"]:   safe["valid_to"]   = date.fromisoformat(str(safe["valid_to"]))
+    if not safe: raise HTTPException(400, "لا بيانات للتعديل")
+    safe["updated_at"] = datetime.utcnow()
+    set_clause = ", ".join([f"{k}=:{k}" for k in safe.keys()])
+    safe.update({"id": str(sig_id), "tid": tid})
+    try:
+        await db.execute(text(
+            f"UPDATE cheque_signatories SET {set_clause} WHERE id=:id AND tenant_id=:tid"
+        ), safe)
+        await db.commit()
+    except Exception as e:
+        await db.rollback(); raise HTTPException(400, f"خطأ: {str(e)}")
+    return ok(data={"id": str(sig_id)}, message="تم التعديل ✅")
+
+
+@router.delete("/signatories/{sig_id}")
+async def delete_signatory(
+    sig_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    try:
+        await db.execute(text(
+            "DELETE FROM cheque_signatories WHERE id=:id AND tenant_id=:tid"
+        ), {"id": str(sig_id), "tid": tid})
+        await db.commit()
+    except Exception as e:
+        await db.rollback(); raise HTTPException(400, f"خطأ: {str(e)}")
+    return ok(data={}, message="تم الحذف ✅")
+
 # ══════════════════════════════════════════════════════════
 # SMART BANK IMPORT — استيراد كشف البنك الذكي
 # يقرأ Excel ← ينشئ سندات مسودة PAY/REC بحسابات وسيطة
