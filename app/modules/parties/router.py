@@ -375,19 +375,24 @@ async def party_statement(
     if not party:
         raise HTTPException(404, "المتعامل غير موجود")
 
-    # فلاتر التاريخ
+    # فلاتر التاريخ — تحويل string إلى date object (asyncpg يحتاج date type لمقارنة entry_date)
     date_filter = ""
-    pid_str = str(party_id)  # نحوّل UUID → string صراحةً
-    params: dict = {"tid": tid}
+    pid_str = str(party_id)
+    params: dict = {"tid": tid, "pid": pid_str}
     if date_from:
-        date_filter += " AND je.entry_date >= :df"
-        params["df"] = date_from
+        try:
+            params["df"] = date.fromisoformat(date_from)
+            date_filter += " AND je.entry_date >= :df"
+        except (ValueError, TypeError):
+            raise HTTPException(400, "تنسيق date_from غير صحيح (يجب YYYY-MM-DD)")
     if date_to:
-        date_filter += " AND je.entry_date <= :dt"
-        params["dt"] = date_to
+        try:
+            params["dt"] = date.fromisoformat(date_to)
+            date_filter += " AND je.entry_date <= :dt"
+        except (ValueError, TypeError):
+            raise HTTPException(400, "تنسيق date_to غير صحيح (يجب YYYY-MM-DD)")
 
     # جلب سطور القيود المرتبطة بالمتعامل
-    # نضع party_id مباشرة في النص لتجنب مشكلة type inference في asyncpg
     try:
         r = await db.execute(text(f"""
             SELECT
@@ -405,7 +410,7 @@ async def party_statement(
             FROM je_lines jl
             JOIN journal_entries je ON je.id = jl.journal_entry_id
             LEFT JOIN parties p ON p.id::text = jl.party_id::text
-            WHERE jl.party_id::text = '{pid_str}'
+            WHERE jl.party_id::text = :pid
               AND je.tenant_id = :tid
               AND je.status    = 'posted'
               {date_filter}
