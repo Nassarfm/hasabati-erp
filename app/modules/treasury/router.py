@@ -4272,7 +4272,7 @@ async def smart_import_preview(
 
         if debit > 0:
             # خروج من البنك → سند دفع PAY
-            serial   = f"PAY-{year}-{pay_seq:07d}"
+            serial   = f"PAY-{year}-{pay_seq}"
             pay_seq += 1
             entry = {
                 "row_idx":    idx,
@@ -4295,7 +4295,7 @@ async def smart_import_preview(
             }
         else:
             # دخول للبنك → سند قبض REC
-            serial   = f"COL-{year}-{rec_seq:07d}"
+            serial   = f"COL-{year}-{rec_seq}"
             rec_seq += 1
             entry = {
                 "row_idx":    idx,
@@ -4385,7 +4385,7 @@ async def smart_import_create_drafts(
                 "ba":      row.get("bank_account_id"),
                 "amt":     amt,
                 "cp_acc":  row.get("credit_account") if tx_type=="BR" else row.get("debit_account"),
-                "desc":    row.get("description",""),
+                "desc":    row.get("description","") or ("دفعة مستوردة" if row.get("direction","out")=="out" else "تحصيل مستورد"),
                 "ref":     row.get("reference",""),
                 "branch":  row.get("branch_code"),
                 "cc":      row.get("cost_center"),
