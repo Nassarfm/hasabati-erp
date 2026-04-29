@@ -985,6 +985,8 @@ async def list_internal_transfers(
                 it.je_serial,
                 it.created_by, it.created_at,
                 it.posted_by,  it.posted_at,
+                COALESCE(it.is_reconciled, false) AS is_reconciled,
+                it.reconciled_at,
                 fa.account_name AS from_account_name,
                 ta.account_name AS to_account_name
             FROM tr_internal_transfers it
@@ -1634,9 +1636,8 @@ async def toggle_reconcile_tx(
             continue
 
     if not updated:
-        # الجدول قد لا يحتوي عمود is_reconciled بعد — نتجاهل بهدوء
         await db.rollback()
-        return ok(data={"updated": False}, message="التسوية محفوظة محلياً")
+        raise HTTPException(400, "لم يتم العثور على الحركة أو عمود is_reconciled غير موجود — شغّل migration التسوية")
 
     await db.commit()
     status = "مُسوَّى" if is_rec else "غير مُسوَّى"
