@@ -203,11 +203,11 @@ async def dashboard(
           (SELECT COUNT(*) FROM inv_categories WHERE tenant_id=:tid) AS total_categories,
           (SELECT COALESCE(SUM(total_value),0) FROM inv_balances WHERE tenant_id=:tid) AS total_value,
           (SELECT COALESCE(SUM(qty_on_hand),0) FROM inv_balances WHERE tenant_id=:tid) AS total_qty
-    """), {"tid": tid})
-    krow = r.mappings().fetchone()
+        """), {"tid": tid})
+        krow = r.mappings().fetchone()
 
-    # أصناف تحت الحد الأدنى
-    r2 = await db.execute(text("""
+        # أصناف تحت الحد الأدنى
+        r2 = await db.execute(text("""
         SELECT i.item_code, i.item_name, i.min_qty, i.reorder_point,
                COALESCE(SUM(b.qty_on_hand),0) AS qty_on_hand,
                u.uom_name
@@ -218,11 +218,11 @@ async def dashboard(
         GROUP BY i.id, i.item_code, i.item_name, i.min_qty, i.reorder_point, u.uom_name
         HAVING COALESCE(SUM(b.qty_on_hand),0) <= i.min_qty
         LIMIT 10
-    """), {"tid": tid})
-    low_stock = [dict(row._mapping) for row in r2.fetchall()]
+        """), {"tid": tid})
+        low_stock = [dict(row._mapping) for row in r2.fetchall()]
 
-    # قيمة المخزون حسب التصنيف
-    r3 = await db.execute(text("""
+        # قيمة المخزون حسب التصنيف
+        r3 = await db.execute(text("""
         SELECT c.category_name, COALESCE(SUM(b.total_value),0) AS total_value
         FROM inv_categories c
         JOIN inv_items i ON i.category_id=c.id AND i.tenant_id=:tid
@@ -230,28 +230,28 @@ async def dashboard(
         WHERE c.tenant_id=:tid
         GROUP BY c.id, c.category_name
         ORDER BY total_value DESC LIMIT 8
-    """), {"tid": tid})
-    by_category = [dict(row._mapping) for row in r3.fetchall()]
+        """), {"tid": tid})
+        by_category = [dict(row._mapping) for row in r3.fetchall()]
 
-    # آخر الحركات
-    r4 = await db.execute(text("""
+        # آخر الحركات
+        r4 = await db.execute(text("""
         SELECT t.serial, t.tx_type, t.tx_date, t.description, t.total_cost, t.status
         FROM inv_transactions t
         WHERE t.tenant_id=:tid
         ORDER BY t.created_at DESC LIMIT 8
-    """), {"tid": tid})
-    recent_tx = [dict(row._mapping) for row in r4.fetchall()]
+        """), {"tid": tid})
+        recent_tx = [dict(row._mapping) for row in r4.fetchall()]
 
-    # معدل دوران المخزون (آخر 30 يوم)
-    r5 = await db.execute(text("""
+        # معدل دوران المخزون (آخر 30 يوم)
+        r5 = await db.execute(text("""
         SELECT COALESCE(SUM(total_cost),0) AS cogs_30d
         FROM inv_ledger
         WHERE tenant_id=:tid AND qty_out>0
           AND tx_date >= CURRENT_DATE - 30
-    """), {"tid": tid})
-    cogs_30d = float(r5.scalar() or 0)
-    total_val = float(krow["total_value"] or 1)
-    turnover_rate = round((cogs_30d / total_val * 12) if total_val > 0 else 0, 2)
+        """), {"tid": tid})
+        cogs_30d = float(r5.scalar() or 0)
+        total_val = float(krow["total_value"] or 1)
+        turnover_rate = round((cogs_30d / total_val * 12) if total_val > 0 else 0, 2)
 
     except Exception as e:
         import traceback; print(f"[inv/dashboard] {traceback.format_exc()}")
