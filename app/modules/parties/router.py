@@ -77,17 +77,38 @@ async def list_parties(
         where.append("is_active = :active")
         params["active"] = is_active
 
+    # حساب net_balance ديناميكياً من je_lines (LEFT JOIN على derived table للأداء)
+    # نُعيد تسمية أعمدة WHERE لاستخدام alias p
+    where_p = [w.replace("tenant_id", "p.tenant_id")
+                .replace("party_type", "p.party_type")
+                .replace("party_name_ar", "p.party_name_ar")
+                .replace("party_code", "p.party_code")
+                .replace("national_id", "p.national_id")
+                .replace("is_active", "p.is_active")
+              for w in where]
     r = await db.execute(text(f"""
         SELECT
-            id, party_code, party_name_ar, party_name_en,
-            party_type, is_employee, is_customer, is_vendor, is_fund_keeper,
-            national_id, phone, email, notes,
-            net_balance, is_active,
-            employee_id, customer_id, vendor_id,
-            created_at
-        FROM parties
-        WHERE {' AND '.join(where)}
-        ORDER BY party_name_ar
+            p.id, p.party_code, p.party_name_ar, p.party_name_en,
+            p.party_type, p.is_employee, p.is_customer, p.is_vendor, p.is_fund_keeper,
+            p.national_id, p.phone, p.email, p.notes,
+            COALESCE(b.net_balance, 0) AS net_balance,
+            p.is_active,
+            p.employee_id, p.customer_id, p.vendor_id,
+            p.created_at
+        FROM parties p
+        LEFT JOIN (
+            SELECT
+                jl.party_id,
+                SUM(COALESCE(jl.debit, 0) - COALESCE(jl.credit, 0)) AS net_balance
+            FROM je_lines jl
+            JOIN journal_entries je ON je.id = jl.journal_entry_id
+            WHERE je.tenant_id = :tid
+              AND je.status    = 'posted'
+              AND jl.party_id IS NOT NULL
+            GROUP BY jl.party_id
+        ) b ON b.party_id = p.id
+        WHERE {' AND '.join(where_p)}
+        ORDER BY p.party_name_ar
         LIMIT :limit
     """), params)
 
@@ -354,24 +375,19 @@ async def party_statement(
     if not party:
         raise HTTPException(404, "المتعامل غير موجود")
 
-    # فلاتر التاريخ — تحويل string إلى date object (asyncpg يحتاج date type لمقارنة entry_date)
+    # فلاتر التاريخ
     date_filter = ""
-    pid_str = str(party_id)
-    params: dict = {"tid": tid, "pid": pid_str}
+    pid_str = str(party_id)  # نحوّل UUID → string صراحةً
+    params: dict = {"tid": tid}
     if date_from:
-        try:
-            params["df"] = date.fromisoformat(date_from)
-            date_filter += " AND je.entry_date >= :df"
-        except (ValueError, TypeError):
-            raise HTTPException(400, "تنسيق date_from غير صحيح (يجب YYYY-MM-DD)")
+        date_filter += " AND je.entry_date >= :df"
+        params["df"] = date_from
     if date_to:
-        try:
-            params["dt"] = date.fromisoformat(date_to)
-            date_filter += " AND je.entry_date <= :dt"
-        except (ValueError, TypeError):
-            raise HTTPException(400, "تنسيق date_to غير صحيح (يجب YYYY-MM-DD)")
+        date_filter += " AND je.entry_date <= :dt"
+        params["dt"] = date_to
 
     # جلب سطور القيود المرتبطة بالمتعامل
+    # نضع party_id مباشرة في النص لتجنب مشكلة type inference في asyncpg
     try:
         r = await db.execute(text(f"""
             SELECT
@@ -389,7 +405,7 @@ async def party_statement(
             FROM je_lines jl
             JOIN journal_entries je ON je.id = jl.journal_entry_id
             LEFT JOIN parties p ON p.id::text = jl.party_id::text
-            WHERE jl.party_id::text = :pid
+            WHERE jl.party_id::text = '{pid_str}'
               AND je.tenant_id = :tid
               AND je.status    = 'posted'
               {date_filter}
