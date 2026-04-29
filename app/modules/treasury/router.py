@@ -4091,7 +4091,7 @@ async def smart_import_preview(
 
         if debit > 0:
             # خروج من البنك → سند دفع PAY
-            serial   = f"PAY-{year}/{pay_seq}"
+            serial   = f"BSI-{year}/{pay_seq:04d}"
             pay_seq += 1
             entry = {
                 "row_idx":    idx,
@@ -4114,7 +4114,7 @@ async def smart_import_preview(
             }
         else:
             # دخول للبنك → سند قبض REC
-            serial   = f"REC-{year}/{rec_seq}"
+            serial   = f"BSI-{year}/{rec_seq:04d}"
             rec_seq += 1
             entry = {
                 "row_idx":    idx,
@@ -4199,7 +4199,7 @@ async def smart_import_create_drafts(
                 "tx_date": tx_date,
                 "ba":      row.get("bank_account_id"),
                 "amt":     amt,
-                "cp_acc":  row.get("debit_account")  if tx_type=="BR" else row.get("credit_account"),
+                "cp_acc":  row.get("credit_account") if tx_type=="BR" else row.get("debit_account"),
                 "desc":    row.get("description",""),
                 "ref":     row.get("reference",""),
                 "branch":  row.get("branch_code"),
