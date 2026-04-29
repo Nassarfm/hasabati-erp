@@ -4015,6 +4015,187 @@ async def delete_signatory(
         await db.rollback(); raise HTTPException(400, f"خطأ: {str(e)}")
     return ok(data={}, message="تم الحذف ✅")
 
+
+
+# ══════════════════════════════════════════════════════════
+# INVENTORY REPORTS — Additional
+# ══════════════════════════════════════════════════════════
+
+@router.get("/reports/cogs")
+async def cogs_report(
+    date_from: Optional[date]=Query(None),
+    date_to:   Optional[date]=Query(None),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """تحليل تكلفة البضاعة المباعة من دفتر الأستاذ"""
+    tid = str(user.tenant_id)
+    conds = ["l.tenant_id=:tid","l.qty_out>0"]
+    params: dict = {"tid": tid}
+    if date_from: conds.append("l.tx_date>=:df"); params["df"] = str(date_from)
+    if date_to:   conds.append("l.tx_date<=:dt"); params["dt"] = str(date_to)
+    where = " AND ".join(conds)
+    try:
+        r = await db.execute(text(f"""
+            SELECT i.item_code, i.item_name,
+                   SUM(l.qty_out)           AS qty_sold,
+                   AVG(l.unit_cost)         AS avg_cost,
+                   SUM(l.total_cost)        AS total_cogs
+            FROM inv_ledger l
+            JOIN inv_items i ON i.id=l.item_id
+            WHERE {where}
+            GROUP BY i.id, i.item_code, i.item_name
+            ORDER BY total_cogs DESC
+        """), params)
+        rows = [{**dict(row._mapping),
+                 "qty_sold":   float(row._mapping["qty_sold"]  or 0),
+                 "avg_cost":   float(row._mapping["avg_cost"]  or 0),
+                 "total_cogs": float(row._mapping["total_cogs"]or 0)}
+                for row in r.fetchall()]
+        return ok(data=rows)
+    except Exception as e:
+        return ok(data=[], message=str(e))
+
+
+@router.get("/reports/turnover")
+async def turnover_report(
+    date_from: Optional[date]=Query(None),
+    date_to:   Optional[date]=Query(None),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """معدل دوران المخزون لكل صنف"""
+    tid = str(user.tenant_id)
+    conds = ["l.tenant_id=:tid","l.qty_out>0"]
+    params: dict = {"tid": tid}
+    if date_from: conds.append("l.tx_date>=:df"); params["df"] = str(date_from)
+    if date_to:   conds.append("l.tx_date<=:dt"); params["dt"] = str(date_to)
+    where = " AND ".join(conds)
+    try:
+        r = await db.execute(text(f"""
+            SELECT i.item_code, i.item_name,
+                   SUM(l.total_cost)               AS cogs,
+                   AVG(b.total_value)               AS avg_inventory,
+                   CASE WHEN AVG(b.total_value)>0
+                     THEN SUM(l.total_cost)/AVG(b.total_value)
+                     ELSE 0 END                     AS turnover_rate,
+                   CASE WHEN SUM(l.total_cost)>0
+                     THEN ROUND(AVG(b.total_value)/SUM(l.total_cost)*365)
+                     ELSE NULL END                  AS days_in_stock
+            FROM inv_ledger l
+            JOIN inv_items i ON i.id=l.item_id
+            LEFT JOIN inv_balances b ON b.item_id=i.id AND b.tenant_id=:tid
+            WHERE {where}
+            GROUP BY i.id, i.item_code, i.item_name
+            ORDER BY turnover_rate DESC
+        """), params)
+        items = [{**dict(row._mapping),
+                  "cogs":          float(row._mapping["cogs"]         or 0),
+                  "avg_inventory": float(row._mapping["avg_inventory"] or 0),
+                  "turnover_rate": float(row._mapping["turnover_rate"] or 0)}
+                 for row in r.fetchall()]
+        total_cogs = sum(i["cogs"] for i in items)
+        total_inv  = sum(i["avg_inventory"] for i in items)
+        return ok(data={
+            "items": items,
+            "summary": {
+                "overall_turnover": round(total_cogs/total_inv, 2) if total_inv>0 else 0,
+                "total_cogs":       round(total_cogs, 2),
+                "avg_inventory_value": round(total_inv, 2),
+            }
+        })
+    except Exception as e:
+        return ok(data={"items":[], "summary":{}}, message=str(e))
+
+
+@router.get("/reports/variance")
+async def variance_report(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """فروقات الجرد من جلسات العد المرحّلة"""
+    tid = str(user.tenant_id)
+    try:
+        r = await db.execute(text("""
+            SELECT s.serial, s.count_date, s.warehouse_name,
+                   s.lines_with_variance, s.total_variance_value
+            FROM inv_count_sessions s
+            WHERE s.tenant_id=:tid AND s.status='posted'
+            ORDER BY s.count_date DESC
+        """), {"tid": tid})
+        sessions = [dict(row._mapping) for row in r.fetchall()]
+        # جلب أسطر الفروقات لكل جلسة
+        for sess in sessions:
+            r2 = await db.execute(text("""
+                SELECT l.item_code, l.item_name, l.system_qty, l.actual_qty,
+                       l.variance, l.variance_value
+                FROM inv_count_lines l
+                JOIN inv_count_sessions s ON s.id=l.session_id
+                WHERE s.serial=:serial AND s.tenant_id=:tid AND l.variance!=0
+            """), {"serial": sess["serial"], "tid": tid})
+            sess["lines"] = [dict(row._mapping) for row in r2.fetchall()]
+        return ok(data=sessions)
+    except Exception as e:
+        return ok(data=[], message=str(e))
+
+
+@router.get("/reports/negative-stock")
+async def negative_stock_report(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """الأصناف ذات المخزون السالب"""
+    tid = str(user.tenant_id)
+    try:
+        r = await db.execute(text("""
+            SELECT i.item_code, i.item_name, u.uom_name,
+                   w.warehouse_name, b.qty_on_hand, b.avg_cost, b.total_value
+            FROM inv_balances b
+            JOIN inv_items i ON i.id=b.item_id
+            LEFT JOIN inv_uom u ON u.id=i.uom_id
+            JOIN inv_warehouses w ON w.id=b.warehouse_id
+            WHERE b.tenant_id=:tid AND b.qty_on_hand < 0
+            ORDER BY b.qty_on_hand ASC
+        """), {"tid": tid})
+        rows = [{**dict(row._mapping),
+                 "qty_on_hand": float(row._mapping["qty_on_hand"] or 0),
+                 "total_value": float(row._mapping["total_value"] or 0)}
+                for row in r.fetchall()]
+        return ok(data=rows)
+    except Exception as e:
+        return ok(data=[], message=str(e))
+
+
+@router.get("/reports/expiry")
+async def expiry_report(
+    days_ahead: int = Query(default=90),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """الأصناف القريبة من انتهاء الصلاحية (من أسطر الحركات)"""
+    tid = str(user.tenant_id)
+    try:
+        r = await db.execute(text("""
+            SELECT DISTINCT i.item_code, i.item_name, u.uom_name,
+                   w.warehouse_name, tl.lot_number, tl.expiry_date,
+                   tl.qty AS qty_on_hand,
+                   (tl.expiry_date - CURRENT_DATE) AS days_to_expiry
+            FROM inv_transaction_lines tl
+            JOIN inv_transactions t  ON t.id=tl.tx_id AND t.tenant_id=:tid AND t.status='posted'
+            JOIN inv_items i         ON i.id=tl.item_id
+            LEFT JOIN inv_uom u      ON u.id=i.uom_id
+            JOIN inv_warehouses w    ON w.id=t.to_warehouse_id
+            WHERE tl.expiry_date IS NOT NULL
+              AND tl.expiry_date <= CURRENT_DATE + (:days * INTERVAL '1 day')
+            ORDER BY tl.expiry_date ASC
+        """), {"tid": tid, "days": days_ahead})
+        rows = [{**dict(row._mapping),
+                 "days_to_expiry": int(row._mapping["days_to_expiry"] or 0)}
+                for row in r.fetchall()]
+        return ok(data=rows)
+    except Exception as e:
+        return ok(data=[], message=str(e))
+
 # ══════════════════════════════════════════════════════════
 # SMART BANK IMPORT — استيراد كشف البنك الذكي
 # يقرأ Excel ← ينشئ سندات مسودة PAY/REC بحسابات وسيطة
@@ -4091,13 +4272,13 @@ async def smart_import_preview(
 
         if debit > 0:
             # خروج من البنك → سند دفع PAY
-            serial   = f"BSI-{year}/{pay_seq:04d}"
+            serial   = f"PAY-{year}-{pay_seq:07d}"
             pay_seq += 1
             entry = {
                 "row_idx":    idx,
                 "serial":     serial,
                 "direction":  "out",
-                "tx_type":    "BP",
+                "tx_type":    "BSI",
                 "tx_date":    str(tx_date),
                 "description": desc,
                 "amount":     round(debit, 3),
@@ -4114,13 +4295,13 @@ async def smart_import_preview(
             }
         else:
             # دخول للبنك → سند قبض REC
-            serial   = f"BSI-{year}/{rec_seq:04d}"
+            serial   = f"COL-{year}-{rec_seq:07d}"
             rec_seq += 1
             entry = {
                 "row_idx":    idx,
                 "serial":     serial,
                 "direction":  "in",
-                "tx_type":    "BR",
+                "tx_type":    "BSI",
                 "tx_date":    str(tx_date),
                 "description": desc,
                 "amount":     round(credit, 3),
@@ -4172,8 +4353,12 @@ async def smart_import_create_drafts(
             amt      = Decimal(str(row["amount"]))
             tx_type  = row.get("tx_type", "BP")
 
-            # نستخدم serial من الـ preview أو نولّد جديد
-            serial   = row.get("serial") or await _next_serial(db, tid, tx_type, tx_date)
+            # نستخدم serial من الـ preview دائماً (PAY/COL format)
+            serial = row.get("serial")
+            if not serial:
+                direction = row.get("direction","out")
+                pfx = "PAY" if direction=="out" else "COL"
+                serial = await _next_serial(db, tid, pfx, tx_date)
             tx_id    = str(uuid.uuid4())
 
             await db.execute(text("""
@@ -4223,6 +4408,50 @@ async def smart_import_create_drafts(
                 (f" | ⚠️ {len(errors)} فشل" if errors else "")
     )
 
+
+
+
+@router.get("/smart-import/imported")
+async def list_imported_transactions(
+    bank_account_id: Optional[str] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """قائمة السندات المستوردة من كشف البنك (BSI)"""
+    tid = str(user.tenant_id)
+    conds = ["bt.tenant_id=:tid", "bt.payment_method='bank_import'"]
+    params: dict = {"tid": tid}
+    if bank_account_id:
+        conds.append("bt.bank_account_id=:ba")
+        params["ba"] = bank_account_id
+    try:
+        r = await db.execute(text(f"""
+            SELECT bt.id, bt.serial, bt.tx_type, bt.tx_date::text,
+                   bt.amount, bt.description, bt.status,
+                   bt.counterpart_account,
+                   ba.account_name AS bank_account_name,
+                   bt.created_at::text, bt.je_serial,
+                   CASE WHEN bt.serial LIKE 'PAY%%' THEN 'out' ELSE 'in' END AS direction
+            FROM tr_bank_transactions bt
+            LEFT JOIN tr_bank_accounts ba ON ba.id=bt.bank_account_id
+            WHERE {" AND ".join(conds)}
+            ORDER BY bt.tx_date DESC, bt.serial DESC
+            LIMIT 500
+        """), params)
+        rows = [dict(r._mapping) for r in r.fetchall()]
+        summary = {
+            "total":    len(rows),
+            "payments": sum(1 for r in rows if r["direction"]=="out"),
+            "receipts": sum(1 for r in rows if r["direction"]=="in"),
+            "total_out":round(sum(float(r["amount"]) for r in rows if r["direction"]=="out"),2),
+            "total_in": round(sum(float(r["amount"]) for r in rows if r["direction"]=="in"),2),
+            "posted":   sum(1 for r in rows if r["status"]=="posted"),
+            "draft":    sum(1 for r in rows if r["status"]=="draft"),
+        }
+        return ok(data={"items": rows, "summary": summary})
+    except Exception as e:
+        import traceback; print(f"[smart-import/imported] {traceback.format_exc()}")
+        return ok(data={"items":[], "summary":{}})
 
 @router.get("/smart-import/settings")
 async def get_smart_import_settings(
