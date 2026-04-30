@@ -318,15 +318,32 @@ async def list_je(
 ):
     from sqlalchemy import text as _txt
 
-    items, total = await svc.list_je(
-        status=status,
-        je_type=je_type,
-        date_from=date_from,
-        date_to=date_to,
-        fiscal_year=fiscal_year,
-        offset=offset,
-        limit=limit,
-    )
+    # عند وجود search/created_by/amount filters → نوسّع الـ limit للـ service
+    # لأن البحث client-side، نحتاج كل المطابقين
+    has_clientside_filter = bool(search or created_by or min_amount is not None or max_amount is not None)
+
+    if has_clientside_filter:
+        # نجلب عدداً أكبر بكثير لضمان شمول كل القيود المطابقة للبحث
+        items, total = await svc.list_je(
+            status=status,
+            je_type=je_type,
+            date_from=date_from,
+            date_to=date_to,
+            fiscal_year=fiscal_year,
+            offset=0,
+            limit=5000,
+        )
+    else:
+        items, total = await svc.list_je(
+            status=status,
+            je_type=je_type,
+            date_from=date_from,
+            date_to=date_to,
+            fiscal_year=fiscal_year,
+            offset=offset,
+            limit=limit,
+        )
+
     # فلترة client-side
     if search:
         s = search.lower()
@@ -337,6 +354,11 @@ async def list_je(
         items = [j for j in items if float(j.total_debit or 0) >= float(min_amount) or float(j.total_credit or 0) >= float(min_amount)]
     if max_amount is not None:
         items = [j for j in items if float(j.total_debit or 0) <= float(max_amount) or float(j.total_credit or 0) <= float(max_amount)]
+
+    # عند الـ client-side filter، نطبق pagination على النتيجة المُفلترة
+    if has_clientside_filter:
+        total = len(items)
+        items = items[offset : offset + limit]
 
     # ── جلب بيانات المتعامل الأول لكل قيد ─────────────────
     je_ids = [str(j.id) for j in items]
