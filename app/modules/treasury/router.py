@@ -1163,22 +1163,44 @@ async def list_checks(
     if book_id:    conds.append("ck.cheque_book_id=:bid");params["bid"]   = str(book_id)
     where = " AND ".join(conds)
     cnt = await db.execute(text(f"SELECT COUNT(*) FROM tr_checks ck WHERE {where}"), params)
-    r = await db.execute(text(f"""
-        SELECT ck.*,
-               ba.account_name   AS bank_account_name,
-               ba.account_code   AS bank_account_code,
-               ba.gl_account     AS bank_gl_account,
-               cb.book_code      AS cheque_book_code,
-               coa.name_ar       AS gl_account_name
-        FROM tr_checks ck
-        LEFT JOIN tr_bank_accounts ba ON ba.id = ck.bank_account_id
-        LEFT JOIN tr_cheque_books  cb ON cb.id = ck.cheque_book_id
-        LEFT JOIN coa_accounts     coa ON coa.code = ck.gl_account_code AND coa.tenant_id = ck.tenant_id
-        WHERE {where}
-        ORDER BY ck.check_date DESC
-        LIMIT :limit OFFSET :offset
-    """), params)
-    return ok(data={"total": cnt.scalar(), "items": [dict(row._mapping) for row in r.fetchall()]})
+    try:
+        r = await db.execute(text(f"""
+            SELECT ck.*,
+                   ba.account_name   AS bank_account_name,
+                   ba.account_code   AS bank_account_code,
+                   ba.gl_account     AS bank_gl_account,
+                   cb.book_code      AS cheque_book_code,
+                   coa.name_ar       AS gl_account_name
+            FROM tr_checks ck
+            LEFT JOIN tr_bank_accounts ba ON ba.id = ck.bank_account_id
+            LEFT JOIN tr_cheque_books  cb ON cb.id = ck.cheque_book_id
+            LEFT JOIN coa_accounts     coa ON coa.code = ck.gl_account_code
+                                          AND coa.tenant_id = ck.tenant_id
+                                          AND coa.is_deleted = FALSE
+            WHERE {where}
+            ORDER BY ck.check_date DESC
+            LIMIT :limit OFFSET :offset
+        """), params)
+        return ok(data={"total": cnt.scalar(), "items": [dict(row._mapping) for row in r.fetchall()]})
+    except Exception as e:
+        # Fallback: بدون JOIN على coa_accounts (في حال فشل الـ JOIN لأي سبب)
+        import logging
+        logging.getLogger(__name__).warning("[list_checks] coa JOIN failed, fallback: " + str(e))
+        r2 = await db.execute(text(f"""
+            SELECT ck.*,
+                   ba.account_name   AS bank_account_name,
+                   ba.account_code   AS bank_account_code,
+                   ba.gl_account     AS bank_gl_account,
+                   cb.book_code      AS cheque_book_code,
+                   NULL              AS gl_account_name
+            FROM tr_checks ck
+            LEFT JOIN tr_bank_accounts ba ON ba.id = ck.bank_account_id
+            LEFT JOIN tr_cheque_books  cb ON cb.id = ck.cheque_book_id
+            WHERE {where}
+            ORDER BY ck.check_date DESC
+            LIMIT :limit OFFSET :offset
+        """), params)
+        return ok(data={"total": cnt.scalar(), "items": [dict(row._mapping) for row in r2.fetchall()]})
 
 
 @router.post("/checks", status_code=201)
@@ -1336,20 +1358,39 @@ async def get_check(
     user: CurrentUser = Depends(get_current_user),
 ):
     tid = str(user.tenant_id)
-    r = await db.execute(text("""
-        SELECT ck.*,
-               ba.account_name   AS bank_account_name,
-               ba.account_code   AS bank_account_code,
-               ba.gl_account     AS bank_gl_account,
-               cb.book_code      AS cheque_book_code,
-               coa.name_ar       AS gl_account_name
-        FROM tr_checks ck
-        LEFT JOIN tr_bank_accounts ba ON ba.id = ck.bank_account_id
-        LEFT JOIN tr_cheque_books  cb ON cb.id = ck.cheque_book_id
-        LEFT JOIN coa_accounts     coa ON coa.code = ck.gl_account_code AND coa.tenant_id = ck.tenant_id
-        WHERE ck.id=:id AND ck.tenant_id=:tid
-    """), {"id": str(ck_id), "tid": tid})
-    row = r.mappings().fetchone()
+    try:
+        r = await db.execute(text("""
+            SELECT ck.*,
+                   ba.account_name   AS bank_account_name,
+                   ba.account_code   AS bank_account_code,
+                   ba.gl_account     AS bank_gl_account,
+                   cb.book_code      AS cheque_book_code,
+                   coa.name_ar       AS gl_account_name
+            FROM tr_checks ck
+            LEFT JOIN tr_bank_accounts ba ON ba.id = ck.bank_account_id
+            LEFT JOIN tr_cheque_books  cb ON cb.id = ck.cheque_book_id
+            LEFT JOIN coa_accounts     coa ON coa.code = ck.gl_account_code
+                                          AND coa.tenant_id = ck.tenant_id
+                                          AND coa.is_deleted = FALSE
+            WHERE ck.id=:id AND ck.tenant_id=:tid
+        """), {"id": str(ck_id), "tid": tid})
+        row = r.mappings().fetchone()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("[get_check] coa JOIN failed, fallback: " + str(e))
+        r = await db.execute(text("""
+            SELECT ck.*,
+                   ba.account_name   AS bank_account_name,
+                   ba.account_code   AS bank_account_code,
+                   ba.gl_account     AS bank_gl_account,
+                   cb.book_code      AS cheque_book_code,
+                   NULL              AS gl_account_name
+            FROM tr_checks ck
+            LEFT JOIN tr_bank_accounts ba ON ba.id = ck.bank_account_id
+            LEFT JOIN tr_cheque_books  cb ON cb.id = ck.cheque_book_id
+            WHERE ck.id=:id AND ck.tenant_id=:tid
+        """), {"id": str(ck_id), "tid": tid})
+        row = r.mappings().fetchone()
     if not row: raise HTTPException(404, "الشيك غير موجود")
     return ok(data=dict(row))
 
