@@ -234,6 +234,20 @@ async def create_je(
     lines_with_party = [l for l in data.lines if getattr(l, "party_id", None)]
     if lines_with_party:
         try:
+            # جلب default_party_role لكل الحسابات المعنية في خطوة واحدة (أداء)
+            account_codes = list({getattr(l, "account_code", None) for l in data.lines if getattr(l, "account_code", None)})
+            account_role_map = {}
+            if account_codes:
+                acc_r = await db.execute(_txt("""
+                    SELECT code, extra_data->>'default_party_role' AS dr
+                    FROM coa_accounts
+                    WHERE tenant_id = :tid
+                      AND code = ANY(:codes)
+                """), {"tid": str(user.tenant_id), "codes": account_codes})
+                for arow in acc_r.fetchall():
+                    if arow[1]:
+                        account_role_map[arow[0]] = arow[1]
+
             # جلب je_lines المُنشأة بالترتيب
             res = await db.execute(_txt("""
                 SELECT id, line_order FROM je_lines
@@ -248,7 +262,9 @@ async def create_je(
                     _role = getattr(src, "party_role",  None)
                     if _pid:
                         _pid_s = str(_pid)
-                        _role_v = _role or "other"
+                        # Smart Hybrid: المستخدم > الحساب > 'other'
+                        _acc_code = getattr(src, "account_code", None)
+                        _role_v   = _role or account_role_map.get(_acc_code) or "other"
                         _name_v = getattr(src, "party_name", None)
                         try:
                             # محاولة مع party_name
