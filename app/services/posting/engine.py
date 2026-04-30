@@ -449,6 +449,11 @@ class PostingEngine:
                 currency_code=getattr(line, "currency_code",  None) or "SAR",
                 exchange_rate=getattr(line, "exchange_rate",  None) or Decimal("1.0"),
                 amount_foreign=getattr(line, "amount_foreign", None) or Decimal("0"),
+                # ── نسخ المتعامل / Party من القيد الأصلي ──
+                # هذا حرج محاسبياً: لو القيد الأصلي "سلفة لأحمد"، القيد العكسي
+                # (تسوية السلفة) يجب أن يبقى مرتبطاً بأحمد لتتبع الأستاذ المساعد
+                party_id=str(getattr(line, "party_id", None)) if getattr(line, "party_id", None) else None,
+                party_role=getattr(line, "party_role", None),
             )
             for line in original.lines
         ]
