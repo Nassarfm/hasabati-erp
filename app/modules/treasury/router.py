@@ -1165,12 +1165,15 @@ async def list_checks(
     cnt = await db.execute(text(f"SELECT COUNT(*) FROM tr_checks ck WHERE {where}"), params)
     r = await db.execute(text(f"""
         SELECT ck.*,
-               ba.account_name  AS bank_account_name,
-               ba.account_code  AS bank_account_code,
-               cb.book_code     AS cheque_book_code
+               ba.account_name   AS bank_account_name,
+               ba.account_code   AS bank_account_code,
+               ba.gl_account     AS bank_gl_account,
+               cb.book_code      AS cheque_book_code,
+               coa.name_ar       AS gl_account_name
         FROM tr_checks ck
         LEFT JOIN tr_bank_accounts ba ON ba.id = ck.bank_account_id
         LEFT JOIN tr_cheque_books  cb ON cb.id = ck.cheque_book_id
+        LEFT JOIN coa_accounts     coa ON coa.code = ck.gl_account_code AND coa.tenant_id = ck.tenant_id
         WHERE {where}
         ORDER BY ck.check_date DESC
         LIMIT :limit OFFSET :offset
@@ -1189,35 +1192,42 @@ async def create_check(
     serial = await _next_serial(db, tid, "CHK", check_date)
     ck_id  = str(uuid.uuid4())
 
-    # إذا تم تحديد دفتر شيكات — خذ الرقم التالي منه تلقائياً
+    # إذا تم تحديد دفتر شيكات — نأخذ الرقم التالي منه دائماً (نتجاهل ما يرسله الـ frontend)
+    # هذا يمنع تكرار رقم الشيك حتى لو الـ frontend أرسل next_number قديم
     check_number = data.get("check_number")
     book_id = data.get("cheque_book_id")
-    if book_id and not check_number:
+    if book_id:
         r = await db.execute(text("""
             SELECT next_number, series_to FROM tr_cheque_books
             WHERE id=:id AND tenant_id=:tid AND status='active'
         """), {"id": str(book_id), "tid": tid})
         book = r.mappings().fetchone()
-        if book:
-            check_number = str(book["next_number"])
-            if book["next_number"] <= book["series_to"]:
-                await db.execute(text("""
-                    UPDATE tr_cheque_books
-                    SET next_number = next_number + 1,
-                        used_leaves  = used_leaves  + 1,
-                        status = CASE WHEN next_number >= series_to THEN 'exhausted' ELSE status END
-                    WHERE id=:id AND tenant_id=:tid
-                """), {"id": str(book_id), "tid": tid})
+        if not book:
+            raise HTTPException(400, "دفتر الشيكات غير موجود أو غير نشط")
+        if book["next_number"] > book["series_to"]:
+            raise HTTPException(400, "دفتر الشيكات منتهي — اختر دفتراً آخر")
+        # نأخذ الرقم من الدفتر دائماً (نتجاوز ما يرسله الـ frontend)
+        check_number = str(book["next_number"])
+        # نحدّث الدفتر مباشرة لمنع التكرار
+        await db.execute(text("""
+            UPDATE tr_cheque_books
+            SET next_number = next_number + 1,
+                used_leaves  = used_leaves  + 1,
+                status = CASE WHEN next_number + 1 > series_to THEN 'exhausted' ELSE status END
+            WHERE id=:id AND tenant_id=:tid
+        """), {"id": str(book_id), "tid": tid})
+    elif not check_number:
+        raise HTTPException(400, "يجب تحديد دفتر شيكات أو رقم شيك يدوي")
 
     try:
         await db.execute(text("""
             INSERT INTO tr_checks
               (id,tenant_id,serial,check_number,check_type,check_date,due_date,
-               bank_account_id,cheque_book_id,amount,payee_name,party_id,party_name,
+               bank_account_id,cheque_book_id,amount,payee_name,party_id,party_name,party_role,
                description,gl_account_code,status,notes,created_by)
             VALUES
               (:id,:tid,:serial,:ck_no,:ck_type,:ck_date,:due_date,
-               :ba_id,:book_id,:amount,:payee,:party_id,:party_name,
+               :ba_id,:book_id,:amount,:payee,:party_id,:party_name,:party_role,
                :desc,:gl_code,'draft',:notes,:by)
         """), {
             "id": ck_id, "tid": tid, "serial": serial,
@@ -1231,6 +1241,7 @@ async def create_check(
             "payee":     data.get("payee_name"),
             "party_id":  data.get("party_id") or None,
             "party_name":data.get("party_name"),
+            "party_role":data.get("party_role") or None,
             "desc":      data.get("description"),
             "gl_code":   data.get("gl_account_code"),
             "notes":     data.get("notes"),
@@ -1326,11 +1337,16 @@ async def get_check(
 ):
     tid = str(user.tenant_id)
     r = await db.execute(text("""
-        SELECT ck.*, ba.account_name AS bank_account_name, ba.account_code AS bank_account_code,
-               cb.book_code AS cheque_book_code
+        SELECT ck.*,
+               ba.account_name   AS bank_account_name,
+               ba.account_code   AS bank_account_code,
+               ba.gl_account     AS bank_gl_account,
+               cb.book_code      AS cheque_book_code,
+               coa.name_ar       AS gl_account_name
         FROM tr_checks ck
         LEFT JOIN tr_bank_accounts ba ON ba.id = ck.bank_account_id
         LEFT JOIN tr_cheque_books  cb ON cb.id = ck.cheque_book_id
+        LEFT JOIN coa_accounts     coa ON coa.code = ck.gl_account_code AND coa.tenant_id = ck.tenant_id
         WHERE ck.id=:id AND ck.tenant_id=:tid
     """), {"id": str(ck_id), "tid": tid})
     row = r.mappings().fetchone()
@@ -1418,7 +1434,7 @@ async def reject_check(ck_id: uuid.UUID, body: dict, db: AsyncSession=Depends(ge
 async def post_check(ck_id: uuid.UUID, db: AsyncSession=Depends(get_db), user: CurrentUser=Depends(get_current_user)):
     tid = str(user.tenant_id)
     r = await db.execute(text("""
-        SELECT ck.*, ba.gl_account_code AS bank_gl
+        SELECT ck.*, ba.gl_account AS bank_gl
         FROM tr_checks ck
         LEFT JOIN tr_bank_accounts ba ON ba.id=ck.bank_account_id
         WHERE ck.id=:id AND ck.tenant_id=:tid
@@ -1430,15 +1446,30 @@ async def post_check(ck_id: uuid.UUID, db: AsyncSession=Depends(get_db), user: C
 
     ck_date = ck["check_date"]
     amount  = Decimal(str(ck["amount"]))
-    bank_gl = ck["bank_gl"] or ck["gl_account_code"] or "11010201"
-    payee_gl = ck["gl_account_code"] or "21010101"  # ذمم دائنة افتراضية
+    bank_gl = ck["bank_gl"] or "11010201"
+    payee_gl = ck["gl_account_code"]
+    if not payee_gl:
+        raise HTTPException(400, "يجب تحديد الحساب المقابل قبل الترحيل")
 
-    # القيد: مدين ذمم دائنة ← دائن البنك
+    # القيد المحاسبي: مدين الحساب المقابل ← دائن البنك
+    # نُمرّر party_id + party_role للسطر المرتبط بالمتعامل (السطر المدين)
     je = await _post_je(db, tid, user.email, "CHK", ck_date,
-        description="شيك صادر " + str(ck["check_number"]) + " — " + (ck["payee_name"] or ""),
+        description="شيك " + ("صادر" if ck.get("check_type")=="outgoing" else "وارد") + " " + str(ck["check_number"]) + " — " + (ck["payee_name"] or ""),
         lines=[
-            {"account_code": payee_gl, "debit": float(amount), "credit": 0, "description": ck["description"] or ""},
-            {"account_code": bank_gl,  "debit": 0, "credit": float(amount), "description": ck["description"] or ""},
+            {
+                "account_code": payee_gl,
+                "debit": float(amount),
+                "credit": 0,
+                "description": ck["description"] or "",
+                "party_id":   str(ck["party_id"]) if ck.get("party_id") else None,
+                "party_role": ck.get("party_role"),
+            },
+            {
+                "account_code": bank_gl,
+                "debit": 0,
+                "credit": float(amount),
+                "description": ck["description"] or "",
+            },
         ]
     )
     await db.execute(text("""
