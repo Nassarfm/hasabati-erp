@@ -65,9 +65,30 @@ async def _next_serial(db: AsyncSession, tid: str, je_type: str, tx_date: date) 
     return f"{prefix}{sep}{year}{sep}{seq:0{padding}d}"
 
 
+async def _get_account_default_roles(db, tid: str, account_codes: list) -> dict:
+    """جلب default_party_role لكل حساب من coa_accounts.extra_data
+    يرجع dict: {account_code: default_role_or_None}"""
+    if not account_codes:
+        return {}
+    try:
+        codes_unique = list({c for c in account_codes if c})
+        if not codes_unique:
+            return {}
+        r = await db.execute(text("""
+            SELECT code, extra_data->>'default_party_role' AS dr
+            FROM coa_accounts
+            WHERE tenant_id = :tid
+              AND code = ANY(:codes)
+        """), {"tid": tid, "codes": codes_unique})
+        return {row[0]: row[1] for row in r.fetchall() if row[1]}
+    except Exception:
+        return {}
+
+
 async def _post_je(db, tid: str, user_email: str, je_type: str, tx_date: date,
                    description: str, lines: list, reference: str = None) -> dict:
-    """إنشاء قيد محاسبي مرتبط بعملية الخزينة — يرفع exception عند الفشل"""
+    """إنشاء قيد محاسبي مرتبط بعملية الخزينة — يرفع exception عند الفشل
+    Smart Hybrid: لو السطر فيه party_id لكن لا party_role → يُستنتج من default_party_role للحساب"""
     valid = [l for l in lines if l.get("account_code") and
              (Decimal(str(l.get("debit",0))) > 0 or Decimal(str(l.get("credit",0))) > 0)]
     if not valid:
@@ -77,6 +98,17 @@ async def _post_je(db, tid: str, user_email: str, je_type: str, tx_date: date,
     total_cr = sum(Decimal(str(l.get("credit",0))) for l in valid)
     if abs(total_dr - total_cr) > Decimal("0.01"):
         raise HTTPException(400, f"القيد غير متوازن: مدين={total_dr} دائن={total_cr}")
+
+    # Smart Hybrid: استنتاج party_role من الحساب لو السطر فيه party_id بدون role
+    needs_role = [l.get("account_code") for l in valid
+                  if l.get("party_id") and not l.get("party_role")]
+    if needs_role:
+        role_map = await _get_account_default_roles(db, tid, needs_role)
+        for l in valid:
+            if l.get("party_id") and not l.get("party_role"):
+                inferred = role_map.get(l.get("account_code"))
+                if inferred:
+                    l["party_role"] = inferred
 
     try:
         from app.services.posting.engine import PostingEngine, PostingRequest, PostingLine
