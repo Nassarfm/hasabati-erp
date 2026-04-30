@@ -421,6 +421,10 @@ async def post_pending_instances(
                     "tax_type_code":              tax_type_code,
                     "vat_amount":                 float(vat_amount),
                     "net_amount":                 float(net_amount),
+                    # ── المتعامل / Party — حرج لظهور القيد في الأستاذ المساعد ──
+                    "party_id":                   lt.get("party_id"),
+                    "party_role":                 lt.get("party_role"),
+                    "party_name":                 lt.get("party_name"),
                 })
 
             from app.modules.accounting.schemas import JournalEntryCreate, JELineCreate

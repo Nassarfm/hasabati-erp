@@ -29,6 +29,11 @@ class RecurringLineTemplate(BaseModel):
     project_name:               Optional[str]  = None
     expense_classification_code: Optional[str] = None
     expense_classification_name: Optional[str] = None
+    # المتعامل المالي / Financial Party — لظهور القيد في الأستاذ المساعد
+    party_id:                   Optional[str]  = None
+    party_role:                 Optional[str]  = None
+    party_name:                 Optional[str]  = None
+    party_code:                 Optional[str]  = None
 
 
 # ──────────────────────────────────────────────────────────
