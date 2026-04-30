@@ -1168,7 +1168,7 @@ async def list_checks(
             SELECT ck.*,
                    ba.account_name   AS bank_account_name,
                    ba.account_code   AS bank_account_code,
-                   ba.gl_account     AS bank_gl_account,
+                   ba.gl_account_code AS bank_gl_account,
                    cb.book_code      AS cheque_book_code,
                    coa.name_ar       AS gl_account_name
             FROM tr_checks ck
@@ -1190,7 +1190,7 @@ async def list_checks(
             SELECT ck.*,
                    ba.account_name   AS bank_account_name,
                    ba.account_code   AS bank_account_code,
-                   ba.gl_account     AS bank_gl_account,
+                   ba.gl_account_code AS bank_gl_account,
                    cb.book_code      AS cheque_book_code,
                    NULL              AS gl_account_name
             FROM tr_checks ck
@@ -1363,7 +1363,7 @@ async def get_check(
             SELECT ck.*,
                    ba.account_name   AS bank_account_name,
                    ba.account_code   AS bank_account_code,
-                   ba.gl_account     AS bank_gl_account,
+                   ba.gl_account_code AS bank_gl_account,
                    cb.book_code      AS cheque_book_code,
                    coa.name_ar       AS gl_account_name
             FROM tr_checks ck
@@ -1382,7 +1382,7 @@ async def get_check(
             SELECT ck.*,
                    ba.account_name   AS bank_account_name,
                    ba.account_code   AS bank_account_code,
-                   ba.gl_account     AS bank_gl_account,
+                   ba.gl_account_code AS bank_gl_account,
                    cb.book_code      AS cheque_book_code,
                    NULL              AS gl_account_name
             FROM tr_checks ck
@@ -1475,7 +1475,7 @@ async def reject_check(ck_id: uuid.UUID, body: dict, db: AsyncSession=Depends(ge
 async def post_check(ck_id: uuid.UUID, db: AsyncSession=Depends(get_db), user: CurrentUser=Depends(get_current_user)):
     tid = str(user.tenant_id)
     r = await db.execute(text("""
-        SELECT ck.*, ba.gl_account AS bank_gl
+        SELECT ck.*, ba.gl_account_code AS bank_gl
         FROM tr_checks ck
         LEFT JOIN tr_bank_accounts ba ON ba.id=ck.bank_account_id
         WHERE ck.id=:id AND ck.tenant_id=:tid
