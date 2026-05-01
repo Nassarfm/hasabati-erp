@@ -424,161 +424,163 @@ async def health_check(
     user: CurrentUser = Depends(get_current_user),
 ):
     """
-    تحقق شامل من جاهزية الموديول:
+    تحقق شامل من جاهزية الموديول مع معالجة دفاعية لكل فحص:
       • وجود الجداول الأساسية
-      • وجود الـ reason_codes الحرجة (count_overage, count_variance, damaged, ...)
+      • وجود الـ reason_codes الحرجة
       • ربط حسابات الترحيل في CoA
       • صلاحية إعدادات الترقيم
-    يُرجع status='healthy' فقط إن نجحت كل الفحوصات.
+      • وجود مستودعات نشطة
+    
+    لو فشل فحص واحد، الباقي يستمر، ويظهر الفحص الفاشل كـ 'fail' مع رسالة الخطأ.
+    هذا يساعد على التشخيص بدلاً من 500 صامت.
     """
     tid = str(user.tenant_id)
     checks = []
     overall_ok = True
 
-    # 1. Critical tables exist
-    critical_tables = [
-        "inv_items", "inv_warehouses", "inv_balances", "inv_transactions",
-        "inv_transaction_lines", "inv_ledger", "inv_fifo_layers",
-        "inv_zones", "inv_locations", "inv_brands", "inv_uom_conversions",
-        "inv_reason_codes", "inv_item_attributes", "inv_item_attribute_values",
-        "inv_item_variant_attrs", "inv_lots", "inv_serials",
-        "inv_count_sessions", "inv_count_lines",
-        "inv_account_settings", "jl_numbering_series",
-    ]
-    rt = await db.execute(text("""
-        SELECT table_name FROM information_schema.tables
-        WHERE table_schema='public' AND table_name = ANY(:names)
-    """), {"names": critical_tables})
-    existing_tables = {r[0] for r in rt.fetchall()}
-    missing_tables = [t for t in critical_tables if t not in existing_tables]
-    if missing_tables:
-        overall_ok = False
-        checks.append({
-            "name": "Critical Tables",
-            "status": "fail",
-            "message": f"جداول ناقصة: {', '.join(missing_tables)}",
-        })
-    else:
-        checks.append({
-            "name": "Critical Tables",
-            "status": "ok",
-            "message": f"جميع الجداول الـ {len(critical_tables)} موجودة",
-        })
+    # ─── helper آمن ────────────────────────────────────────────
+    def _add_check(name, status, message):
+        nonlocal overall_ok
+        if status == "fail":
+            overall_ok = False
+        checks.append({"name": name, "status": status, "message": message})
 
-    # 2. Critical reason codes
-    critical_reasons = [
-        "count_overage", "count_variance", "damaged",
-        "theft", "obsolete", "quality_reject",
-    ]
-    rr = await db.execute(text("""
-        SELECT reason_code FROM inv_reason_codes
-        WHERE tenant_id=:tid AND reason_code = ANY(:codes) AND is_active=true
-    """), {"tid": tid, "codes": critical_reasons})
-    existing_reasons = {r[0] for r in rr.fetchall()}
-    missing_reasons = [c for c in critical_reasons if c not in existing_reasons]
-    if missing_reasons:
-        overall_ok = False
-        checks.append({
-            "name": "Critical Reason Codes",
-            "status": "fail",
-            "message": f"أسباب ناقصة: {', '.join(missing_reasons)}",
-        })
-    else:
-        checks.append({
-            "name": "Critical Reason Codes",
-            "status": "ok",
-            "message": "كل الأسباب الحرجة موجودة",
-        })
+    # ─── 1. Critical tables ────────────────────────────────────
+    try:
+        critical_tables = [
+            "inv_items", "inv_warehouses", "inv_balances", "inv_transactions",
+            "inv_transaction_lines", "inv_ledger", "inv_fifo_layers",
+            "inv_zones", "inv_locations", "inv_brands", "inv_uom_conversions",
+            "inv_reason_codes", "inv_item_attributes", "inv_item_attribute_values",
+            "inv_item_variant_attrs", "inv_lots", "inv_serials",
+            "inv_count_sessions", "inv_count_lines",
+            "inv_account_settings", "jl_numbering_series",
+        ]
+        rt = await db.execute(text("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema='public' AND table_name = ANY(:names)
+        """), {"names": critical_tables})
+        existing_tables = {r[0] for r in rt.fetchall()}
+        missing_tables = [t for t in critical_tables if t not in existing_tables]
+        if missing_tables:
+            _add_check("Critical Tables", "fail",
+                       f"جداول ناقصة: {', '.join(missing_tables)}")
+        else:
+            _add_check("Critical Tables", "ok",
+                       f"جميع الجداول الـ {len(critical_tables)} موجودة")
+    except Exception as e:
+        _add_check("Critical Tables", "fail",
+                   f"فحص الجداول فشل: {type(e).__name__}: {str(e)[:100]}")
 
-    # 3. Account settings → CoA validation
-    ra = await db.execute(text("""
-        SELECT s.tx_type, s.debit_account, s.credit_account
-        FROM inv_account_settings s
-        WHERE s.tenant_id=:tid
-    """), {"tid": tid})
-    saved_accs = ra.fetchall()
-    invalid_accs: list = []
-    for row in saved_accs:
-        for acc in (row[1], row[2]):
-            if acc:
-                rv = await db.execute(text("""
-                    SELECT 1 FROM coa_accounts
-                    WHERE tenant_id=:tid AND account_code=:c AND is_active=true
-                """), {"tid": tid, "c": acc})
-                if not rv.fetchone():
-                    invalid_accs.append(f"{row[0]}: {acc}")
+    # ─── 2. Critical reason codes ──────────────────────────────
+    try:
+        critical_reasons = [
+            "count_overage", "count_variance", "damaged",
+            "theft", "obsolete", "quality_reject",
+        ]
+        rr = await db.execute(text("""
+            SELECT reason_code FROM inv_reason_codes
+            WHERE tenant_id=:tid AND reason_code = ANY(:codes) AND is_active=true
+        """), {"tid": tid, "codes": critical_reasons})
+        existing_reasons = {r[0] for r in rr.fetchall()}
+        missing_reasons = [c for c in critical_reasons if c not in existing_reasons]
+        if missing_reasons:
+            _add_check("Critical Reason Codes", "fail",
+                       f"أسباب ناقصة: {', '.join(missing_reasons)}")
+        else:
+            _add_check("Critical Reason Codes", "ok",
+                       "كل الأسباب الحرجة الـ 6 موجودة")
+    except Exception as e:
+        _add_check("Critical Reason Codes", "fail",
+                   f"فحص الأسباب فشل: {type(e).__name__}: {str(e)[:100]}")
 
-    # Also check default accounts exist
-    default_codes = set()
-    for d, c, _ in DEFAULT_TX_ACCOUNTS.values():
-        default_codes.add(d); default_codes.add(c)
-    rd = await db.execute(text("""
-        SELECT account_code FROM coa_accounts
-        WHERE tenant_id=:tid AND is_active=true AND account_code = ANY(:codes)
-    """), {"tid": tid, "codes": list(default_codes)})
-    found_defaults = {r[0] for r in rd.fetchall()}
-    missing_defaults = [c for c in default_codes if c not in found_defaults]
+    # ─── 3. Account settings → CoA ─────────────────────────────
+    try:
+        ra = await db.execute(text("""
+            SELECT s.tx_type, s.debit_account, s.credit_account
+            FROM inv_account_settings s
+            WHERE s.tenant_id=:tid
+        """), {"tid": tid})
+        saved_accs = ra.fetchall()
+        invalid_accs: list = []
+        for row in saved_accs:
+            for acc in (row[1], row[2]):
+                if acc:
+                    rv = await db.execute(text("""
+                        SELECT 1 FROM coa_accounts
+                        WHERE tenant_id=:tid AND account_code=:c AND is_active=true
+                    """), {"tid": tid, "c": acc})
+                    if not rv.fetchone():
+                        invalid_accs.append(f"{row[0]}: {acc}")
 
-    if invalid_accs:
-        overall_ok = False
-        checks.append({
-            "name": "Account Settings → CoA",
-            "status": "fail",
-            "message": f"حسابات غير صالحة: {', '.join(invalid_accs[:5])}",
-        })
-    elif missing_defaults:
-        checks.append({
-            "name": "Default CoA Accounts",
-            "status": "warn",
-            "message": f"حسابات افتراضية ناقصة في CoA: {', '.join(missing_defaults[:5])} (سيستخدم الفولباك)",
-        })
-    else:
-        checks.append({
-            "name": "Account Settings → CoA",
-            "status": "ok",
-            "message": "جميع الحسابات صالحة",
-        })
+        if invalid_accs:
+            _add_check("Account Settings → CoA", "fail",
+                       f"حسابات غير صالحة: {', '.join(invalid_accs[:5])}")
+        else:
+            _add_check("Account Settings → CoA", "ok",
+                       f"كل الحسابات المُعدَّة صالحة ({len(saved_accs)} إعداد)")
+    except Exception as e:
+        _add_check("Account Settings → CoA", "fail",
+                   f"فحص الحسابات فشل: {type(e).__name__}: {str(e)[:100]}")
 
-    # 4. Numbering series for current year exist
-    cur_year = date.today().year
-    rn = await db.execute(text("""
-        SELECT series_type FROM jl_numbering_series
-        WHERE tenant_id=:tid AND year=:yr AND series_type = ANY(:types)
-    """), {"tid": tid, "yr": cur_year, "types": INV_SERIES_TYPES})
-    existing_series = {r[0] for r in rn.fetchall()}
-    missing_series = [s for s in INV_SERIES_TYPES if s not in existing_series]
-    if missing_series:
-        checks.append({
-            "name": "Numbering Series",
-            "status": "warn",
-            "message": f"تسلسلات لسنة {cur_year} ستُنشأ تلقائياً عند أول استخدام: {', '.join(missing_series)}",
-        })
-    else:
-        checks.append({
-            "name": "Numbering Series",
-            "status": "ok",
-            "message": f"كل تسلسلات سنة {cur_year} موجودة",
-        })
+    # ─── 4. Default CoA accounts ───────────────────────────────
+    try:
+        default_codes = set()
+        for d, c, _ in DEFAULT_TX_ACCOUNTS.values():
+            default_codes.add(d)
+            default_codes.add(c)
+        rd = await db.execute(text("""
+            SELECT account_code FROM coa_accounts
+            WHERE tenant_id=:tid AND is_active=true AND account_code = ANY(:codes)
+        """), {"tid": tid, "codes": list(default_codes)})
+        found_defaults = {r[0] for r in rd.fetchall()}
+        missing_defaults = [c for c in default_codes if c not in found_defaults]
 
-    # 5. Default warehouses
-    rw = await db.execute(text("""
-        SELECT COUNT(*) FROM inv_warehouses
-        WHERE tenant_id=:tid AND is_active=true
-    """), {"tid": tid})
-    wh_count = rw.scalar() or 0
-    if wh_count == 0:
-        overall_ok = False
-        checks.append({
-            "name": "Active Warehouses",
-            "status": "fail",
-            "message": "لا يوجد أي مستودع نشط",
-        })
-    else:
-        checks.append({
-            "name": "Active Warehouses",
-            "status": "ok",
-            "message": f"{wh_count} مستودع نشط",
-        })
+        if missing_defaults:
+            _add_check("Default CoA Accounts", "warn",
+                       f"حسابات افتراضية ناقصة في CoA: {', '.join(missing_defaults[:5])} (سيستخدم الفولباك)")
+        else:
+            _add_check("Default CoA Accounts", "ok",
+                       f"كل الحسابات الافتراضية الـ {len(default_codes)} موجودة")
+    except Exception as e:
+        _add_check("Default CoA Accounts", "warn",
+                   f"فحص الحسابات الافتراضية فشل: {type(e).__name__}: {str(e)[:100]}")
+
+    # ─── 5. Numbering series ───────────────────────────────────
+    try:
+        cur_year = date.today().year
+        rn = await db.execute(text("""
+            SELECT series_type FROM jl_numbering_series
+            WHERE tenant_id=:tid AND year=:yr AND series_type = ANY(:types)
+        """), {"tid": tid, "yr": cur_year, "types": INV_SERIES_TYPES})
+        existing_series = {r[0] for r in rn.fetchall()}
+        missing_series = [s for s in INV_SERIES_TYPES if s not in existing_series]
+        if missing_series:
+            _add_check("Numbering Series", "warn",
+                       f"تسلسلات لسنة {cur_year} ستُنشأ تلقائياً عند أول استخدام: {', '.join(missing_series[:5])}")
+        else:
+            _add_check("Numbering Series", "ok",
+                       f"كل تسلسلات سنة {cur_year} موجودة ({len(INV_SERIES_TYPES)} نوع)")
+    except Exception as e:
+        _add_check("Numbering Series", "warn",
+                   f"فحص التسلسلات فشل: {type(e).__name__}: {str(e)[:100]}")
+
+    # ─── 6. Active warehouses ──────────────────────────────────
+    try:
+        rw = await db.execute(text("""
+            SELECT COUNT(*) FROM inv_warehouses
+            WHERE tenant_id=:tid AND is_active=true
+        """), {"tid": tid})
+        wh_count = rw.scalar() or 0
+        if wh_count == 0:
+            _add_check("Active Warehouses", "fail",
+                       "لا يوجد أي مستودع نشط — يجب إضافة مستودع قبل بدء أي حركة")
+        else:
+            _add_check("Active Warehouses", "ok",
+                       f"{wh_count} مستودع نشط")
+    except Exception as e:
+        _add_check("Active Warehouses", "fail",
+                   f"فحص المستودعات فشل: {type(e).__name__}: {str(e)[:100]}")
 
     return ok(data={
         "status": "healthy" if overall_ok else "issues",
