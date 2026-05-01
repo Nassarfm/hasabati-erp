@@ -264,24 +264,36 @@ async def list_reason_codes(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """قائمة أكواد الأسباب — اختياري filter حسب النوع"""
+    """
+    قائمة أكواد الأسباب — اختياري filter حسب النوع.
+    
+    NOTE: DB يستخدم أسماء أعمدة مختلفة:
+      • applies_to_tx_types (DB) → applicable_for (frontend alias)
+      • is_system           (DB) → is_system_protected (frontend alias)
+    """
     tid = str(user.tenant_id)
     conds = ["tenant_id=:tid"]
     params: dict = {"tid": tid}
     if applicable_for:
-        conds.append("(applicable_for IS NULL OR applicable_for=:af OR applicable_for='all')")
+        conds.append("(applies_to_tx_types IS NULL OR applies_to_tx_types=:af OR applies_to_tx_types='all')")
         params["af"] = applicable_for
     if is_active is not None:
         conds.append("is_active=:act")
         params["act"] = is_active
     r = await db.execute(text(f"""
-        SELECT id, reason_code, reason_name, reason_name_en,
-               expense_account_code, applicable_for, is_increase,
-               is_system_protected, is_active, notes,
-               created_at, updated_at
+        SELECT 
+          id, reason_code, reason_name, reason_name_en,
+          expense_account_code,
+          applies_to_tx_types AS applicable_for,
+          is_increase,
+          is_system AS is_system_protected,
+          is_active, notes, sort_order,
+          requires_expense_acc, affects_cogs,
+          created_at,
+          NULL::timestamptz AS updated_at
         FROM inv_reason_codes
         WHERE {' AND '.join(conds)}
-        ORDER BY reason_name
+        ORDER BY sort_order NULLS LAST, reason_name
     """), params)
     return ok(data=[dict(row._mapping) for row in r.fetchall()])
 
@@ -292,6 +304,12 @@ async def create_reason_code(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """
+    إنشاء سبب جديد. الأسباب الجديدة من المستخدم تكون is_system=false دائماً.
+    
+    NOTE: frontend يرسل applicable_for/is_system_protected لكن DB يستخدم
+    applies_to_tx_types/is_system. نُحوِّل هنا.
+    """
     tid = str(user.tenant_id)
     rid = str(uuid.uuid4())
     if not data.get("reason_code") or not data.get("reason_name"):
@@ -299,8 +317,8 @@ async def create_reason_code(
     await db.execute(text("""
         INSERT INTO inv_reason_codes (
             id, tenant_id, reason_code, reason_name, reason_name_en,
-            expense_account_code, applicable_for, is_increase,
-            is_system_protected, is_active, notes
+            expense_account_code, applies_to_tx_types, is_increase,
+            is_system, is_active, notes
         ) VALUES (
             :id, :tid, :code, :name, :en,
             :acc, :af, :inc,
@@ -327,10 +345,16 @@ async def update_reason_code(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """
+    تحديث سبب. الأسباب النظامية (is_system=true) لا يمكن تغيير reason_code لها.
+    
+    NOTE: نُحوِّل أسماء الحقول من frontend (applicable_for, is_system_protected)
+    إلى أعمدة DB (applies_to_tx_types, is_system).
+    """
     tid = str(user.tenant_id)
-    # Check system_protected
+    # Check is_system + reason_code
     r = await db.execute(
-        text("SELECT is_system_protected, reason_code FROM inv_reason_codes WHERE id=:id AND tenant_id=:tid"),
+        text("SELECT is_system, reason_code FROM inv_reason_codes WHERE id=:id AND tenant_id=:tid"),
         {"id": str(reason_id), "tid": tid},
     )
     row = r.fetchone()
@@ -339,16 +363,23 @@ async def update_reason_code(
     if row[0] and ("reason_code" in data and data["reason_code"] != row[1]):
         raise HTTPException(400, "لا يمكن تغيير reason_code للأكواد المحمية")
 
+    # خريطة تحويل أسماء الحقول من frontend إلى DB
+    COL_MAP = {
+        "applicable_for": "applies_to_tx_types",
+        "is_system_protected": "is_system",
+    }
+
     fields = []
     params: dict = {"id": str(reason_id), "tid": tid}
     for col in ["reason_code", "reason_name", "reason_name_en", "expense_account_code",
                 "applicable_for", "is_increase", "is_active", "notes"]:
         if col in data:
-            fields.append(f"{col} = :{col}")
+            db_col = COL_MAP.get(col, col)
+            fields.append(f"{db_col} = :{col}")
             params[col] = data[col]
     if not fields:
         return ok(data={}, message="لا تغييرات")
-    fields.append("updated_at = NOW()")
+    # ملاحظة: لا نُحدِّث updated_at لأنه غير موجود في الجدول
     await db.execute(text(f"""
         UPDATE inv_reason_codes SET {', '.join(fields)}
         WHERE id=:id AND tenant_id=:tid
@@ -363,9 +394,10 @@ async def delete_reason_code(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """حذف سبب. الأسباب النظامية (is_system=true) محميّة لا يمكن حذفها."""
     tid = str(user.tenant_id)
     r = await db.execute(
-        text("SELECT is_system_protected FROM inv_reason_codes WHERE id=:id AND tenant_id=:tid"),
+        text("SELECT is_system FROM inv_reason_codes WHERE id=:id AND tenant_id=:tid"),
         {"id": str(reason_id), "tid": tid},
     )
     row = r.fetchone()
