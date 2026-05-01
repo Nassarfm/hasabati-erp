@@ -21,6 +21,7 @@ from app.tasks.scheduler import start_scheduler, stop_scheduler
 from app.middleware.audit_middleware import AuditMiddleware
 from app.api.v1.router import v1_router
 from app.modules.parties.router import router as parties_router
+from app.modules.admin.router import router as admin_router
 
 logger = structlog.get_logger(__name__)
 
@@ -68,6 +69,7 @@ def create_app() -> FastAPI:
     app.add_exception_handler(Exception, unhandled_exception_handler)
     app.include_router(v1_router,      prefix=settings.API_V1_PREFIX)
     app.include_router(parties_router, prefix=settings.API_V1_PREFIX)  # المتعاملون الماليون
+    app.include_router(admin_router,   prefix=settings.API_V1_PREFIX)  # أدوات المدير
     return app
 
 

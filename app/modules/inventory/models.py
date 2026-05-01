@@ -1,473 +1,513 @@
 """
 app/modules/inventory/models.py
-══════════════════════════════════════════════════════════
-Inventory module database models.
+═══════════════════════════════════════════════════════════════════════════
+Inventory Module - SQLAlchemy ORM Models
+═══════════════════════════════════════════════════════════════════════════
+يطابق DB الفعلي بالكامل (v5.0)
 
-Tables:
-  inv_products        — Product / Item master
-  inv_warehouses      — Warehouse master
-  inv_stock_balances  — Current stock per product/warehouse
-  inv_movements       — Every stock movement (immutable log)
-  inv_cost_layers     — WAC cost layers per product/warehouse
-  inv_adjustments     — Stock count / adjustment documents
+التصميم:
+  - 3-Level Warehouse Hierarchy: Warehouse -> Zone -> Location
+  - Multi-Variant Items: Parent-Child via parent_item_id + Attributes
+  - Lots/Batches + Serial Numbers
+  - Multi-Layer Stakeholder: party at header + line + ledger
+  - Universal Item Subsidiary Ledger
+  - Reason-Driven Accounting
 
-Design principles:
-  - Movements are IMMUTABLE — never delete or update
-  - Balance is always derived from movements (reconcilable)
-  - WAC recalculated on every IN movement
-  - Every movement that changes value → PostingEngine
-══════════════════════════════════════════════════════════
+ملاحظة: الكود الأساسي يستخدم raw SQL في router.py للأداء
+هذه الـ models موجودة لأغراض type safety + بعض queries المعقدة
+═══════════════════════════════════════════════════════════════════════════
 """
 from __future__ import annotations
 
-import enum
 import uuid
+from datetime import date, datetime
 from decimal import Decimal
 from typing import List, Optional
 
 from sqlalchemy import (
-    Boolean, CheckConstraint, Date, DateTime, Index,
-    Integer, Numeric, String, Text, UniqueConstraint,
-    ForeignKey, func,
+    Boolean, CheckConstraint, Date, DateTime, ForeignKey,
+    Index, Integer, Numeric, String, Text, UniqueConstraint, func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
-from app.db.mixins import ERPModel, SoftDeleteMixin
 
 
-# ══════════════════════════════════════════════════════════
-# Enums
-# ══════════════════════════════════════════════════════════
-class ProductType(str, enum.Enum):
-    STOCKABLE  = "stockable"   # بضاعة — tracked in inventory
-    SERVICE    = "service"     # خدمة — no stock tracking
-    CONSUMABLE = "consumable"  # مستهلكات — tracked but no valuation
+# ═══════════════════════════════════════════════════════════════════════════
+# 1. MASTER DATA - inv_uom (already exists in DB)
+# ═══════════════════════════════════════════════════════════════════════════
+class UOM(Base):
+    """وحدات القياس"""
+    __tablename__ = "inv_uom"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    uom_code: Mapped[str] = mapped_column(String(20), nullable=False)
+    uom_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    uom_name_en: Mapped[Optional[str]] = mapped_column(String(100))
+    is_base: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "uom_code", name="uq_uom_tenant_code"),
+    )
 
 
-class MovementType(str, enum.Enum):
-    # IN movements (increase stock)
-    PURCHASE_RECEIPT  = "PURCHASE_RECEIPT"   # استلام من مورد (GRN)
-    SALES_RETURN      = "SALES_RETURN"       # مرتجع مبيعات
-    PRODUCTION_IN     = "PRODUCTION_IN"      # إنتاج
-    ADJUSTMENT_IN     = "ADJUSTMENT_IN"      # جرد — زيادة
-    TRANSFER_IN       = "TRANSFER_IN"        # نقل وارد
+# ═══════════════════════════════════════════════════════════════════════════
+# 2. inv_uom_conversions - NEW
+# ═══════════════════════════════════════════════════════════════════════════
+class UOMConversion(Base):
+    """تحويلات وحدات القياس"""
+    __tablename__ = "inv_uom_conversions"
 
-    # OUT movements (decrease stock)
-    SALES_ISSUE       = "SALES_ISSUE"        # إصدار للمبيعات
-    PURCHASE_RETURN   = "PURCHASE_RETURN"    # مرتجع للمورد
-    PRODUCTION_OUT    = "PRODUCTION_OUT"     # إصدار للإنتاج
-    ADJUSTMENT_OUT    = "ADJUSTMENT_OUT"     # جرد — نقص
-    TRANSFER_OUT      = "TRANSFER_OUT"       # نقل صادر
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    from_uom_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_uom.id"), nullable=False)
+    to_uom_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_uom.id"), nullable=False)
+    factor: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    item_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_items.id", ondelete="CASCADE"))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_by: Mapped[Optional[str]] = mapped_column(String(255))
 
-    # Special
-    OPENING_BALANCE   = "OPENING_BALANCE"    # رصيد افتتاحي
-    REVALUATION       = "REVALUATION"        # إعادة تقييم
-
-
-class MovementStatus(str, enum.Enum):
-    DRAFT    = "draft"
-    POSTED   = "posted"    # stock balance updated + JE created
-    REVERSED = "reversed"  # reversed by another movement
-
-
-class CostingMethod(str, enum.Enum):
-    WAC  = "WAC"   # Weighted Average Cost — الأكثر شيوعاً في السعودية
-    FIFO = "FIFO"  # First In First Out
-    LIFO = "LIFO"  # Last In First Out (not recommended)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "from_uom_id", "to_uom_id", "item_id", name="uq_uom_conversion"),
+        CheckConstraint("from_uom_id <> to_uom_id", name="ck_different_uom"),
+        CheckConstraint("factor > 0", name="ck_factor_positive"),
+    )
 
 
-class AdjustmentStatus(str, enum.Enum):
-    DRAFT    = "draft"
-    APPROVED = "approved"
-    POSTED   = "posted"
-    CANCELLED = "cancelled"
+# ═══════════════════════════════════════════════════════════════════════════
+# 3. inv_categories
+# ═══════════════════════════════════════════════════════════════════════════
+class Category(Base):
+    """تصنيفات الأصناف"""
+    __tablename__ = "inv_categories"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    category_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    category_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    parent_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_categories.id"))
+    item_type: Mapped[Optional[str]] = mapped_column(String(20), default="stock")
+    gl_account_code: Mapped[Optional[str]] = mapped_column(String(20))
+    cogs_account_code: Mapped[Optional[str]] = mapped_column(String(20))
+    extra_data: Mapped[Optional[dict]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "category_code", name="uq_category_tenant_code"),
+    )
 
 
-# ══════════════════════════════════════════════════════════
-# 1. Product Master
-# ══════════════════════════════════════════════════════════
-class Product(ERPModel, SoftDeleteMixin, Base):
-    """
-    منتج / صنف — Product master.
-    Central reference for all inventory operations.
-    """
-    __tablename__ = "inv_products"
+# ═══════════════════════════════════════════════════════════════════════════
+# 4. inv_brands - NEW
+# ═══════════════════════════════════════════════════════════════════════════
+class Brand(Base):
+    """العلامات التجارية"""
+    __tablename__ = "inv_brands"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    brand_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    brand_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    brand_name_en: Mapped[Optional[str]] = mapped_column(String(255))
+    logo_url: Mapped[Optional[str]] = mapped_column(Text)
+    website: Mapped[Optional[str]] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_by: Mapped[Optional[str]] = mapped_column(String(255))
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "brand_code", name="uq_brand_tenant_code"),
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 5. inv_warehouses
+# ═══════════════════════════════════════════════════════════════════════════
+class Warehouse(Base):
+    """المستودعات"""
+    __tablename__ = "inv_warehouses"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    warehouse_code: Mapped[str] = mapped_column(String(20), nullable=False)
+    warehouse_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    warehouse_type: Mapped[Optional[str]] = mapped_column(String(30))
+    warehouse_subtype: Mapped[Optional[str]] = mapped_column(String(30), default="main")
+    branch_code: Mapped[Optional[str]] = mapped_column(String(20))
+    parent_warehouse_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_warehouses.id"))
+    gl_account_code: Mapped[Optional[str]] = mapped_column(String(20))
+    transit_account: Mapped[Optional[str]] = mapped_column(String(20))
+    address: Mapped[Optional[str]] = mapped_column(Text)
+    manager_user_id: Mapped[Optional[str]] = mapped_column(String(255))
+    phone: Mapped[Optional[str]] = mapped_column(String(50))
+    email: Mapped[Optional[str]] = mapped_column(String(255))
+    allow_negative_stock: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+    extra_data: Mapped[Optional[dict]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_by: Mapped[Optional[str]] = mapped_column(String(255))
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "warehouse_code", name="uq_warehouse_tenant_code"),
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 6. inv_zones - NEW (3-Level Hierarchy)
+# ═══════════════════════════════════════════════════════════════════════════
+class Zone(Base):
+    """مناطق المستودعات - المستوى الوسيط"""
+    __tablename__ = "inv_zones"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    warehouse_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_warehouses.id", ondelete="CASCADE"), nullable=False)
+    zone_code: Mapped[str] = mapped_column(String(20), nullable=False)
+    zone_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    zone_name_en: Mapped[Optional[str]] = mapped_column(String(255))
+    zone_type: Mapped[str] = mapped_column(String(30), nullable=False, default="storage")
+    parent_zone_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_zones.id"))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("warehouse_id", "zone_code", name="uq_zone_warehouse_code"),
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 7. inv_locations (renamed from inv_bins)
+# ═══════════════════════════════════════════════════════════════════════════
+class Location(Base):
+    """المواقع داخل المستودع"""
+    __tablename__ = "inv_locations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    warehouse_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_warehouses.id"), nullable=False)
+    zone_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_zones.id"))
+    location_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    location_name: Mapped[Optional[str]] = mapped_column(String(255))
+    location_type: Mapped[str] = mapped_column(String(30), default="storage")
+    aisle: Mapped[Optional[str]] = mapped_column(String(20))
+    rack: Mapped[Optional[str]] = mapped_column(String(20))
+    shelf: Mapped[Optional[str]] = mapped_column(String(20))
+    barcode: Mapped[Optional[str]] = mapped_column(String(100))
+    max_capacity_qty: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 3))
+    max_capacity_volume: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 3))
+    max_capacity_weight: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 3))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_pickable: Mapped[bool] = mapped_column(Boolean, default=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 8. inv_items
+# ═══════════════════════════════════════════════════════════════════════════
+class Item(Base):
+    """الأصناف - Master للمنتجات"""
+    __tablename__ = "inv_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
 
     # Identity
-    code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
-    name_ar: Mapped[str] = mapped_column(String(255), nullable=False)
-    name_en: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    barcode: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    item_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    item_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    item_name_en: Mapped[Optional[str]] = mapped_column(String(255))
+    item_type: Mapped[str] = mapped_column(String(20), default="stock")
+    barcode: Mapped[Optional[str]] = mapped_column(String(100))
 
     # Classification
-    product_type: Mapped[ProductType] = mapped_column(
-        String(20), default=ProductType.STOCKABLE, nullable=False
-    )
-    category_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    unit_of_measure: Mapped[str] = mapped_column(String(20), default="قطعة")
-    secondary_uom: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
-    uom_conversion: Mapped[Decimal] = mapped_column(
-        Numeric(10, 4), default=1, nullable=False
-    )
+    category_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_categories.id"))
+    brand_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_brands.id"))
+    uom_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_uom.id"))
+    purchase_uom_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_uom.id"))
+    sales_uom_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_uom.id"))
+
+    # Variants
+    parent_item_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_items.id", ondelete="CASCADE"))
+    is_variant: Mapped[bool] = mapped_column(Boolean, default=False)
+    has_variants: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Tracking
+    tracking_type: Mapped[Optional[str]] = mapped_column(String(20), default="none")
+    is_serialized: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_lot_tracked: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_expiry_tracked: Mapped[bool] = mapped_column(Boolean, default=False)
+    shelf_life_days: Mapped[Optional[int]] = mapped_column(Integer)
 
     # Costing
-    costing_method: Mapped[CostingMethod] = mapped_column(
-        String(10), default=CostingMethod.WAC, nullable=False
-    )
-    standard_cost: Mapped[Decimal] = mapped_column(
-        Numeric(18, 4), default=0, nullable=False
-    )
-    last_purchase_price: Mapped[Decimal] = mapped_column(
-        Numeric(18, 4), default=0, nullable=False
-    )
-    average_cost: Mapped[Decimal] = mapped_column(
-        Numeric(18, 4), default=0, nullable=False
-    )
-
-    # Pricing
-    sale_price: Mapped[Decimal] = mapped_column(
-        Numeric(18, 4), default=0, nullable=False
-    )
-    vat_rate: Mapped[Decimal] = mapped_column(
-        Numeric(5, 2), default=15, nullable=False
-    )
-
-    # Accounting
-    inventory_account: Mapped[str] = mapped_column(
-        String(20), default="1300", nullable=False
-    )
-    cogs_account: Mapped[str] = mapped_column(
-        String(20), default="5001", nullable=False
-    )
-    purchase_account: Mapped[str] = mapped_column(
-        String(20), default="1300", nullable=False
-    )
+    cost_method: Mapped[str] = mapped_column(String(10), default="avg")
+    valuation_method: Mapped[str] = mapped_column(String(10), default="avg")
+    avg_cost: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+    purchase_price: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+    sale_price: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
 
     # Stock control
-    track_stock: Mapped[bool] = mapped_column(Boolean, default=True)
     min_qty: Mapped[Decimal] = mapped_column(Numeric(18, 3), default=0)
     max_qty: Mapped[Decimal] = mapped_column(Numeric(18, 3), default=0)
     reorder_point: Mapped[Decimal] = mapped_column(Numeric(18, 3), default=0)
     reorder_qty: Mapped[Decimal] = mapped_column(Numeric(18, 3), default=0)
+    allow_negative: Mapped[bool] = mapped_column(Boolean, default=False)
 
-    # Status
+    # Accounting
+    gl_account_code: Mapped[Optional[str]] = mapped_column(String(20))
+    cogs_account_code: Mapped[Optional[str]] = mapped_column(String(20))
+
+    # Tax
+    tax_type_code: Mapped[Optional[str]] = mapped_column(String(20))
+    is_tax_exempt: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # ZATCA Phase 2
+    unspsc_code: Mapped[Optional[str]] = mapped_column(String(20))
+    classification_code: Mapped[Optional[str]] = mapped_column(String(20))
+    hs_code: Mapped[Optional[str]] = mapped_column(String(20))
+
+    # Physical dimensions
+    weight_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3))
+    volume_m3: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
+    length_cm: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2))
+    width_cm: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2))
+    height_cm: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2))
+
+    # Smart Hybrid + Lifecycle
+    extra_data: Mapped[Optional[dict]] = mapped_column(JSONB, default=dict)
+    lifecycle_status: Mapped[str] = mapped_column(String(20), default="active")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    is_purchasable: Mapped[bool] = mapped_column(Boolean, default=True)
-    is_sellable: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Misc
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    image_url: Mapped[Optional[str]] = mapped_column(Text)
 
-    # Relationships
-    balances: Mapped[List["StockBalance"]] = relationship(
-        "StockBalance", back_populates="product"
-    )
-    movements: Mapped[List["StockMovement"]] = relationship(
-        "StockMovement", back_populates="product"
-    )
+    # Audit
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[Optional[str]] = mapped_column(String(255))
 
     __table_args__ = (
-        UniqueConstraint("tenant_id", "code", name="uq_product_tenant_code"),
-        CheckConstraint("standard_cost >= 0", name="ck_product_cost_positive"),
-        CheckConstraint("sale_price >= 0", name="ck_product_price_positive"),
+        UniqueConstraint("tenant_id", "item_code", name="uq_item_tenant_code"),
     )
 
 
-# ══════════════════════════════════════════════════════════
-# 2. Warehouse Master
-# ══════════════════════════════════════════════════════════
-class Warehouse(ERPModel, Base):
-    """
-    مستودع — Warehouse / Storage location.
-    """
-    __tablename__ = "inv_warehouses"
+# ═══════════════════════════════════════════════════════════════════════════
+# 9. inv_item_attributes - NEW (Variants Pool)
+# ═══════════════════════════════════════════════════════════════════════════
+class ItemAttribute(Base):
+    """خصائص الأصناف"""
+    __tablename__ = "inv_item_attributes"
 
-    code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
-    name_ar: Mapped[str] = mapped_column(String(255), nullable=False)
-    name_en: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    attribute_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    attribute_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    attribute_name_en: Mapped[Optional[str]] = mapped_column(String(255))
+    display_type: Mapped[str] = mapped_column(String(20), default="select")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    address: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    city: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "attribute_code", name="uq_attr_tenant_code"),
+    )
+
+
+class ItemAttributeValue(Base):
+    """قيم الخصائص"""
+    __tablename__ = "inv_item_attribute_values"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    attribute_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_item_attributes.id", ondelete="CASCADE"), nullable=False)
+    value_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    value_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    value_name_en: Mapped[Optional[str]] = mapped_column(String(255))
+    color_hex: Mapped[Optional[str]] = mapped_column(String(7))
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    __table_args__ = (
+        UniqueConstraint("attribute_id", "value_code", name="uq_attr_value"),
+    )
+
+
+class ItemVariantAttr(Base):
+    """ربط Variants بقيم الخصائص"""
+    __tablename__ = "inv_item_variant_attrs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    item_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_items.id", ondelete="CASCADE"), nullable=False)
+    attribute_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_item_attributes.id"), nullable=False)
+    attribute_value_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_item_attribute_values.id"), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("item_id", "attribute_id", name="uq_item_attr"),
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 10. inv_lots - NEW
+# ═══════════════════════════════════════════════════════════════════════════
+class Lot(Base):
+    """دفعات/تشغيلات الأصناف"""
+    __tablename__ = "inv_lots"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    lot_number: Mapped[str] = mapped_column(String(100), nullable=False)
+    item_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_items.id"), nullable=False)
+
+    manufacturing_date: Mapped[Optional[date]] = mapped_column(Date)
+    expiry_date: Mapped[Optional[date]] = mapped_column(Date)
+    received_date: Mapped[date] = mapped_column(Date, nullable=False, default=date.today)
+
+    qty_received: Mapped[Decimal] = mapped_column(Numeric(18, 3), nullable=False, default=0)
+    qty_remaining: Mapped[Decimal] = mapped_column(Numeric(18, 3), nullable=False, default=0)
+    unit_cost: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+
+    source_party_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True))
+    source_party_name: Mapped[Optional[str]] = mapped_column(String(255))
+    source_doc_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True))
+    source_doc_serial: Mapped[Optional[str]] = mapped_column(String(50))
+
+    quality_status: Mapped[str] = mapped_column(String(20), default="approved")
+    coa_number: Mapped[Optional[str]] = mapped_column(String(100))
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
-    allow_negative_stock: Mapped[bool] = mapped_column(Boolean, default=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
 
-    # Accounting override (optional — inherits from product if null)
-    inventory_account: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
-
-    manager_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    # Relationships
-    balances: Mapped[List["StockBalance"]] = relationship(
-        "StockBalance", back_populates="warehouse"
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_by: Mapped[Optional[str]] = mapped_column(String(255))
 
     __table_args__ = (
-        UniqueConstraint("tenant_id", "code", name="uq_warehouse_tenant_code"),
+        UniqueConstraint("tenant_id", "item_id", "lot_number", name="uq_lot_tenant_item"),
     )
 
 
-# ══════════════════════════════════════════════════════════
-# 3. Stock Balance (current snapshot)
-# ══════════════════════════════════════════════════════════
-class StockBalance(ERPModel, Base):
-    """
-    رصيد المخزون اللحظي — per product per warehouse.
-    Updated atomically by InventoryService on every posted movement.
-    One row per (tenant, product, warehouse).
-    """
-    __tablename__ = "inv_stock_balances"
+# ═══════════════════════════════════════════════════════════════════════════
+# 11. inv_serials - NEW
+# ═══════════════════════════════════════════════════════════════════════════
+class Serial(Base):
+    """الأرقام التسلسلية"""
+    __tablename__ = "inv_serials"
 
-    product_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("inv_products.id"),
-        nullable=False,
-        index=True,
-    )
-    product_code: Mapped[str] = mapped_column(String(50), nullable=False)
-    warehouse_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("inv_warehouses.id"),
-        nullable=False,
-        index=True,
-    )
-    warehouse_code: Mapped[str] = mapped_column(String(20), nullable=False)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    serial_number: Mapped[str] = mapped_column(String(100), nullable=False)
+    item_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_items.id"), nullable=False)
+    lot_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_lots.id"))
 
-    # Quantities
-    qty_on_hand: Mapped[Decimal] = mapped_column(
-        Numeric(18, 3), default=0, nullable=False
-    )
-    qty_reserved: Mapped[Decimal] = mapped_column(
-        Numeric(18, 3), default=0, nullable=False
-    )  # reserved for open sales orders
-    qty_available: Mapped[Decimal] = mapped_column(
-        Numeric(18, 3), default=0, nullable=False
-    )  # on_hand - reserved
-    qty_incoming: Mapped[Decimal] = mapped_column(
-        Numeric(18, 3), default=0, nullable=False
-    )  # expected from open POs
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="in_stock")
+    current_warehouse_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_warehouses.id"))
+    current_location_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_locations.id"))
 
-    # Valuation (WAC)
-    average_cost: Mapped[Decimal] = mapped_column(
-        Numeric(18, 4), default=0, nullable=False
-    )
-    total_value: Mapped[Decimal] = mapped_column(
-        Numeric(18, 3), default=0, nullable=False
-    )  # qty_on_hand × average_cost
+    purchase_date: Mapped[Optional[date]] = mapped_column(Date)
+    purchase_doc_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True))
+    purchase_doc_serial: Mapped[Optional[str]] = mapped_column(String(50))
+    purchase_party_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True))
+    purchase_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4))
 
-    # Tracking
-    last_movement_date: Mapped[Optional[str]] = mapped_column(Date, nullable=True)
-    last_movement_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    sale_date: Mapped[Optional[date]] = mapped_column(Date)
+    sale_doc_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True))
+    sale_doc_serial: Mapped[Optional[str]] = mapped_column(String(50))
+    sale_party_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True))
 
-    # Relationships
-    product: Mapped["Product"] = relationship("Product", back_populates="balances")
-    warehouse: Mapped["Warehouse"] = relationship("Warehouse", back_populates="balances")
+    warranty_start_date: Mapped[Optional[date]] = mapped_column(Date)
+    warranty_end_date: Mapped[Optional[date]] = mapped_column(Date)
+
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
-        UniqueConstraint(
-            "tenant_id", "product_id", "warehouse_id",
-            name="uq_stockbal_tenant_prod_wh",
-        ),
-        CheckConstraint("qty_on_hand >= -999999", name="ck_stockbal_qty"),
+        UniqueConstraint("tenant_id", "item_id", "serial_number", name="uq_serial_tenant_item"),
     )
 
 
-# ══════════════════════════════════════════════════════════
-# 4. Stock Movement (immutable ledger)
-# ══════════════════════════════════════════════════════════
-class StockMovement(ERPModel, Base):
-    """
-    حركة مخزون — Immutable movement record.
-    Every IN/OUT/TRANSFER creates a new row.
-    NEVER updated after posting.
-    This is the inventory equivalent of journal_entries.
-    """
-    __tablename__ = "inv_movements"
+# ═══════════════════════════════════════════════════════════════════════════
+# 12. inv_reason_codes - NEW (Reason-Driven Accounting)
+# ═══════════════════════════════════════════════════════════════════════════
+class ReasonCode(Base):
+    """أكواد الأسباب للحركات الاستثنائية"""
+    __tablename__ = "inv_reason_codes"
 
-    # Document identity
-    movement_number: Mapped[str] = mapped_column(
-        String(50), nullable=False, index=True
-    )
-    movement_type: Mapped[MovementType] = mapped_column(
-        String(30), nullable=False, index=True
-    )
-    movement_date: Mapped[str] = mapped_column(Date, nullable=False, index=True)
-    status: Mapped[MovementStatus] = mapped_column(
-        String(20), default=MovementStatus.DRAFT, nullable=False
-    )
-
-    # Product & Warehouse
-    product_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("inv_products.id"),
-        nullable=False,
-        index=True,
-    )
-    product_code: Mapped[str] = mapped_column(String(50), nullable=False)
-    product_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    warehouse_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("inv_warehouses.id"),
-        nullable=False,
-    )
-    warehouse_code: Mapped[str] = mapped_column(String(20), nullable=False)
-
-    # Transfer destination (for TRANSFER_IN/OUT pairs)
-    dest_warehouse_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("inv_warehouses.id"),
-        nullable=True,
-    )
-    dest_warehouse_code: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
-
-    # Quantity & Value
-    qty: Mapped[Decimal] = mapped_column(
-        Numeric(18, 3), nullable=False
-    )  # always positive — direction determined by movement_type
-    unit_cost: Mapped[Decimal] = mapped_column(
-        Numeric(18, 4), nullable=False
-    )
-    total_cost: Mapped[Decimal] = mapped_column(
-        Numeric(18, 3), nullable=False
-    )
-
-    # WAC snapshot (after this movement)
-    wac_before: Mapped[Decimal] = mapped_column(
-        Numeric(18, 4), default=0, nullable=False
-    )
-    wac_after: Mapped[Decimal] = mapped_column(
-        Numeric(18, 4), default=0, nullable=False
-    )
-    qty_before: Mapped[Decimal] = mapped_column(
-        Numeric(18, 3), default=0, nullable=False
-    )
-    qty_after: Mapped[Decimal] = mapped_column(
-        Numeric(18, 3), default=0, nullable=False
-    )
-
-    # Source document link
-    source_module: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    source_doc_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    source_doc_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), nullable=True
-    )
-    source_doc_number: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-
-    # Accounting link
-    je_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), nullable=True
-    )
-    je_serial: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-
-    # Reversal link
-    reversed_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), nullable=True
-    )
-    reverses_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), nullable=True
-    )
-
-    # Posting info
-    posted_at: Mapped[Optional[str]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    posted_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-
-    description: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    # Relationships
-    product: Mapped["Product"] = relationship("Product", back_populates="movements")
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    reason_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    reason_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    reason_name_en: Mapped[Optional[str]] = mapped_column(String(255))
+    applies_to_tx_types: Mapped[Optional[str]] = mapped_column(Text)
+    requires_expense_acc: Mapped[bool] = mapped_column(Boolean, default=True)
+    expense_account_code: Mapped[Optional[str]] = mapped_column(String(20))
+    affects_cogs: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_increase: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
-        UniqueConstraint(
-            "tenant_id", "movement_number",
-            name="uq_movement_tenant_number",
-        ),
-        CheckConstraint("qty > 0", name="ck_movement_qty_positive"),
-        CheckConstraint("unit_cost >= 0", name="ck_movement_cost_positive"),
-        Index("ix_movement_tenant_date", "tenant_id", "movement_date"),
-        Index("ix_movement_source", "tenant_id", "source_doc_id"),
+        UniqueConstraint("tenant_id", "reason_code", name="uq_reason_tenant_code"),
     )
 
 
-# ══════════════════════════════════════════════════════════
-# 5. Stock Adjustment Document
-# ══════════════════════════════════════════════════════════
-class StockAdjustment(ERPModel, Base):
-    """
-    جرد المخزون — Stock count / adjustment document.
-    Groups multiple adjustment lines under one document.
-    Approved → generates ADJUSTMENT_IN/OUT movements.
-    """
-    __tablename__ = "inv_adjustments"
+# ═══════════════════════════════════════════════════════════════════════════
+# 13. inv_balances - الأرصدة اللحظية
+# ═══════════════════════════════════════════════════════════════════════════
+class Balance(Base):
+    """رصيد المخزون اللحظي per item per warehouse"""
+    __tablename__ = "inv_balances"
 
-    adj_number: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
-    adj_date: Mapped[str] = mapped_column(Date, nullable=False)
-    status: Mapped[AdjustmentStatus] = mapped_column(
-        String(20), default=AdjustmentStatus.DRAFT, nullable=False
-    )
-
-    warehouse_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("inv_warehouses.id"),
-        nullable=False,
-    )
-    warehouse_code: Mapped[str] = mapped_column(String(20), nullable=False)
-
-    reason: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    approved_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    approved_at: Mapped[Optional[str]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    posted_at: Mapped[Optional[str]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    je_serial: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-
-    lines: Mapped[List["StockAdjustmentLine"]] = relationship(
-        "StockAdjustmentLine",
-        back_populates="adjustment",
-        cascade="all, delete-orphan",
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    item_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_items.id"), nullable=False)
+    warehouse_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("inv_warehouses.id"), nullable=False)
+    qty_on_hand: Mapped[Decimal] = mapped_column(Numeric(18, 3), default=0)
+    qty_reserved: Mapped[Decimal] = mapped_column(Numeric(18, 3), default=0)
+    avg_cost: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+    total_value: Mapped[Decimal] = mapped_column(Numeric(18, 3), default=0)
+    last_movement: Mapped[Optional[date]] = mapped_column(Date)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
-        UniqueConstraint("tenant_id", "adj_number", name="uq_adj_tenant_number"),
+        UniqueConstraint("tenant_id", "item_id", "warehouse_id", name="uq_balance_tenant_item_wh"),
     )
 
 
-class StockAdjustmentLine(ERPModel, Base):
-    __tablename__ = "inv_adjustment_lines"
+# ═══════════════════════════════════════════════════════════════════════════
+# 14. inv_account_settings
+# ═══════════════════════════════════════════════════════════════════════════
+class AccountSettings(Base):
+    """إعدادات الحسابات لكل نوع حركة"""
+    __tablename__ = "inv_account_settings"
 
-    adjustment_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("inv_adjustments.id", ondelete="CASCADE"),
-        nullable=False,
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    tx_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    debit_account: Mapped[Optional[str]] = mapped_column(String(20))
+    credit_account: Mapped[Optional[str]] = mapped_column(String(20))
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "tx_type", name="uq_acc_settings_tenant_type"),
     )
-    product_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("inv_products.id"),
-        nullable=False,
-    )
-    product_code: Mapped[str] = mapped_column(String(50), nullable=False)
-    product_name: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    qty_system: Mapped[Decimal] = mapped_column(Numeric(18, 3), nullable=False)
-    qty_counted: Mapped[Decimal] = mapped_column(Numeric(18, 3), nullable=False)
-    qty_difference: Mapped[Decimal] = mapped_column(Numeric(18, 3), nullable=False)
-    # positive = overage (ADJUSTMENT_IN), negative = shortage (ADJUSTMENT_OUT)
 
-    unit_cost: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
-    variance_value: Mapped[Decimal] = mapped_column(Numeric(18, 3), default=0)
-
-    notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-
-    adjustment: Mapped["StockAdjustment"] = relationship(
-        "StockAdjustment", back_populates="lines"
-    )
+# ═══════════════════════════════════════════════════════════════════════════
+# Note: inv_transactions, inv_transaction_lines, inv_ledger, inv_fifo_layers,
+# inv_count_sessions, inv_count_lines, inv_adjustments, inv_adjustment_lines
+# remain accessed via raw SQL in router.py for performance.
+# Models can be added here as needed for type-safety queries.
+# ═══════════════════════════════════════════════════════════════════════════
