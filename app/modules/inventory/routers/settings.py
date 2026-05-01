@@ -469,6 +469,7 @@ async def health_check(
             _add_check("Critical Tables", "ok",
                        f"جميع الجداول الـ {len(critical_tables)} موجودة")
     except Exception as e:
+        await db.rollback()
         _add_check("Critical Tables", "fail",
                    f"فحص الجداول فشل: {type(e).__name__}: {str(e)[:100]}")
 
@@ -491,6 +492,7 @@ async def health_check(
             _add_check("Critical Reason Codes", "ok",
                        "كل الأسباب الحرجة الـ 6 موجودة")
     except Exception as e:
+        await db.rollback()
         _add_check("Critical Reason Codes", "fail",
                    f"فحص الأسباب فشل: {type(e).__name__}: {str(e)[:100]}")
 
@@ -520,6 +522,7 @@ async def health_check(
             _add_check("Account Settings → CoA", "ok",
                        f"كل الحسابات المُعدَّة صالحة ({len(saved_accs)} إعداد)")
     except Exception as e:
+        await db.rollback()
         _add_check("Account Settings → CoA", "fail",
                    f"فحص الحسابات فشل: {type(e).__name__}: {str(e)[:100]}")
 
@@ -543,6 +546,7 @@ async def health_check(
             _add_check("Default CoA Accounts", "ok",
                        f"كل الحسابات الافتراضية الـ {len(default_codes)} موجودة")
     except Exception as e:
+        await db.rollback()
         _add_check("Default CoA Accounts", "warn",
                    f"فحص الحسابات الافتراضية فشل: {type(e).__name__}: {str(e)[:100]}")
 
@@ -562,6 +566,7 @@ async def health_check(
             _add_check("Numbering Series", "ok",
                        f"كل تسلسلات سنة {cur_year} موجودة ({len(INV_SERIES_TYPES)} نوع)")
     except Exception as e:
+        await db.rollback()
         _add_check("Numbering Series", "warn",
                    f"فحص التسلسلات فشل: {type(e).__name__}: {str(e)[:100]}")
 
@@ -579,6 +584,7 @@ async def health_check(
             _add_check("Active Warehouses", "ok",
                        f"{wh_count} مستودع نشط")
     except Exception as e:
+        await db.rollback()
         _add_check("Active Warehouses", "fail",
                    f"فحص المستودعات فشل: {type(e).__name__}: {str(e)[:100]}")
 
@@ -632,6 +638,7 @@ async def health_check(
             _add_check("Schema Compatibility", "ok",
                        f"كل الأعمدة المتوقّعة موجودة في الـ {len(EXPECTED_COLUMNS)} جداول الحسّاسة")
     except Exception as e:
+        await db.rollback()
         _add_check("Schema Compatibility", "warn",
                    f"فحص توافق Schema فشل: {type(e).__name__}: {str(e)[:100]}")
 
