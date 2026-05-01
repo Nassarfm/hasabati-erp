@@ -54,7 +54,8 @@ async def list_uom_conversions(
             fu.uom_code AS from_uom_code, fu.uom_name AS from_uom_name,
             tu.uom_code AS to_uom_code,   tu.uom_name AS to_uom_name,
             i.item_code AS item_code,     i.item_name AS item_name,
-            c.created_at, c.updated_at
+            c.created_at,
+            NULL::timestamptz AS updated_at
         FROM inv_uom_conversions c
         LEFT JOIN inv_uom fu  ON fu.id = c.from_uom_id
         LEFT JOIN inv_uom tu  ON tu.id = c.to_uom_id
@@ -122,7 +123,7 @@ async def update_uom_conversion(
             params[col] = data[key]
     if not fields:
         return ok(data={}, message="لا تغييرات")
-    fields.append("updated_at = NOW()")
+    # NOTE: updated_at column غير موجود في DB - نتجاهل
     await db.execute(text(f"""
         UPDATE inv_uom_conversions SET {', '.join(fields)}
         WHERE id=:id AND tenant_id=:tid
@@ -141,6 +142,122 @@ async def delete_uom_conversion(
     await db.execute(
         text("DELETE FROM inv_uom_conversions WHERE id=:id AND tenant_id=:tid"),
         {"id": str(conv_id), "tid": tid},
+    )
+    await db.commit()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# UOM (Units of Measure) — الوحدات الأساسية (PCS, KG, BOX, ...)
+# ═══════════════════════════════════════════════════════════════════════════
+@router.get("/uoms")
+async def list_uoms(
+    is_active: Optional[bool] = None,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """قائمة وحدات القياس — مع علامة is_base للوحدة الأساسية."""
+    tid = str(user.tenant_id)
+    conds = ["tenant_id=:tid"]
+    params: dict = {"tid": tid}
+    if is_active is not None:
+        conds.append("is_active=:act")
+        params["act"] = is_active
+    r = await db.execute(text(f"""
+        SELECT id, uom_code, uom_name, uom_name_en, description,
+               is_base, is_active,
+               created_at,
+               NULL::timestamptz AS updated_at
+        FROM inv_uom
+        WHERE {' AND '.join(conds)}
+        ORDER BY is_base DESC, uom_name
+    """), params)
+    return ok(data=[dict(row._mapping) for row in r.fetchall()])
+
+
+@router.post("/uoms", status_code=201)
+async def create_uom(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    uid = str(uuid.uuid4())
+    if not data.get("uom_code") or not data.get("uom_name"):
+        raise HTTPException(400, "uom_code و uom_name مطلوبان")
+    await db.execute(text("""
+        INSERT INTO inv_uom (
+            id, tenant_id, uom_code, uom_name, uom_name_en,
+            description, is_base, is_active
+        ) VALUES (
+            :id, :tid, :code, :name, :en,
+            :desc, :base, :act
+        )
+    """), {
+        "id": uid, "tid": tid,
+        "code": data["uom_code"],
+        "name": data["uom_name"],
+        "en": data.get("uom_name_en"),
+        "desc": data.get("description"),
+        "base": data.get("is_base", False),
+        "act": data.get("is_active", True),
+    })
+    await db.commit()
+    return created(data={"id": uid}, message="تم إنشاء الوحدة ✅")
+
+
+@router.put("/uoms/{uom_id}")
+async def update_uom(
+    uom_id: uuid.UUID,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tid = str(user.tenant_id)
+    fields = []
+    params: dict = {"id": str(uom_id), "tid": tid}
+    # NOTE: updated_at موجود في DB لكن غير ضروري نُحدّثه يدوياً (NULL في SELECT)
+    for col in ["uom_code", "uom_name", "uom_name_en",
+                "description", "is_base", "is_active"]:
+        if col in data:
+            fields.append(f"{col} = :{col}")
+            params[col] = data[col]
+    if not fields:
+        return ok(data={}, message="لا تغييرات")
+    await db.execute(text(f"""
+        UPDATE inv_uom SET {', '.join(fields)}
+        WHERE id=:id AND tenant_id=:tid
+    """), params)
+    await db.commit()
+    return ok(data={"id": str(uom_id)}, message="تم التحديث")
+
+
+@router.delete("/uoms/{uom_id}", status_code=204)
+async def delete_uom(
+    uom_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """حذف وحدة. ممنوع لو مُستخدمة في أصناف أو تحويلات."""
+    tid = str(user.tenant_id)
+    # تحقّق من الاستخدام في الأصناف
+    cnt_items = await db.execute(text("""
+        SELECT COUNT(*) FROM inv_items
+        WHERE tenant_id=:tid AND (
+            uom_id=:uid OR purchase_uom_id=:uid OR sales_uom_id=:uid
+        )
+    """), {"tid": tid, "uid": str(uom_id)})
+    if cnt_items.scalar() > 0:
+        raise HTTPException(400, "لا يمكن حذف وحدة مستخدمة في الأصناف")
+    # تحقّق من الاستخدام في التحويلات
+    cnt_conv = await db.execute(text("""
+        SELECT COUNT(*) FROM inv_uom_conversions
+        WHERE tenant_id=:tid AND (from_uom_id=:uid OR to_uom_id=:uid)
+    """), {"tid": tid, "uid": str(uom_id)})
+    if cnt_conv.scalar() > 0:
+        raise HTTPException(400, "لا يمكن حذف وحدة مستخدمة في تحويلات الوحدات")
+    await db.execute(
+        text("DELETE FROM inv_uom WHERE id=:id AND tenant_id=:tid"),
+        {"id": str(uom_id), "tid": tid},
     )
     await db.commit()
 
