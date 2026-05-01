@@ -471,8 +471,8 @@ async def health_check(
         "theft", "obsolete", "quality_reject",
     ]
     rr = await db.execute(text("""
-        SELECT code FROM inv_reason_codes
-        WHERE tenant_id=:tid AND code = ANY(:codes) AND is_active=true
+        SELECT reason_code FROM inv_reason_codes
+        WHERE tenant_id=:tid AND reason_code = ANY(:codes) AND is_active=true
     """), {"tid": tid, "codes": critical_reasons})
     existing_reasons = {r[0] for r in rr.fetchall()}
     missing_reasons = [c for c in critical_reasons if c not in existing_reasons]
