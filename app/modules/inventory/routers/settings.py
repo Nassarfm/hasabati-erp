@@ -582,6 +582,55 @@ async def health_check(
         _add_check("Active Warehouses", "fail",
                    f"فحص المستودعات فشل: {type(e).__name__}: {str(e)[:100]}")
 
+    # ─── 7. Schema Compatibility (Backend ↔ DB columns) ────────
+    # 💡 فكرة فادي العبقريّة: نفحص أن الأعمدة المطلوبة من Backend موجودة فعلاً في DB.
+    # هذا يكشف انحراف schema بسرعة بدلاً من اكتشافه من خطأ 500 صامت.
+    try:
+        EXPECTED_COLUMNS = {
+            "inv_brands": ["brand_code", "brand_name", "brand_name_en", "is_active",
+                           "manufacturer", "country_of_origin"],
+            "inv_reason_codes": ["reason_code", "reason_name", "expense_account_code",
+                                 "applies_to_tx_types", "is_increase", "is_system",
+                                 "is_active"],
+            "inv_item_attributes": ["attribute_code", "attribute_name", "display_type",
+                                    "is_active", "sort_order"],
+            "inv_item_attribute_values": ["attribute_id", "value_code", "value_name",
+                                          "color_hex", "sort_order", "is_active"],
+            "inv_zones": ["zone_code", "zone_name", "warehouse_id", "is_active"],
+            "inv_locations": ["location_code", "location_name", "warehouse_id",
+                              "zone_id", "is_active"],
+        }
+
+        # احصل على كل الأعمدة الفعلية لكل الجداول دفعة واحدة
+        rs = await db.execute(text("""
+            SELECT table_name, column_name
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name = ANY(:tables)
+        """), {"tables": list(EXPECTED_COLUMNS.keys())})
+        actual_cols: dict = {}
+        for row in rs.fetchall():
+            actual_cols.setdefault(row[0], set()).add(row[1])
+
+        # قارن
+        mismatches: list = []
+        for tbl, expected in EXPECTED_COLUMNS.items():
+            if tbl not in actual_cols:
+                continue  # الجدول مفقود (يُكشف في فحص آخر)
+            missing = [c for c in expected if c not in actual_cols[tbl]]
+            if missing:
+                mismatches.append(f"{tbl}: {', '.join(missing)}")
+
+        if mismatches:
+            _add_check("Schema Compatibility", "warn",
+                       f"أعمدة متوقّعة من Backend غير موجودة في DB ({len(mismatches)} جدول): "
+                       + " | ".join(mismatches[:3]))
+        else:
+            _add_check("Schema Compatibility", "ok",
+                       f"كل الأعمدة المتوقّعة موجودة في الـ {len(EXPECTED_COLUMNS)} جداول الحسّاسة")
+    except Exception as e:
+        _add_check("Schema Compatibility", "warn",
+                   f"فحص توافق Schema فشل: {type(e).__name__}: {str(e)[:100]}")
+
     return ok(data={
         "status": "healthy" if overall_ok else "issues",
         "checks": checks,

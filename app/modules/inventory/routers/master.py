@@ -429,8 +429,10 @@ async def list_attributes(
         params["act"] = is_active
     r = await db.execute(text(f"""
         SELECT id, attribute_code, attribute_name, attribute_name_en,
-               display_type, is_active, sort_order, notes,
-               created_at, updated_at
+               display_type, is_active, sort_order,
+               NULL::text AS notes,
+               created_at,
+               NULL::timestamptz AS updated_at
         FROM inv_item_attributes
         WHERE {' AND '.join(conds)}
         ORDER BY sort_order, attribute_name
@@ -467,13 +469,14 @@ async def create_attribute(
     aid = str(uuid.uuid4())
     if not data.get("attribute_code") or not data.get("attribute_name"):
         raise HTTPException(400, "attribute_code و attribute_name مطلوبان")
+    # NOTE: notes column غير موجود في DB - نتجاهله
     await db.execute(text("""
         INSERT INTO inv_item_attributes (
             id, tenant_id, attribute_code, attribute_name, attribute_name_en,
-            display_type, is_active, sort_order, notes
+            display_type, is_active, sort_order
         ) VALUES (
             :id, :tid, :code, :name, :en,
-            :dt, :act, :so, :notes
+            :dt, :act, :so
         )
     """), {
         "id": aid, "tid": tid,
@@ -482,7 +485,6 @@ async def create_attribute(
         "dt": data.get("display_type", "select"),
         "act": data.get("is_active", True),
         "so": data.get("sort_order", 0),
-        "notes": data.get("notes"),
     })
     await db.commit()
     return created(data={"id": aid}, message="تم إنشاء الخاصية ✅")
@@ -498,14 +500,14 @@ async def update_attribute(
     tid = str(user.tenant_id)
     fields = []
     params: dict = {"id": str(attr_id), "tid": tid}
+    # NOTE: notes و updated_at أعمدة غير موجودة في DB - مستثناة
     for col in ["attribute_code", "attribute_name", "attribute_name_en",
-                "display_type", "is_active", "sort_order", "notes"]:
+                "display_type", "is_active", "sort_order"]:
         if col in data:
             fields.append(f"{col} = :{col}")
             params[col] = data[col]
     if not fields:
         return ok(data={}, message="لا تغييرات")
-    fields.append("updated_at = NOW()")
     await db.execute(text(f"""
         UPDATE inv_item_attributes SET {', '.join(fields)}
         WHERE id=:id AND tenant_id=:tid
@@ -549,7 +551,9 @@ async def list_attribute_values(
     tid = str(user.tenant_id)
     r = await db.execute(text("""
         SELECT id, attribute_id, value_code, value_name, value_name_en,
-               color_hex, sort_order, is_active, created_at, updated_at
+               color_hex, sort_order, is_active,
+               NULL::timestamptz AS created_at,
+               NULL::timestamptz AS updated_at
         FROM inv_item_attribute_values
         WHERE tenant_id=:tid AND attribute_id=:aid
         ORDER BY sort_order, value_name
@@ -599,6 +603,7 @@ async def update_attribute_value(
     tid = str(user.tenant_id)
     fields = []
     params: dict = {"id": str(value_id), "tid": tid}
+    # NOTE: updated_at غير موجود في DB - مستثنى
     for col in ["value_code", "value_name", "value_name_en",
                 "color_hex", "sort_order", "is_active"]:
         if col in data:
@@ -606,7 +611,6 @@ async def update_attribute_value(
             params[col] = data[col]
     if not fields:
         return ok(data={}, message="لا تغييرات")
-    fields.append("updated_at = NOW()")
     await db.execute(text(f"""
         UPDATE inv_item_attribute_values SET {', '.join(fields)}
         WHERE id=:id AND tenant_id=:tid
