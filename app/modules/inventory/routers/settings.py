@@ -236,20 +236,35 @@ async def dashboard(
     user: CurrentUser = Depends(get_current_user),
 ):
     """
-    KPIs شاملة للموديول:
-      • أصناف نشطة / مستودعات / مناطق / مواقع
-      • إجمالي قيمة المخزون / كمية / متوسط تكلفة
-      • أصناف تحت إعادة الطلب / سالبة / منتهية الصلاحية
-      • معدل الدوران (آخر 30 يوم)
-      • عدد المستندات المعلّقة (draft) / المرحَّلة / آخر 7 أيام
+    KPIs شاملة للموديول مع معالجة دفاعية للأخطاء.
+    لو فشل query واحد، الباقي يستمر، ويُرجع قائمة الأخطاء في 'errors'.
+    هذا يساعد على التشخيص بدلاً من 500 صامت.
     """
     tid = str(user.tenant_id)
     today = date.today()
     thirty_ago = today - timedelta(days=30)
     seven_ago  = today - timedelta(days=7)
 
-    # Master data counts
-    r = await db.execute(text("""
+    errors: list = []
+
+    # ─── helper: safe execute ─────────────────────────────────────
+    async def _safe(name: str, sql: str, params: dict, default):
+        try:
+            r = await db.execute(text(sql), params)
+            return r
+        except Exception as e:
+            err_msg = name + ": " + type(e).__name__ + ": " + str(e)
+            errors.append(err_msg)
+            return None
+
+    # ─── 1. Master data counts ────────────────────────────────────
+    master: dict = {
+        "items_active": 0, "categories": 0, "brands": 0,
+        "warehouses": 0, "zones": 0, "locations": 0,
+        "uoms": 0, "uom_conversions": 0, "reason_codes": 0,
+        "attributes": 0, "active_lots": 0, "active_serials": 0,
+    }
+    r = await _safe("master_counts", """
         SELECT
           (SELECT COUNT(*) FROM inv_items      WHERE tenant_id=:tid AND is_active=true) AS items_active,
           (SELECT COUNT(*) FROM inv_categories WHERE tenant_id=:tid) AS categories,
@@ -263,11 +278,16 @@ async def dashboard(
           (SELECT COUNT(*) FROM inv_item_attributes WHERE tenant_id=:tid AND is_active=true) AS attributes,
           (SELECT COUNT(*) FROM inv_lots        WHERE tenant_id=:tid AND qty_on_hand>0) AS active_lots,
           (SELECT COUNT(*) FROM inv_serials     WHERE tenant_id=:tid AND status='in_stock') AS active_serials
-    """), {"tid": tid})
-    master = dict(r.fetchone()._mapping)
+    """, {"tid": tid}, master)
+    if r is not None:
+        try:
+            master = dict(r.fetchone()._mapping)
+        except Exception as e:
+            errors.append("master_fetch: " + str(e))
 
-    # Stock totals
-    rs = await db.execute(text("""
+    # ─── 2. Stock totals ──────────────────────────────────────────
+    stock: dict = {"total_qty": 0, "total_value": 0, "avg_cost": 0, "negative_count": 0, "zero_count": 0}
+    rs = await _safe("stock_totals", """
         SELECT
           COALESCE(SUM(qty_on_hand), 0)                              AS total_qty,
           COALESCE(SUM(total_value), 0)                              AS total_value,
@@ -275,66 +295,94 @@ async def dashboard(
           COUNT(*) FILTER (WHERE qty_on_hand < 0)                    AS negative_count,
           COUNT(*) FILTER (WHERE qty_on_hand = 0)                    AS zero_count
         FROM inv_balances WHERE tenant_id=:tid
-    """), {"tid": tid})
-    stock = dict(rs.fetchone()._mapping)
+    """, {"tid": tid}, stock)
+    if rs is not None:
+        try:
+            stock = dict(rs.fetchone()._mapping)
+        except Exception as e:
+            errors.append("stock_fetch: " + str(e))
 
-    # Below reorder
-    rb = await db.execute(text("""
+    # ─── 3. Below reorder ─────────────────────────────────────────
+    below_reorder_count = 0
+    rb = await _safe("below_reorder", """
         SELECT COUNT(DISTINCT i.id) AS cnt
         FROM inv_items i
         LEFT JOIN inv_balances b ON b.item_id=i.id AND b.tenant_id=:tid
         WHERE i.tenant_id=:tid AND i.is_active=true AND i.reorder_point > 0
         GROUP BY i.id, i.reorder_point
         HAVING COALESCE(SUM(b.qty_on_hand), 0) <= i.reorder_point
-    """), {"tid": tid})
-    below_reorder_rows = rb.fetchall()
-    below_reorder_count = len(below_reorder_rows)
+    """, {"tid": tid}, 0)
+    if rb is not None:
+        try:
+            below_reorder_count = len(rb.fetchall())
+        except Exception as e:
+            errors.append("below_reorder_fetch: " + str(e))
 
-    # Expiring soon (90 days)
-    re = await db.execute(text("""
+    # ─── 4. Expiring soon (90 days) ───────────────────────────────
+    expiring_count = 0
+    re_ = await _safe("expiring", """
         SELECT COUNT(*) FROM inv_lots
         WHERE tenant_id=:tid AND qty_on_hand>0
           AND expiry_date IS NOT NULL
           AND expiry_date <= CURRENT_DATE + INTERVAL '90 days'
-    """), {"tid": tid})
-    expiring_count = re.scalar() or 0
+    """, {"tid": tid}, 0)
+    if re_ is not None:
+        try:
+            expiring_count = re_.scalar() or 0
+        except Exception as e:
+            errors.append("expiring_fetch: " + str(e))
 
-    # COGS last 30 days for turnover
-    rc = await db.execute(text("""
+    # ─── 5. COGS last 30 days for turnover ────────────────────────
+    cogs_30d = 0.0
+    rc = await _safe("cogs_30d", """
         SELECT COALESCE(SUM(total_cost), 0) AS cogs
         FROM inv_ledger
         WHERE tenant_id=:tid AND qty_out>0 AND tx_date>=:since
-    """), {"tid": tid, "since": thirty_ago})
-    cogs_30d = float(rc.scalar() or 0)
+    """, {"tid": tid, "since": thirty_ago}, 0)
+    if rc is not None:
+        try:
+            cogs_30d = float(rc.scalar() or 0)
+        except Exception as e:
+            errors.append("cogs_fetch: " + str(e))
+
     total_val = float(stock.get("total_value") or 0)
     turnover_rate = round((cogs_30d / total_val * 12) if total_val > 0 else 0, 2)
 
-    # Transactions activity
-    rt = await db.execute(text("""
+    # ─── 6. Transactions activity ─────────────────────────────────
+    tx_stats: dict = {"pending": 0, "posted_total": 0, "posted_last_7d": 0}
+    rt = await _safe("tx_stats", """
         SELECT
           COUNT(*) FILTER (WHERE status='draft')                    AS pending,
           COUNT(*) FILTER (WHERE status='posted')                   AS posted_total,
           COUNT(*) FILTER (WHERE status='posted' AND tx_date>=:s7)  AS posted_last_7d
         FROM inv_transactions WHERE tenant_id=:tid
-    """), {"tid": tid, "s7": seven_ago})
-    tx_stats = dict(rt.fetchone()._mapping)
+    """, {"tid": tid, "s7": seven_ago}, tx_stats)
+    if rt is not None:
+        try:
+            tx_stats = dict(rt.fetchone()._mapping)
+        except Exception as e:
+            errors.append("tx_stats_fetch: " + str(e))
 
-    # Top 5 by value
-    rtop = await db.execute(text("""
+    # ─── 7. Top 5 by value ────────────────────────────────────────
+    top_items: list = []
+    rtop = await _safe("top_items", """
         SELECT i.item_code, i.item_name, b.qty_on_hand, b.total_value
         FROM inv_balances b
         JOIN inv_items i ON i.id = b.item_id
         WHERE b.tenant_id=:tid
         ORDER BY b.total_value DESC NULLS LAST
         LIMIT 5
-    """), {"tid": tid})
-    top_items = []
-    for row in rtop.fetchall():
-        d = dict(row._mapping)
-        for k in ("qty_on_hand", "total_value"):
-            if d.get(k) is not None:
-                d[k] = float(d[k])
-        top_items.append(d)
+    """, {"tid": tid}, [])
+    if rtop is not None:
+        try:
+            for row in rtop.fetchall():
+                d = dict(row._mapping)
+                for k in ("qty_on_hand", "total_value"):
+                    if d.get(k) is not None:
+                        d[k] = float(d[k])
+                top_items.append(d)
+        except Exception as e:
+            errors.append("top_items_fetch: " + str(e))
 
     return ok(data={
         "kpis": {
@@ -363,6 +411,7 @@ async def dashboard(
             "expiring_soon_count": expiring_count,
         },
         "top_items": top_items,
+        "errors": errors,  # ⚠️ يُرجع قائمة الأخطاء للتشخيص
     })
 
 
