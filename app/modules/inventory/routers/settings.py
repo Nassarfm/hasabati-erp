@@ -227,6 +227,23 @@ async def update_numbering_series(
     )
 
 
+@router.delete("/numbering-series/{series_type}", status_code=204)
+async def reset_numbering_series(
+    series_type: str,
+    year: Optional[int] = None,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """يُعيد تسلسل الترقيم للقيم الافتراضية بحذف السجل المُخصَّص."""
+    tid = str(user.tenant_id)
+    yr = year or date.today().year
+    await db.execute(text("""
+        DELETE FROM jl_numbering_series
+        WHERE tenant_id=:tid AND series_type=:st AND year=:yr
+    """), {"tid": tid, "st": series_type, "yr": yr})
+    await db.commit()
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 3. DASHBOARD
 # ═══════════════════════════════════════════════════════════════════════════
@@ -609,6 +626,8 @@ async def health_check(
             "inv_zones": ["zone_code", "zone_name", "warehouse_id", "is_active"],
             "inv_locations": ["location_code", "location_name", "warehouse_id",
                               "zone_id", "is_active"],
+            "jl_numbering_series": ["series_type", "year", "prefix_format",
+                                    "next_serial", "padding_width"],
         }
 
         # احصل على كل الأعمدة الفعلية لكل الجداول دفعة واحدة
