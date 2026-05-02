@@ -40,6 +40,7 @@ from app.modules.inventory.router_legacy import router as legacy_router
 # v5 sub-routers
 from app.modules.inventory.routers.master       import router as master_router
 from app.modules.inventory.routers.warehouse    import router as warehouse_router
+from app.modules.inventory.routers.warehouse_health import router as warehouse_health_router
 from app.modules.inventory.routers.items        import router as items_router
 from app.modules.inventory.routers.transactions import router as transactions_router
 from app.modules.inventory.routers.counts       import router as counts_router
@@ -57,6 +58,7 @@ router = APIRouter()
 # {param} routes (e.g. /inventory/items-v2 vs /inventory/items/{id}).
 router.include_router(master_router)
 router.include_router(warehouse_router)
+router.include_router(warehouse_health_router)
 router.include_router(items_router)
 router.include_router(transactions_router)
 router.include_router(counts_router)
