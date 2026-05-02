@@ -165,6 +165,11 @@ async def list_items_v2(
         col_or_null("item_name_en"),
         col_or_null("description"),
         col_or_null("barcode"),
+        # ⭐ نوع الصنف (item_type)
+        col_or_null("item_type"),
+        col_or_null("product_type"),
+        col_or_null("nature"),
+        col_or_null("kind"),
         col_or_null("category_id"),
         col_or_null("brand_id"),
         col_or_null("uom_id"),
@@ -409,6 +414,11 @@ async def create_item_v2(
         ("item_name_en",        "en",       "text",     None),
         ("description",         "desc",     "text",     None),
         ("barcode",             "bar",      "text",     None),
+        # ⭐ نوع الصنف (item_type)
+        ("item_type",           "itype",    "text",     "stockable"),
+        ("product_type",        "ptype",    "text",     None),
+        ("nature",              "nat",      "text",     None),
+        ("kind",                "kind",     "text",     None),
         # FK fields (UUID) - None مسموح في FK
         ("category_id",         "cat",      "uuid",     None),
         ("brand_id",            "brand",    "uuid",     None),
@@ -580,6 +590,12 @@ async def update_item_v2(
         ("item_name_en",        "text"),
         ("description",         "text"),
         ("barcode",             "text"),
+        # ⭐ نوع الصنف (item_type) - مهم جداً!
+        # المستخدم يُغيّره من dropdown (بضاعة مخزنية، مواد خام، خدمة، ...)
+        ("item_type",           "text"),
+        ("product_type",        "text"),  # احتياطي لو الاسم مختلف
+        ("nature",              "text"),  # احتياطي إضافي
+        ("kind",                "text"),  # احتياطي إضافي
         # FK fields (UUID)
         ("category_id",         "uuid"),
         ("brand_id",            "uuid"),
