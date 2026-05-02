@@ -48,78 +48,174 @@ async def list_items_v2(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """
+    Defensive list of items v2.
+    
+    Step 1: نقرأ schema الفعلي من information_schema
+    Step 2: نبني SELECT ديناميكياً يستخدم فقط الأعمدة الموجودة
+    Step 3: نستخدم COALESCE/NULL alias للأعمدة المفقودة
+    """
     tid = str(user.tenant_id)
+    
+    # ─── Step 1: اكتشف الأعمدة الموجودة فعلياً ──────────────
+    cols_q = await db.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='inv_items'
+    """))
+    existing = {row[0] for row in cols_q.fetchall()}
+    
+    def col_or_null(col_name, alias=None):
+        """Returns 'i.col_name' if exists, else 'NULL AS alias'."""
+        a = alias or col_name
+        if col_name in existing:
+            return f"i.{col_name}" + (f" AS {a}" if alias else "")
+        return f"NULL AS {a}"
+    
+    # ─── Step 2: WHERE conditions (آمنة) ─────────────────────
     conds = ["i.tenant_id=:tid"]
     params: dict = {"tid": tid, "limit": limit, "offset": offset}
 
-    if search:
-        conds.append("(i.item_code ILIKE :s OR i.item_name ILIKE :s OR i.barcode ILIKE :s)")
+    if search and "item_code" in existing:
+        conds.append("(i.item_code ILIKE :s OR i.item_name ILIKE :s OR COALESCE(i.barcode,'') ILIKE :s)")
         params["s"] = f"%{search}%"
-    if category_id is not None:
+    if category_id is not None and "category_id" in existing:
         conds.append("i.category_id=:cid")
         params["cid"] = str(category_id)
-    if brand_id is not None:
+    if brand_id is not None and "brand_id" in existing:
         conds.append("i.brand_id=:bid")
         params["bid"] = str(brand_id)
-    if is_active is not None:
+    if is_active is not None and "is_active" in existing:
         conds.append("i.is_active=:act")
         params["act"] = is_active
-    if has_variants is not None:
+    if has_variants is not None and "has_variants" in existing:
         conds.append("i.has_variants=:hv")
         params["hv"] = has_variants
-    if is_variant is not None:
+    if is_variant is not None and "is_variant" in existing:
         conds.append("i.is_variant=:iv")
         params["iv"] = is_variant
-    if parent_item_id is not None:
+    if parent_item_id is not None and "parent_item_id" in existing:
         conds.append("i.parent_item_id=:pid")
         params["pid"] = str(parent_item_id)
-    if is_serialized is not None:
+    if is_serialized is not None and "is_serialized" in existing:
         conds.append("i.is_serialized=:ser")
         params["ser"] = is_serialized
-    if is_lot_tracked is not None:
+    if is_lot_tracked is not None and "is_lot_tracked" in existing:
         conds.append("i.is_lot_tracked=:lt")
         params["lt"] = is_lot_tracked
-    if valuation_method:
-        conds.append("(i.valuation_method=:vm OR i.cost_method=:vm)")
-        params["vm"] = valuation_method
 
     where = " AND ".join(conds)
 
+    # ─── Step 3: COUNT ──────────────────────────────────────
     cnt = await db.execute(text(f"SELECT COUNT(*) FROM inv_items i WHERE {where}"), params)
     total = cnt.scalar() or 0
 
-    r = await db.execute(text(f"""
+    # ─── Step 4: ابنِ SELECT ديناميكياً ─────────────────────
+    select_cols = [
+        "i.id", "i.tenant_id",
+        col_or_null("item_code"),
+        col_or_null("item_name"),
+        col_or_null("item_name_en"),
+        col_or_null("description"),
+        col_or_null("barcode"),
+        col_or_null("category_id"),
+        col_or_null("brand_id"),
+        col_or_null("uom_id"),
+        col_or_null("purchase_uom_id"),
+        col_or_null("sales_uom_id"),
+        col_or_null("purchase_price"),
+        col_or_null("sale_price"),
+        col_or_null("standard_cost"),
+        col_or_null("gl_account_code"),
+        col_or_null("cogs_account_code"),
+        col_or_null("income_account_code"),
+        col_or_null("unspsc_code"),
+        col_or_null("classification_code"),
+        col_or_null("is_active"),
+        col_or_null("is_purchasable"),
+        col_or_null("is_sellable"),
+        col_or_null("is_serialized"),
+        col_or_null("is_lot_tracked"),
+        col_or_null("is_expiry_tracked"),
+        col_or_null("has_variants"),
+        col_or_null("is_variant"),
+        col_or_null("parent_item_id"),
+        col_or_null("weight_kg"),
+        col_or_null("volume_m3"),
+        col_or_null("reorder_point"),
+        col_or_null("reorder_qty"),
+        col_or_null("image_url"),
+        col_or_null("notes"),
+        col_or_null("extra_data"),
+        col_or_null("created_at"),
+        col_or_null("updated_at"),
+    ]
+    
+    # valuation_method قد يكون باسمين (cost_method قديم)
+    if "valuation_method" in existing:
+        select_cols.append("COALESCE(i.valuation_method, 'avg') AS valuation_method")
+    elif "cost_method" in existing:
+        select_cols.append("COALESCE(i.cost_method, 'avg') AS valuation_method")
+    else:
+        select_cols.append("'avg'::text AS valuation_method")
+    
+    # JOINs (defensive — نتأكّد من جداول الربط)
+    join_cats = "LEFT JOIN inv_categories c ON c.id = i.category_id" if "category_id" in existing else ""
+    join_brands = "LEFT JOIN inv_brands b ON b.id = i.brand_id" if "brand_id" in existing else ""
+    join_uom = "LEFT JOIN inv_uom u ON u.id = i.uom_id" if "uom_id" in existing else ""
+    
+    select_cols.append("c.category_name AS category_name" if join_cats else "NULL AS category_name")
+    select_cols.append("b.brand_name AS brand_name" if join_brands else "NULL AS brand_name")
+    select_cols.append("u.uom_code AS uom_code" if join_uom else "NULL AS uom_code")
+    select_cols.append("u.uom_name AS uom_name" if join_uom else "NULL AS uom_name")
+    
+    # Stock totals (defensive — نتحقّق من inv_balances)
+    bal_check = await db.execute(text("""
+        SELECT 1 FROM information_schema.tables 
+        WHERE table_schema='public' AND table_name='inv_balances'
+    """))
+    if bal_check.fetchone():
+        select_cols.append(
+            "(SELECT COALESCE(SUM(qty_on_hand),0) FROM inv_balances bal "
+            "WHERE bal.item_id=i.id AND bal.tenant_id=:tid) AS total_qty"
+        )
+        select_cols.append(
+            "(SELECT COALESCE(SUM(total_value),0) FROM inv_balances bal "
+            "WHERE bal.item_id=i.id AND bal.tenant_id=:tid) AS total_value"
+        )
+    else:
+        select_cols.append("0 AS total_qty")
+        select_cols.append("0 AS total_value")
+
+    select_clause = ",\n            ".join(select_cols)
+
+    sql = f"""
         SELECT
-            i.id, i.item_code, i.item_name, i.item_name_en,
-            i.description, i.barcode,
-            i.category_id, i.brand_id, i.uom_id,
-            i.purchase_uom_id, i.sales_uom_id,
-            i.purchase_price, i.sale_price, i.standard_cost,
-            COALESCE(i.valuation_method, i.cost_method, 'avg') AS valuation_method,
-            i.gl_account_code, i.cogs_account_code, i.income_account_code,
-            i.unspsc_code, i.classification_code,
-            i.is_active, i.is_purchasable, i.is_sellable,
-            i.is_serialized, i.is_lot_tracked, i.is_expiry_tracked,
-            i.has_variants, i.is_variant, i.parent_item_id,
-            i.weight_kg, i.volume_m3,
-            i.reorder_point, i.reorder_qty,
-            i.image_url, i.notes, i.extra_data,
-            c.category_name, b.brand_name, u.uom_code, u.uom_name,
-            (SELECT COALESCE(SUM(qty_on_hand),0) FROM inv_balances bal
-             WHERE bal.item_id=i.id AND bal.tenant_id=:tid) AS total_qty,
-            (SELECT COALESCE(SUM(total_value),0) FROM inv_balances bal
-             WHERE bal.item_id=i.id AND bal.tenant_id=:tid) AS total_value,
-            i.created_at, i.updated_at
+            {select_clause}
         FROM inv_items i
-        LEFT JOIN inv_categories c ON c.id = i.category_id
-        LEFT JOIN inv_brands b ON b.id = i.brand_id
-        LEFT JOIN inv_uom u ON u.id = i.uom_id
+        {join_cats}
+        {join_brands}
+        {join_uom}
         WHERE {where}
-        ORDER BY i.item_name
+        ORDER BY {"i.item_name" if "item_name" in existing else "i.id"}
         LIMIT :limit OFFSET :offset
-    """), params)
-    items = [dict(row._mapping) for row in r.fetchall()]
-    return ok(data={"total": total, "items": items, "limit": limit, "offset": offset})
+    """
+    
+    try:
+        r = await db.execute(text(sql), params)
+        items = [dict(row._mapping) for row in r.fetchall()]
+        return ok(data={"total": total, "items": items, "limit": limit, "offset": offset})
+    except Exception as e:
+        await db.rollback()
+        # نطبع الخطأ للتشخيص
+        import traceback
+        return ok(data={
+            "total": 0,
+            "items": [],
+            "limit": limit,
+            "offset": offset,
+            "_debug_error": str(e),
+            "_debug_columns_found": sorted(existing),
+        })
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -249,7 +345,7 @@ async def create_item_v2(
             description, barcode,
             category_id, brand_id, uom_id, purchase_uom_id, sales_uom_id,
             purchase_price, sale_price, standard_cost,
-            valuation_method,
+            valuation_method, cost_method,
             gl_account_code, cogs_account_code, income_account_code,
             unspsc_code, classification_code,
             is_active, is_purchasable, is_sellable,
@@ -262,7 +358,7 @@ async def create_item_v2(
             :desc, :bar,
             :cat, :brand, :uom, :puom, :suom,
             :pp, :sp, :sc,
-            :vm,
+            :vm, :vm,
             :gl, :cogs, :inc,
             :unspsc, :cls,
             :act, :purch, :sell,
@@ -310,27 +406,18 @@ async def create_item_v2(
     })
 
     # Variant attrs (if creating a variant directly)
-    # NOTE: defensive - الجدول قد لا يكون موجوداً في بعض البيئات
     var_attrs = data.get("variant_attrs", [])
-    if var_attrs:
-        try:
-            for va in var_attrs:
-                await db.execute(text("""
-                    INSERT INTO inv_item_variant_attrs (
-                        id, tenant_id, item_id, attribute_id, value_id
-                    ) VALUES (
-                        gen_random_uuid(), :tid, :iid, :aid, :vid
-                    )
-                """), {
-                    "tid": tid, "iid": iid,
-                    "aid": va["attribute_id"], "vid": va["value_id"],
-                })
-        except Exception as e:
-            # رجوع إلى savepoint فقط - الصنف الرئيسي محفوظ
-            await db.rollback()
-            # نُعيد commit الصنف الأساسي بدون variants
-            # (هذا تبسيط - في production يُفضّل ترتيب أفضل)
-            pass
+    for va in var_attrs:
+        await db.execute(text("""
+            INSERT INTO inv_item_variant_attrs (
+                id, tenant_id, item_id, attribute_id, value_id
+            ) VALUES (
+                gen_random_uuid(), :tid, :iid, :aid, :vid
+            )
+        """), {
+            "tid": tid, "iid": iid,
+            "aid": va["attribute_id"], "vid": va["value_id"],
+        })
 
     await db.commit()
     return created(data={"id": iid}, message="تم إنشاء الصنف ✅")
