@@ -47,6 +47,8 @@ from app.modules.inventory.routers.transactions import router as transactions_ro
 from app.modules.inventory.routers.counts       import router as counts_router
 from app.modules.inventory.routers.reports      import router as reports_router
 from app.modules.inventory.routers.settings     import router as settings_router
+from app.modules.inventory.routers.settings_health import router as settings_health_router
+from app.modules.inventory.routers.settings_fix    import router as settings_fix_router
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -66,6 +68,8 @@ router.include_router(transactions_router)
 router.include_router(counts_router)
 router.include_router(reports_router)
 router.include_router(settings_router)
+router.include_router(settings_health_router)
+router.include_router(settings_fix_router)
 
 # Legacy comes last — old endpoints continue to work as-is
 router.include_router(legacy_router)
