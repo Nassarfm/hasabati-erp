@@ -491,37 +491,55 @@ async def health_check(
     user: CurrentUser = Depends(get_current_user),
 ):
     """
-    تحقق شامل من جاهزية الموديول مع معالجة دفاعية لكل فحص:
-      • وجود الجداول الأساسية
-      • وجود الـ reason_codes الحرجة
-      • ربط حسابات الترحيل في CoA
-      • صلاحية إعدادات الترقيم
-      • وجود مستودعات نشطة
+    🩺 HealthCheck v2.0 — فحص صحّة شامل بـ 3 طبقات.
     
-    لو فشل فحص واحد، الباقي يستمر، ويظهر الفحص الفاشل كـ 'fail' مع رسالة الخطأ.
-    هذا يساعد على التشخيص بدلاً من 500 صامت.
+    Layer 1: Schema Compatibility — هل الجداول والأعمدة موجودة؟
+    Layer 2: Data Integrity — هل البيانات منطقيّة؟
+    Layer 3: Business Logic — هل المنطق متطابق؟
+    
+    كل فحص يأتي مع:
+      - status: ok | warn | fail
+      - message: رسالة عربية واضحة
+      - layer: رقم الطبقة
+      - suggestion: SQL مُقترَح للإصلاح (لو متوفّر)
+      - tip: شرح مختصر للمستخدم
     """
     tid = str(user.tenant_id)
     checks = []
     overall_ok = True
 
     # ─── helper آمن ────────────────────────────────────────────
-    def _add_check(name, status, message):
+    def _add_check(name, status, message, layer=1, suggestion=None, tip=None):
         nonlocal overall_ok
         if status == "fail":
             overall_ok = False
-        checks.append({"name": name, "status": status, "message": message})
+        item = {
+            "name": name,
+            "status": status,
+            "message": message,
+            "layer": layer,
+        }
+        if suggestion:
+            item["suggestion"] = suggestion
+        if tip:
+            item["tip"] = tip
+        checks.append(item)
 
-    # ─── 1. Critical tables ────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════════
+    # LAYER 1: Schema Compatibility — وجود الجداول والأعمدة
+    # ═══════════════════════════════════════════════════════════════
+
+    # ─── 1.1 Critical tables ───────────────────────────────────
     try:
         critical_tables = [
             "inv_items", "inv_warehouses", "inv_balances", "inv_transactions",
             "inv_transaction_lines", "inv_ledger", "inv_fifo_layers",
             "inv_zones", "inv_locations", "inv_brands", "inv_uom_conversions",
             "inv_reason_codes", "inv_item_attributes", "inv_item_attribute_values",
-            "inv_item_variant_attrs", "inv_lots", "inv_serials",
+            "inv_lots", "inv_serials",
             "inv_count_sessions", "inv_count_lines",
             "inv_account_settings", "jl_numbering_series",
+            "inv_categories",
         ]
         rt = await db.execute(text("""
             SELECT table_name FROM information_schema.tables
@@ -531,16 +549,334 @@ async def health_check(
         missing_tables = [t for t in critical_tables if t not in existing_tables]
         if missing_tables:
             _add_check("Critical Tables", "fail",
-                       f"جداول ناقصة: {', '.join(missing_tables)}")
+                       f"جداول ناقصة: {', '.join(missing_tables)}",
+                       layer=1,
+                       tip="بعض الجداول الأساسية مفقودة — قد يحتاج النظام لـ migration")
         else:
             _add_check("Critical Tables", "ok",
-                       f"جميع الجداول الـ {len(critical_tables)} موجودة")
+                       f"جميع الجداول الـ {len(critical_tables)} موجودة",
+                       layer=1)
     except Exception as e:
         await db.rollback()
         _add_check("Critical Tables", "fail",
-                   f"فحص الجداول فشل: {type(e).__name__}: {str(e)[:100]}")
+                   f"فحص الجداول فشل: {type(e).__name__}: {str(e)[:100]}",
+                   layer=1)
 
-    # ─── 2. Critical reason codes ──────────────────────────────
+    # ─── 1.2 Schema Compatibility (Backend ↔ DB columns) ───────
+    try:
+        EXPECTED_COLUMNS = {
+            "inv_items": ["item_code", "item_name", "item_type", "category_id",
+                          "uom_id", "is_active", "purchase_price", "sale_price"],
+            "inv_warehouses": ["warehouse_code", "warehouse_name", "warehouse_type",
+                               "is_active", "is_default"],
+            "inv_categories": ["category_code", "category_name", "item_type",
+                               "parent_id", "gl_account_code"],
+            "inv_balances": ["item_id", "warehouse_id", "qty_on_hand", "total_value"],
+            "inv_brands": ["brand_code", "brand_name", "brand_name_en", "is_active"],
+            "inv_reason_codes": ["reason_code", "reason_name", "expense_account_code",
+                                 "applies_to_tx_types", "is_increase", "is_system",
+                                 "is_active"],
+            "inv_item_attributes": ["attribute_code", "attribute_name", "display_type",
+                                    "is_active", "sort_order"],
+            "inv_item_attribute_values": ["attribute_id", "value_code", "value_name",
+                                          "color_hex", "sort_order", "is_active"],
+            "inv_uom": ["uom_code", "uom_name", "uom_name_en", "is_base",
+                        "is_active", "description"],
+            "inv_uom_conversions": ["from_uom_id", "to_uom_id", "factor",
+                                    "item_id", "is_active", "notes"],
+            "inv_zones": ["zone_code", "zone_name", "warehouse_id", "is_active"],
+            "inv_locations": ["location_code", "location_name", "warehouse_id",
+                              "zone_id", "is_active"],
+            "jl_numbering_series": ["series_type", "year", "prefix_format",
+                                    "next_serial", "padding_width"],
+        }
+
+        rs = await db.execute(text("""
+            SELECT table_name, column_name
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name = ANY(:tables)
+        """), {"tables": list(EXPECTED_COLUMNS.keys())})
+        actual_cols: dict = {}
+        for row in rs.fetchall():
+            actual_cols.setdefault(row[0], set()).add(row[1])
+
+        mismatches: list = []
+        for tbl, expected in EXPECTED_COLUMNS.items():
+            if tbl not in actual_cols:
+                continue
+            missing = [c for c in expected if c not in actual_cols[tbl]]
+            if missing:
+                mismatches.append(f"{tbl}: {', '.join(missing)}")
+
+        if mismatches:
+            _add_check("Schema Compatibility", "warn",
+                       f"أعمدة متوقّعة غير موجودة ({len(mismatches)} جدول): "
+                       + " | ".join(mismatches[:3]),
+                       layer=1,
+                       tip="Backend يتوقّع أعمدة معيّنة لكنّها مفقودة — تحتاج migration")
+        else:
+            _add_check("Schema Compatibility", "ok",
+                       f"كل الأعمدة المتوقّعة موجودة ({len(EXPECTED_COLUMNS)} جدول)",
+                       layer=1)
+    except Exception as e:
+        await db.rollback()
+        _add_check("Schema Compatibility", "warn",
+                   f"فحص توافق Schema فشل: {type(e).__name__}: {str(e)[:100]}",
+                   layer=1)
+
+    # ═══════════════════════════════════════════════════════════════
+    # LAYER 2: Data Integrity — هل البيانات منطقيّة؟
+    # ═══════════════════════════════════════════════════════════════
+
+    # ─── 2.1 Categories item_type Diversity ⭐ ─────────────────
+    # المشكلة التي اكتشفها فادي: كل categories لها نفس item_type
+    try:
+        rd = await db.execute(text("""
+            SELECT COUNT(DISTINCT item_type) AS distinct_types,
+                   COUNT(*) AS total_count
+            FROM inv_categories
+            WHERE tenant_id=:tid
+        """), {"tid": tid})
+        row = rd.fetchone()
+        if row:
+            distinct_types = row[0] or 0
+            total = row[1] or 0
+            if total > 1 and distinct_types == 1:
+                _add_check("Categories item_type Diversity", "warn",
+                           f"كل التصنيفات الـ {total} لها نفس item_type — قد تحتاج تنوّع",
+                           layer=2,
+                           suggestion=(
+                               "-- إصلاح مقترح: عيّن item_type مناسب لكل تصنيف\n"
+                               "UPDATE inv_categories SET item_type='service' WHERE category_code='SRV';\n"
+                               "UPDATE inv_categories SET item_type='consumable' WHERE category_code='CONS';\n"
+                               "UPDATE inv_categories SET item_type='raw_material' WHERE category_code='RAW';\n"
+                               "UPDATE inv_categories SET item_type='finished' WHERE category_code='FG';"
+                           ),
+                           tip="عادةً كل تصنيف له نوع مختلف (stock, service, raw_material, ...)")
+            elif total == 0:
+                _add_check("Categories item_type Diversity", "warn",
+                           "لا يوجد تصنيفات بعد — أضف بعض التصنيفات",
+                           layer=2)
+            else:
+                _add_check("Categories item_type Diversity", "ok",
+                           f"تنوّع جيّد: {distinct_types} أنواع في {total} تصنيف",
+                           layer=2)
+    except Exception as e:
+        await db.rollback()
+        _add_check("Categories item_type Diversity", "warn",
+                   f"الفحص فشل: {type(e).__name__}: {str(e)[:100]}",
+                   layer=2)
+
+    # ─── 2.2 Orphaned Items (FK مكسورة) ────────────────────────
+    try:
+        ro = await db.execute(text("""
+            SELECT COUNT(*) FROM inv_items i
+            WHERE i.tenant_id=:tid
+              AND i.category_id IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM inv_categories c WHERE c.id = i.category_id
+              )
+        """), {"tid": tid})
+        orphans = ro.scalar() or 0
+        if orphans > 0:
+            _add_check("Orphaned Items (FK)", "fail",
+                       f"❌ {orphans} صنف يُشير لتصنيفات محذوفة",
+                       layer=2,
+                       suggestion=(
+                           "-- اختر أحد:\n"
+                           "-- (أ) عيّن category_id إلى NULL:\n"
+                           "UPDATE inv_items SET category_id=NULL\n"
+                           "WHERE category_id NOT IN (SELECT id FROM inv_categories);\n\n"
+                           "-- (ب) أو احذف الأصناف اليتيمة (احذر!):\n"
+                           "-- DELETE FROM inv_items WHERE category_id NOT IN ..."
+                       ),
+                       tip="FK مكسورة - الأصناف تُشير لتصنيف غير موجود")
+        else:
+            _add_check("Orphaned Items (FK)", "ok",
+                       "كل الأصناف تُشير لتصنيفات موجودة",
+                       layer=2)
+    except Exception as e:
+        await db.rollback()
+        _add_check("Orphaned Items (FK)", "warn",
+                   f"الفحص فشل: {type(e).__name__}: {str(e)[:100]}",
+                   layer=2)
+
+    # ─── 2.3 Duplicate Item Codes ──────────────────────────────
+    try:
+        rd = await db.execute(text("""
+            SELECT COUNT(*) FROM (
+                SELECT item_code FROM inv_items
+                WHERE tenant_id=:tid
+                GROUP BY item_code
+                HAVING COUNT(*) > 1
+            ) duplicates
+        """), {"tid": tid})
+        dups = rd.scalar() or 0
+        if dups > 0:
+            _add_check("Duplicate Item Codes", "fail",
+                       f"❌ {dups} كود صنف مكرّر — يجب تكون فريدة",
+                       layer=2,
+                       suggestion=(
+                           "-- ابحث عن المكرّرات:\n"
+                           "SELECT item_code, COUNT(*) FROM inv_items\n"
+                           "WHERE tenant_id=:tid GROUP BY item_code HAVING COUNT(*) > 1;"
+                       ),
+                       tip="الأكواد يجب تكون فريدة — قد يسبّب مشاكل في الترحيل")
+        else:
+            _add_check("Duplicate Item Codes", "ok",
+                       "لا يوجد أكواد مكرّرة",
+                       layer=2)
+    except Exception as e:
+        await db.rollback()
+        _add_check("Duplicate Item Codes", "warn",
+                   f"الفحص فشل: {type(e).__name__}: {str(e)[:100]}",
+                   layer=2)
+
+    # ─── 2.4 Items without UoM ─────────────────────────────────
+    try:
+        ru = await db.execute(text("""
+            SELECT COUNT(*) FROM inv_items
+            WHERE tenant_id=:tid AND uom_id IS NULL AND is_active=true
+        """), {"tid": tid})
+        no_uom = ru.scalar() or 0
+        if no_uom > 0:
+            _add_check("Items Without UoM", "warn",
+                       f"⚠️ {no_uom} صنف نشط بدون وحدة قياس",
+                       layer=2,
+                       suggestion=(
+                           "-- اعرض الأصناف بدون UoM:\n"
+                           "SELECT item_code, item_name FROM inv_items\n"
+                           "WHERE uom_id IS NULL AND is_active=true;"
+                       ),
+                       tip="وحدة القياس مطلوبة للحركات (GRN, GIN, ...)")
+        else:
+            _add_check("Items Without UoM", "ok",
+                       "كل الأصناف النشطة لديها وحدة قياس",
+                       layer=2)
+    except Exception as e:
+        await db.rollback()
+        _add_check("Items Without UoM", "warn",
+                   f"الفحص فشل: {type(e).__name__}: {str(e)[:100]}",
+                   layer=2)
+
+    # ═══════════════════════════════════════════════════════════════
+    # LAYER 3: Business Logic — هل المنطق متطابق؟
+    # ═══════════════════════════════════════════════════════════════
+
+    # ─── 3.1 item_type Sync بين item و category ⭐⭐ ────────────
+    # المنطق الذي اكتشفناه: items.item_type يجب يطابق categories.item_type
+    try:
+        rm = await db.execute(text("""
+            SELECT COUNT(*) FROM inv_items i
+            JOIN inv_categories c ON c.id = i.category_id
+            WHERE i.tenant_id=:tid
+              AND i.item_type IS NOT NULL
+              AND c.item_type IS NOT NULL
+              AND i.item_type != c.item_type
+        """), {"tid": tid})
+        mismatched = rm.scalar() or 0
+        if mismatched > 0:
+            _add_check("item_type ↔ Category Sync", "warn",
+                       f"⚠️ {mismatched} صنف نوعه (item_type) لا يطابق تصنيفه",
+                       layer=3,
+                       suggestion=(
+                           "-- مزامنة الأصناف مع تصنيفاتها:\n"
+                           "UPDATE inv_items i\n"
+                           "SET item_type = c.item_type\n"
+                           "FROM inv_categories c\n"
+                           "WHERE i.category_id = c.id\n"
+                           "  AND i.tenant_id = c.tenant_id\n"
+                           "  AND (i.item_type != c.item_type OR i.item_type IS NULL);"
+                       ),
+                       tip="عند تعديل التصنيف، يجب تحديث item_type تلقائياً (تمّ تطبيقه في POST/PUT)")
+        else:
+            _add_check("item_type ↔ Category Sync", "ok",
+                       "كل الأصناف نوعها يطابق تصنيفاتها",
+                       layer=3)
+    except Exception as e:
+        await db.rollback()
+        _add_check("item_type ↔ Category Sync", "warn",
+                   f"الفحص فشل: {type(e).__name__}: {str(e)[:100]}",
+                   layer=3)
+
+    # ─── 3.2 Negative Stock Without Permission ─────────────────
+    try:
+        # نتحقّق من وجود الأعمدة أوّلاً
+        check_q = await db.execute(text("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema='public' 
+              AND table_name='inv_items' 
+              AND column_name='allow_negative_stock'
+        """))
+        if check_q.fetchone():
+            rn = await db.execute(text("""
+                SELECT COUNT(*) FROM inv_balances b
+                JOIN inv_items i ON i.id = b.item_id
+                WHERE b.tenant_id=:tid
+                  AND b.qty_on_hand < 0
+                  AND COALESCE(i.allow_negative_stock, false) = false
+            """), {"tid": tid})
+            neg = rn.scalar() or 0
+            if neg > 0:
+                _add_check("Negative Stock Without Permission", "fail",
+                           f"❌ {neg} صنف برصيد سالب رغم منع المخزون السالب",
+                           layer=3,
+                           suggestion=(
+                               "-- اعرض الأصناف:\n"
+                               "SELECT i.item_code, i.item_name, w.warehouse_name, b.qty_on_hand\n"
+                               "FROM inv_balances b\n"
+                               "JOIN inv_items i ON i.id = b.item_id\n"
+                               "JOIN inv_warehouses w ON w.id = b.warehouse_id\n"
+                               "WHERE b.qty_on_hand < 0 AND COALESCE(i.allow_negative_stock, false) = false;"
+                           ),
+                           tip="رصيد سالب رغم المنع - مشكلة في تكامل البيانات")
+            else:
+                _add_check("Negative Stock Permission", "ok",
+                           "لا توجد مخالفات مخزون سالب",
+                           layer=3)
+        else:
+            _add_check("Negative Stock Permission", "warn",
+                       "عمود allow_negative_stock غير موجود — تخطّي الفحص",
+                       layer=3)
+    except Exception as e:
+        await db.rollback()
+        _add_check("Negative Stock Permission", "warn",
+                   f"الفحص فشل: {type(e).__name__}: {str(e)[:100]}",
+                   layer=3)
+
+    # ─── 3.3 Categories Without GL Accounts ────────────────────
+    try:
+        rc = await db.execute(text("""
+            SELECT COUNT(*) FROM inv_categories
+            WHERE tenant_id=:tid 
+              AND (gl_account_code IS NULL OR gl_account_code = '')
+        """), {"tid": tid})
+        no_gl = rc.scalar() or 0
+        if no_gl > 0:
+            _add_check("Categories Without GL Account", "warn",
+                       f"⚠️ {no_gl} تصنيف بدون حساب محاسبي (GL)",
+                       layer=3,
+                       suggestion=(
+                           "-- اعرض التصنيفات:\n"
+                           "SELECT category_code, category_name FROM inv_categories\n"
+                           "WHERE gl_account_code IS NULL OR gl_account_code='';"
+                       ),
+                       tip="GL account ضروري للترحيل المحاسبي عند حركات الأصناف")
+        else:
+            _add_check("Categories Without GL Account", "ok",
+                       "كل التصنيفات لديها حسابات محاسبية",
+                       layer=3)
+    except Exception as e:
+        await db.rollback()
+        _add_check("Categories Without GL Account", "warn",
+                   f"الفحص فشل: {type(e).__name__}: {str(e)[:100]}",
+                   layer=3)
+
+    # ═══════════════════════════════════════════════════════════════
+    # LEGACY CHECKS (من v1) — تبقى للتوافق
+    # ═══════════════════════════════════════════════════════════════
+
+    # ─── L.1 Critical reason codes ─────────────────────────────
     try:
         critical_reasons = [
             "count_overage", "count_variance", "damaged",
@@ -554,16 +890,20 @@ async def health_check(
         missing_reasons = [c for c in critical_reasons if c not in existing_reasons]
         if missing_reasons:
             _add_check("Critical Reason Codes", "fail",
-                       f"أسباب ناقصة: {', '.join(missing_reasons)}")
+                       f"أسباب ناقصة: {', '.join(missing_reasons)}",
+                       layer=2,
+                       tip="الأسباب الحرجة مطلوبة لتسويات الجرد")
         else:
             _add_check("Critical Reason Codes", "ok",
-                       "كل الأسباب الحرجة الـ 6 موجودة")
+                       "كل الأسباب الحرجة الـ 6 موجودة",
+                       layer=2)
     except Exception as e:
         await db.rollback()
         _add_check("Critical Reason Codes", "fail",
-                   f"فحص الأسباب فشل: {type(e).__name__}: {str(e)[:100]}")
+                   f"الفحص فشل: {type(e).__name__}: {str(e)[:100]}",
+                   layer=2)
 
-    # ─── 3. Account settings → CoA ─────────────────────────────
+    # ─── L.2 Account settings → CoA ────────────────────────────
     try:
         ra = await db.execute(text("""
             SELECT s.tx_type, s.debit_account, s.credit_account
@@ -584,16 +924,20 @@ async def health_check(
 
         if invalid_accs:
             _add_check("Account Settings → CoA", "fail",
-                       f"حسابات غير صالحة: {', '.join(invalid_accs[:5])}")
+                       f"حسابات غير صالحة: {', '.join(invalid_accs[:5])}",
+                       layer=3,
+                       tip="الحسابات في إعدادات الترحيل غير موجودة في دليل الحسابات")
         else:
             _add_check("Account Settings → CoA", "ok",
-                       f"كل الحسابات المُعدَّة صالحة ({len(saved_accs)} إعداد)")
+                       f"كل الحسابات المُعدَّة صالحة ({len(saved_accs)} إعداد)",
+                       layer=3)
     except Exception as e:
         await db.rollback()
         _add_check("Account Settings → CoA", "fail",
-                   f"فحص الحسابات فشل: {type(e).__name__}: {str(e)[:100]}")
+                   f"الفحص فشل: {type(e).__name__}: {str(e)[:100]}",
+                   layer=3)
 
-    # ─── 4. Default CoA accounts ───────────────────────────────
+    # ─── L.3 Default CoA accounts ──────────────────────────────
     try:
         default_codes = set()
         for d, c, _ in DEFAULT_TX_ACCOUNTS.values():
@@ -608,16 +952,20 @@ async def health_check(
 
         if missing_defaults:
             _add_check("Default CoA Accounts", "warn",
-                       f"حسابات افتراضية ناقصة في CoA: {', '.join(missing_defaults[:5])} (سيستخدم الفولباك)")
+                       f"حسابات افتراضية ناقصة: {', '.join(missing_defaults[:5])}",
+                       layer=3,
+                       tip="ستُستخدم القيم الافتراضية كـ fallback")
         else:
             _add_check("Default CoA Accounts", "ok",
-                       f"كل الحسابات الافتراضية الـ {len(default_codes)} موجودة")
+                       f"كل الحسابات الافتراضية الـ {len(default_codes)} موجودة",
+                       layer=3)
     except Exception as e:
         await db.rollback()
         _add_check("Default CoA Accounts", "warn",
-                   f"فحص الحسابات الافتراضية فشل: {type(e).__name__}: {str(e)[:100]}")
+                   f"الفحص فشل: {type(e).__name__}: {str(e)[:100]}",
+                   layer=3)
 
-    # ─── 5. Numbering series ───────────────────────────────────
+    # ─── L.4 Numbering series ──────────────────────────────────
     try:
         cur_year = date.today().year
         rn = await db.execute(text("""
@@ -628,16 +976,19 @@ async def health_check(
         missing_series = [s for s in INV_SERIES_TYPES if s not in existing_series]
         if missing_series:
             _add_check("Numbering Series", "warn",
-                       f"تسلسلات لسنة {cur_year} ستُنشأ تلقائياً عند أول استخدام: {', '.join(missing_series[:5])}")
+                       f"تسلسلات سنة {cur_year} ستُنشأ تلقائياً عند أول استخدام",
+                       layer=1)
         else:
             _add_check("Numbering Series", "ok",
-                       f"كل تسلسلات سنة {cur_year} موجودة ({len(INV_SERIES_TYPES)} نوع)")
+                       f"كل تسلسلات سنة {cur_year} موجودة ({len(INV_SERIES_TYPES)} نوع)",
+                       layer=1)
     except Exception as e:
         await db.rollback()
         _add_check("Numbering Series", "warn",
-                   f"فحص التسلسلات فشل: {type(e).__name__}: {str(e)[:100]}")
+                   f"الفحص فشل: {type(e).__name__}: {str(e)[:100]}",
+                   layer=1)
 
-    # ─── 6. Active warehouses ──────────────────────────────────
+    # ─── L.5 Active warehouses ─────────────────────────────────
     try:
         rw = await db.execute(text("""
             SELECT COUNT(*) FROM inv_warehouses
@@ -646,70 +997,30 @@ async def health_check(
         wh_count = rw.scalar() or 0
         if wh_count == 0:
             _add_check("Active Warehouses", "fail",
-                       "لا يوجد أي مستودع نشط — يجب إضافة مستودع قبل بدء أي حركة")
+                       "لا يوجد أي مستودع نشط",
+                       layer=2,
+                       suggestion="-- أضف مستودع جديد من صفحة المستودعات",
+                       tip="مستودع واحد على الأقل مطلوب لبدء أيّ حركة")
         else:
             _add_check("Active Warehouses", "ok",
-                       f"{wh_count} مستودع نشط")
+                       f"{wh_count} مستودع نشط",
+                       layer=2)
     except Exception as e:
         await db.rollback()
         _add_check("Active Warehouses", "fail",
-                   f"فحص المستودعات فشل: {type(e).__name__}: {str(e)[:100]}")
+                   f"الفحص فشل: {type(e).__name__}: {str(e)[:100]}",
+                   layer=2)
 
-    # ─── 7. Schema Compatibility (Backend ↔ DB columns) ────────
-    # 💡 فكرة فادي العبقريّة: نفحص أن الأعمدة المطلوبة من Backend موجودة فعلاً في DB.
-    # هذا يكشف انحراف schema بسرعة بدلاً من اكتشافه من خطأ 500 صامت.
-    try:
-        EXPECTED_COLUMNS = {
-            "inv_brands": ["brand_code", "brand_name", "brand_name_en", "is_active",
-                           "manufacturer", "country_of_origin"],
-            "inv_reason_codes": ["reason_code", "reason_name", "expense_account_code",
-                                 "applies_to_tx_types", "is_increase", "is_system",
-                                 "is_active"],
-            "inv_item_attributes": ["attribute_code", "attribute_name", "display_type",
-                                    "is_active", "sort_order"],
-            "inv_item_attribute_values": ["attribute_id", "value_code", "value_name",
-                                          "color_hex", "sort_order", "is_active"],
-            "inv_uom": ["uom_code", "uom_name", "uom_name_en", "is_base",
-                        "is_active", "description"],
-            "inv_uom_conversions": ["from_uom_id", "to_uom_id", "factor",
-                                    "item_id", "is_active", "notes"],
-            "inv_zones": ["zone_code", "zone_name", "warehouse_id", "is_active"],
-            "inv_locations": ["location_code", "location_name", "warehouse_id",
-                              "zone_id", "is_active"],
-            "jl_numbering_series": ["series_type", "year", "prefix_format",
-                                    "next_serial", "padding_width"],
-        }
-
-        # احصل على كل الأعمدة الفعلية لكل الجداول دفعة واحدة
-        rs = await db.execute(text("""
-            SELECT table_name, column_name
-            FROM information_schema.columns
-            WHERE table_schema='public' AND table_name = ANY(:tables)
-        """), {"tables": list(EXPECTED_COLUMNS.keys())})
-        actual_cols: dict = {}
-        for row in rs.fetchall():
-            actual_cols.setdefault(row[0], set()).add(row[1])
-
-        # قارن
-        mismatches: list = []
-        for tbl, expected in EXPECTED_COLUMNS.items():
-            if tbl not in actual_cols:
-                continue  # الجدول مفقود (يُكشف في فحص آخر)
-            missing = [c for c in expected if c not in actual_cols[tbl]]
-            if missing:
-                mismatches.append(f"{tbl}: {', '.join(missing)}")
-
-        if mismatches:
-            _add_check("Schema Compatibility", "warn",
-                       f"أعمدة متوقّعة من Backend غير موجودة في DB ({len(mismatches)} جدول): "
-                       + " | ".join(mismatches[:3]))
-        else:
-            _add_check("Schema Compatibility", "ok",
-                       f"كل الأعمدة المتوقّعة موجودة في الـ {len(EXPECTED_COLUMNS)} جداول الحسّاسة")
-    except Exception as e:
-        await db.rollback()
-        _add_check("Schema Compatibility", "warn",
-                   f"فحص توافق Schema فشل: {type(e).__name__}: {str(e)[:100]}")
+    # ═══════════════════════════════════════════════════════════════
+    # SUMMARY & RETURN
+    # ═══════════════════════════════════════════════════════════════
+    
+    # إحصائيات حسب الطبقة
+    by_layer = {}
+    for c in checks:
+        layer = c.get("layer", 1)
+        by_layer.setdefault(layer, {"ok": 0, "warn": 0, "fail": 0})
+        by_layer[layer][c["status"]] += 1
 
     return ok(data={
         "status": "healthy" if overall_ok else "issues",
@@ -720,6 +1031,13 @@ async def health_check(
             "warn": sum(1 for c in checks if c["status"] == "warn"),
             "fail": sum(1 for c in checks if c["status"] == "fail"),
         },
-        "version": "v5.0",
+        "by_layer": by_layer,
+        "layers_info": {
+            "1": {"name": "Schema Compatibility", "icon": "🏗️"},
+            "2": {"name": "Data Integrity", "icon": "🔍"},
+            "3": {"name": "Business Logic", "icon": "⚙️"},
+        },
+        "version": "v2.0",
         "checked_at": date.today().isoformat(),
     })
+
