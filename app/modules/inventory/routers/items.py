@@ -403,27 +403,31 @@ async def create_item_v2(
     }
     
     # خريطة: column_name → (param_key, type_class, default_value)
-    # type_class: 'text' | 'numeric' | 'uuid' | 'bool_t' | 'bool_f'
+    # مهم: الحقول الرقمية الافتراضية = 0 (وليس None) لتجنّب NotNullViolationError
     optional_cols = [
         # text fields
         ("item_name_en",        "en",       "text",     None),
         ("description",         "desc",     "text",     None),
         ("barcode",             "bar",      "text",     None),
-        # FK fields (UUID)
+        # FK fields (UUID) - None مسموح في FK
         ("category_id",         "cat",      "uuid",     None),
         ("brand_id",            "brand",    "uuid",     None),
         ("uom_id",              "uom",      "uuid",     None),
         ("purchase_uom_id",     "puom",     "uuid",     None),
         ("sales_uom_id",        "suom",     "uuid",     None),
         ("parent_item_id",      "pid",      "uuid",     None),
-        # numeric fields
+        # numeric fields - افتراضي 0 لتجنّب NOT NULL violations
         ("purchase_price",      "pp",       "numeric",  0),
         ("sale_price",          "sp",       "numeric",  0),
         ("standard_cost",       "sc",       "numeric",  0),
-        ("weight_kg",           "wt",       "numeric",  None),
-        ("volume_m3",           "vol",      "numeric",  None),
-        ("reorder_point",       "rop",      "numeric",  None),
-        ("reorder_qty",         "roq",      "numeric",  None),
+        ("weight_kg",           "wt",       "numeric",  0),
+        ("volume_m3",           "vol",      "numeric",  0),
+        ("reorder_point",       "rop",      "numeric",  0),
+        ("reorder_qty",         "roq",      "numeric",  0),
+        ("min_stock",           "mins",     "numeric",  0),
+        ("max_stock",           "maxs",     "numeric",  0),
+        ("safety_stock",        "ss",       "numeric",  0),
+        ("lead_time_days",      "lt",       "numeric",  0),
         # accounts (text)
         ("gl_account_code",     "gl",       "text",     None),
         ("cogs_account_code",   "cogs",     "text",     None),
@@ -443,6 +447,7 @@ async def create_item_v2(
         ("is_expiry_tracked",   "exp",      "bool_f",   False),
         ("has_variants",        "hv",       "bool_f",   False),
         ("is_variant",          "iv",       "bool_f",   False),
+        ("allow_negative_stock", "ans",     "bool_f",   False),
     ]
     
     for col_name, param_key, type_class, default in optional_cols:
@@ -454,6 +459,7 @@ async def create_item_v2(
             # تحويل ذكي حسب النوع
             if type_class == "numeric":
                 cleaned = _clean_numeric(raw_value)
+                # ✅ الحقول الرقمية: استخدم default (عادة 0) بدلاً من None
                 params[param_key] = cleaned if cleaned is not None else default
             elif type_class == "uuid":
                 params[param_key] = _clean_uuid(raw_value)
