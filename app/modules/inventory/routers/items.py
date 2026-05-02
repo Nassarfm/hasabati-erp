@@ -492,6 +492,28 @@ async def create_item_v2(
         values.append(":cm")
         params["cm"] = vm_value
     
+    # ⭐ ميزة ذكية: لو category_id موجود، اقرأ item_type من الـ category
+    # (inv_categories فيه item_type يُورَث للأصناف)
+    cat_id = _clean_uuid(data.get("category_id"))
+    if cat_id and "item_type" in existing:
+        try:
+            cat_q = await db.execute(
+                text("SELECT item_type FROM inv_categories WHERE id=:cid AND tenant_id=:tid"),
+                {"cid": cat_id, "tid": tid},
+            )
+            cat_row = cat_q.fetchone()
+            if cat_row and cat_row[0]:
+                # احذف أي item_type سابق من fields لتجنّب التكرار
+                if "item_type" in fields:
+                    idx = fields.index("item_type")
+                    fields.pop(idx)
+                    values.pop(idx)
+                fields.append("item_type")
+                values.append(":auto_itype")
+                params["auto_itype"] = cat_row[0]
+        except Exception:
+            pass
+    
     # ─── extra_data (JSONB) ─────────────────────────
     if "extra_data" in existing:
         import json as _json
@@ -685,6 +707,24 @@ async def update_item_v2(
 
     if not fields:
         return ok(data={"id": str(item_id)}, message="لا تغييرات")
+    
+    # ⭐ ميزة ذكية: لو غُيّر category_id، حدّث item_type من الـ category تلقائياً
+    # (inv_categories فيه عمود item_type يُورَث للأصناف)
+    if "category_id" in data and data.get("category_id"):
+        try:
+            cat_q = await db.execute(
+                text("SELECT item_type FROM inv_categories WHERE id=:cid AND tenant_id=:tid"),
+                {"cid": _clean_uuid(data["category_id"]), "tid": tid},
+            )
+            cat_row = cat_q.fetchone()
+            if cat_row and cat_row[0] and "item_type" in existing:
+                # احذف أي item_type سابق من fields لتجنّب التكرار
+                fields = [f for f in fields if not f.startswith("item_type =")]
+                fields.append("item_type = :auto_itype")
+                params["auto_itype"] = cat_row[0]
+        except Exception:
+            # لو فشل القراءة، نُكمل بدون تحديث item_type
+            pass
     
     # updated_at لو موجود
     if "updated_at" in existing:
