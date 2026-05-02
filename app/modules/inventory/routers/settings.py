@@ -155,22 +155,42 @@ async def list_numbering_series(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """
+    قائمة تسلسلات الترقيم لسنة معيّنة.
+    
+    يُرجع:
+      • الـ 9 أنواع الموصى بها (recommended) — حتى لو لم تُحفظ بعد (defaults)
+      • + أيّ أنواع مخصّصة (custom) محفوظة في DB
+    
+    كل نوع له is_default + is_recommended:
+      • is_recommended=True  → نوع موصى به للمخزون
+      • is_recommended=False → نوع مخصّص أضافه المستخدم
+      • is_default=True       → القيم الافتراضية (لم يُحفظ في DB بعد)
+      • is_default=False      → مُعدَّل ومحفوظ في DB
+    """
     tid = str(user.tenant_id)
     cur_year = year or date.today().year
+    
+    # احصل على كل التسلسلات الموجودة في DB لهذا التينانت + السنة
     r = await db.execute(text("""
         SELECT series_type, year, prefix_format, next_serial, padding_width,
                created_at, updated_at
         FROM jl_numbering_series
-        WHERE tenant_id=:tid AND year=:yr AND series_type = ANY(:types)
+        WHERE tenant_id=:tid AND year=:yr
         ORDER BY series_type
-    """), {"tid": tid, "yr": cur_year, "types": INV_SERIES_TYPES})
+    """), {"tid": tid, "yr": cur_year})
     saved = {row[0]: dict(row._mapping) for row in r.fetchall()}
 
     out = []
+    seen = set()
+    
+    # 1) الأنواع الموصى بها (حتى لو لم تُحفظ بعد)
     for st in INV_SERIES_TYPES:
+        seen.add(st)
         if st in saved:
             d = saved[st]
             d["is_default"] = False
+            d["is_recommended"] = True
             out.append(d)
         else:
             out.append({
@@ -180,7 +200,16 @@ async def list_numbering_series(
                 "next_serial": 1,
                 "padding_width": 7,
                 "is_default": True,
+                "is_recommended": True,
             })
+    
+    # 2) الأنواع المخصّصة (موجودة في DB لكن ليست في الموصى بها)
+    for st, d in saved.items():
+        if st not in seen:
+            d["is_default"] = False
+            d["is_recommended"] = False
+            out.append(d)
+    
     return ok(data={"year": cur_year, "series": out})
 
 
@@ -191,9 +220,26 @@ async def update_numbering_series(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """
+    إنشاء أو تعديل تسلسل ترقيم.
+    
+    يقبل أيّ series_type جديد (مرونة كاملة) مع validation:
+      • حروف لاتينية كبيرة فقط (A-Z) + underscore
+      • 2-15 حرف
+      • لا يبدأ برقم
+    
+    ملاحظة: لم تعد هناك whitelist ثابتة. أي نوع جديد مسموح.
+    """
+    import re
+    
     tid = str(user.tenant_id)
-    if series_type not in INV_SERIES_TYPES:
-        raise HTTPException(400, f"نوع التسلسل '{series_type}' غير صالح")
+    
+    # Validation: حروف لاتينية كبيرة فقط + underscore
+    if not re.match(r'^[A-Z][A-Z0-9_]{1,14}$', series_type):
+        raise HTTPException(
+            400,
+            "series_type يجب أن يكون 2-15 حرف، حروف لاتينية كبيرة فقط (A-Z, 0-9, _)، ويبدأ بحرف"
+        )
 
     yr = int(data.get("year") or date.today().year)
     prefix = data.get("prefix_format") or f"{series_type}-{{year}}-{{serial:07d}}"
@@ -203,6 +249,10 @@ async def update_numbering_series(
     # Validate prefix has serial placeholder
     if "{serial" not in prefix:
         raise HTTPException(400, "prefix_format يجب أن يحتوي على {serial:0Nd}")
+    
+    # Validate next_serial >= 1
+    if next_seq < 1:
+        raise HTTPException(400, "next_serial يجب أن يكون 1 أو أكثر")
 
     await db.execute(text("""
         INSERT INTO jl_numbering_series (
