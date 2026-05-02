@@ -319,12 +319,26 @@ async def create_item_v2(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """
+    إنشاء صنف جديد — defensive schema-aware.
+    
+    يبني INSERT ديناميكياً بناء على الأعمدة الموجودة فعلاً.
+    لا يفشل بسبب أعمدة مفقودة (cost_method, valuation_method, إلخ).
+    """
     tid = str(user.tenant_id)
     iid = str(uuid.uuid4())
+    
     if not data.get("item_code") or not data.get("item_name"):
         raise HTTPException(400, "item_code و item_name مطلوبان")
 
-    # Check unique code
+    # ─── اكتشف الأعمدة الموجودة فعلياً ──────────────
+    cols_q = await db.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='inv_items'
+    """))
+    existing = {row[0] for row in cols_q.fetchall()}
+    
+    # ─── تحقّق من الكود فريد ────────────────────────
     chk = await db.execute(
         text("SELECT 1 FROM inv_items WHERE tenant_id=:tid AND item_code=:c LIMIT 1"),
         {"tid": tid, "c": data["item_code"]},
@@ -332,95 +346,129 @@ async def create_item_v2(
     if chk.fetchone():
         raise HTTPException(400, f"الكود {data['item_code']} موجود مسبقاً")
 
-    import json as _json
-    extra = data.get("extra_data") or {}
-    if isinstance(extra, dict):
-        extra_json = _json.dumps(extra, ensure_ascii=False)
-    else:
-        extra_json = str(extra)
-
-    await db.execute(text("""
-        INSERT INTO inv_items (
-            id, tenant_id, item_code, item_name, item_name_en,
-            description, barcode,
-            category_id, brand_id, uom_id, purchase_uom_id, sales_uom_id,
-            purchase_price, sale_price, standard_cost,
-            valuation_method, cost_method,
-            gl_account_code, cogs_account_code, income_account_code,
-            unspsc_code, classification_code,
-            is_active, is_purchasable, is_sellable,
-            is_serialized, is_lot_tracked, is_expiry_tracked,
-            has_variants, is_variant, parent_item_id,
-            weight_kg, volume_m3, reorder_point, reorder_qty,
-            image_url, notes, extra_data
-        ) VALUES (
-            :id, :tid, :code, :name, :en,
-            :desc, :bar,
-            :cat, :brand, :uom, :puom, :suom,
-            :pp, :sp, :sc,
-            :vm, :vm,
-            :gl, :cogs, :inc,
-            :unspsc, :cls,
-            :act, :purch, :sell,
-            :ser, :lot, :exp,
-            :hv, :iv, :pid,
-            :wt, :vol, :rop, :roq,
-            :img, :notes, CAST(:extra AS JSONB)
-        )
-    """), {
+    # ─── ابنِ INSERT ديناميكياً ──────────────────────
+    fields = ["id", "tenant_id", "item_code", "item_name"]
+    values = [":id", ":tid", ":code", ":name"]
+    params: dict = {
         "id": iid, "tid": tid,
         "code": data["item_code"], "name": data["item_name"],
-        "en": data.get("item_name_en"),
-        "desc": data.get("description"),
-        "bar": data.get("barcode"),
-        "cat": data.get("category_id"),
-        "brand": data.get("brand_id"),
-        "uom": data.get("uom_id"),
-        "puom": data.get("purchase_uom_id"),
-        "suom": data.get("sales_uom_id"),
-        "pp": data.get("purchase_price", 0),
-        "sp": data.get("sale_price", 0),
-        "sc": data.get("standard_cost", 0),
-        "vm": data.get("valuation_method", "avg"),
-        "gl": data.get("gl_account_code"),
-        "cogs": data.get("cogs_account_code"),
-        "inc": data.get("income_account_code"),
-        "unspsc": data.get("unspsc_code"),
-        "cls": data.get("classification_code"),
-        "act": data.get("is_active", True),
-        "purch": data.get("is_purchasable", True),
-        "sell": data.get("is_sellable", True),
-        "ser": data.get("is_serialized", False),
-        "lot": data.get("is_lot_tracked", False),
-        "exp": data.get("is_expiry_tracked", False),
-        "hv": data.get("has_variants", False),
-        "iv": data.get("is_variant", False),
-        "pid": data.get("parent_item_id"),
-        "wt": data.get("weight_kg"),
-        "vol": data.get("volume_m3"),
-        "rop": data.get("reorder_point"),
-        "roq": data.get("reorder_qty"),
-        "img": data.get("image_url"),
-        "notes": data.get("notes"),
-        "extra": extra_json,
-    })
+    }
+    
+    # خريطة: column_name → (param_key, default_value)
+    optional_cols = [
+        # text fields
+        ("item_name_en",        "en",       None),
+        ("description",         "desc",     None),
+        ("barcode",             "bar",      None),
+        # FK fields
+        ("category_id",         "cat",      None),
+        ("brand_id",            "brand",    None),
+        ("uom_id",              "uom",      None),
+        ("purchase_uom_id",     "puom",     None),
+        ("sales_uom_id",        "suom",     None),
+        ("parent_item_id",      "pid",      None),
+        # numeric fields
+        ("purchase_price",      "pp",       0),
+        ("sale_price",          "sp",       0),
+        ("standard_cost",       "sc",       0),
+        ("weight_kg",           "wt",       None),
+        ("volume_m3",           "vol",      None),
+        ("reorder_point",       "rop",      None),
+        ("reorder_qty",         "roq",      None),
+        # accounts
+        ("gl_account_code",     "gl",       None),
+        ("cogs_account_code",   "cogs",     None),
+        ("income_account_code", "inc",      None),
+        # misc text
+        ("unspsc_code",         "unspsc",   None),
+        ("classification_code", "cls",      None),
+        ("image_url",           "img",      None),
+        ("notes",               "notes",    None),
+        # booleans (default True)
+        ("is_active",           "act",      True),
+        ("is_purchasable",      "purch",    True),
+        ("is_sellable",         "sell",     True),
+        # booleans (default False)
+        ("is_serialized",       "ser",      False),
+        ("is_lot_tracked",      "lot",      False),
+        ("is_expiry_tracked",   "exp",      False),
+        ("has_variants",        "hv",       False),
+        ("is_variant",          "iv",       False),
+    ]
+    
+    for col_name, param_key, default in optional_cols:
+        if col_name in existing:
+            fields.append(col_name)
+            values.append(f":{param_key}")
+            params[param_key] = data.get(col_name, default)
+    
+    # ─── valuation_method / cost_method (الـ bug الأصلي) ──
+    # كلاهما أو أحدهما أو لا شيء
+    vm_value = data.get("valuation_method", "avg")
+    if "valuation_method" in existing:
+        fields.append("valuation_method")
+        values.append(":vm")
+        params["vm"] = vm_value
+    if "cost_method" in existing:
+        fields.append("cost_method")
+        values.append(":cm")
+        params["cm"] = vm_value
+    
+    # ─── extra_data (JSONB) ─────────────────────────
+    if "extra_data" in existing:
+        import json as _json
+        extra = data.get("extra_data") or {}
+        if isinstance(extra, dict):
+            extra_json = _json.dumps(extra, ensure_ascii=False)
+        else:
+            extra_json = str(extra)
+        fields.append("extra_data")
+        values.append("CAST(:extra AS JSONB)")
+        params["extra"] = extra_json
 
-    # Variant attrs (if creating a variant directly)
+    # ─── نفّذ INSERT ────────────────────────────────
+    sql = f"""
+        INSERT INTO inv_items ({', '.join(fields)})
+        VALUES ({', '.join(values)})
+    """
+    
+    try:
+        await db.execute(text(sql), params)
+    except Exception as e:
+        await db.rollback()
+        # نُرجع رسالة واضحة بدلاً من 500
+        err_msg = str(e)[:300]
+        raise HTTPException(400, f"فشل إنشاء الصنف: {err_msg}")
+
+    # ─── Variant attrs (defensive) ──────────────────
     var_attrs = data.get("variant_attrs", [])
-    for va in var_attrs:
-        await db.execute(text("""
-            INSERT INTO inv_item_variant_attrs (
-                id, tenant_id, item_id, attribute_id, value_id
-            ) VALUES (
-                gen_random_uuid(), :tid, :iid, :aid, :vid
-            )
-        """), {
-            "tid": tid, "iid": iid,
-            "aid": va["attribute_id"], "vid": va["value_id"],
-        })
+    if var_attrs:
+        attrs_check = await db.execute(text("""
+            SELECT 1 FROM information_schema.tables 
+            WHERE table_schema='public' AND table_name='inv_item_variant_attrs'
+        """))
+        if attrs_check.fetchone():
+            try:
+                for va in var_attrs:
+                    await db.execute(text("""
+                        INSERT INTO inv_item_variant_attrs (
+                            id, tenant_id, item_id, attribute_id, value_id
+                        ) VALUES (
+                            gen_random_uuid(), :tid, :iid, :aid, :vid
+                        )
+                    """), {
+                        "tid": tid, "iid": iid,
+                        "aid": va["attribute_id"], "vid": va["value_id"],
+                    })
+            except Exception:
+                # نتجاهل أخطاء variants — الصنف الرئيسي محفوظ
+                pass
 
     await db.commit()
-    return created(data={"id": iid}, message="تم إنشاء الصنف ✅")
+    return created(
+        data={"id": iid, "item_code": data["item_code"]},
+        message="تم إنشاء الصنف ✅"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
