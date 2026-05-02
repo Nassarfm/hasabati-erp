@@ -48,13 +48,17 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(
         CORSMiddleware,
+        # ⚠️ مهم: لا نستخدم "*" مع allow_credentials=True (CORS spec violation)
+        # نُحدّد origins بالضبط:
         allow_origins=[
             "https://nassarfm.github.io",
             "http://localhost:5173",
             "http://localhost:3000",
             "http://127.0.0.1:5173",
-            "*",
+            "http://127.0.0.1:3000",
         ],
+        # نسمح بـ subdomains مستقبلاً (لو احتجنا) عبر regex
+        allow_origin_regex=r"^https://([a-z0-9-]+\.)?nassarfm\.github\.io$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
