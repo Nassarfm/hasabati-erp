@@ -293,38 +293,81 @@ async def update_warehouse_v2(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ZONES — المناطق داخل المستودع (طابق، قسم، إلخ)
+# SCHEMA HELPER — Defensive Column Detection
+# ═══════════════════════════════════════════════════════════════════════════
+async def _get_columns(db: AsyncSession, table_name: str) -> set:
+    """يُرجع set بأسماء الأعمدة الموجودة فعلاً في الجدول.
+    يمنع كسر الـ endpoints لو حصل تعديل في schema (إضافة/حذف عمود)."""
+    r = await db.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name=:tbl
+    """), {"tbl": table_name})
+    return {row[0] for row in r.fetchall()}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ZONES — المناطق داخل المستودع (Schema-Aware)
 # ═══════════════════════════════════════════════════════════════════════════
 @router.get("/zones")
 async def list_zones(
     warehouse_id: Optional[uuid.UUID] = None,
     is_active: Optional[bool] = None,
+    parent_zone_id: Optional[uuid.UUID] = None,
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """قائمة المناطق — defensive schema-aware (لا يفشل بسبب أعمدة مفقودة)."""
     tid = str(user.tenant_id)
+    existing = await _get_columns(db, "inv_zones")
+
+    def col(name, alias=None):
+        a = alias or name
+        if name in existing:
+            return f"z.{name}" + (f" AS {a}" if alias else "")
+        return f"NULL AS {a}"
+
     conds = ["z.tenant_id=:tid"]
     params: dict = {"tid": tid}
     if warehouse_id is not None:
         conds.append("z.warehouse_id=:wid")
         params["wid"] = str(warehouse_id)
-    if is_active is not None:
+    if is_active is not None and "is_active" in existing:
         conds.append("z.is_active=:act")
         params["act"] = is_active
+    if parent_zone_id is not None and "parent_zone_id" in existing:
+        conds.append("z.parent_zone_id=:pzid")
+        params["pzid"] = str(parent_zone_id)
+    where = " AND ".join(conds)
 
-    r = await db.execute(text(f"""
-        SELECT
-            z.id, z.warehouse_id, z.zone_code, z.zone_name, z.zone_name_en,
-            z.zone_type, z.is_active, z.notes,
-            w.warehouse_name, w.warehouse_code,
-            (SELECT COUNT(*) FROM inv_locations l WHERE l.zone_id=z.id AND l.is_active=true) AS locations_count,
-            z.created_at, z.updated_at
-        FROM inv_zones z
-        LEFT JOIN inv_warehouses w ON w.id = z.warehouse_id
-        WHERE {' AND '.join(conds)}
-        ORDER BY w.warehouse_name, z.zone_name
-    """), params)
-    return ok(data=[dict(row._mapping) for row in r.fetchall()])
+    select_cols = [
+        "z.id", "z.tenant_id", "z.warehouse_id",
+        col("zone_code"),
+        col("zone_name"),
+        col("zone_name_en"),
+        col("zone_type"),
+        col("parent_zone_id"),
+        col("is_active"),
+        col("notes"),
+        col("created_at"),
+        col("updated_at"),  # NULL لو ما موجود
+        "w.warehouse_name",
+        "w.warehouse_code",
+        "(SELECT COUNT(*) FROM inv_locations l "
+        "WHERE l.zone_id=z.id AND l.tenant_id=:tid) AS locations_count",
+    ]
+
+    try:
+        r = await db.execute(text(f"""
+            SELECT {', '.join(select_cols)}
+            FROM inv_zones z
+            LEFT JOIN inv_warehouses w ON w.id = z.warehouse_id
+            WHERE {where}
+            ORDER BY w.warehouse_name, z.zone_name
+        """), params)
+        return ok(data=[dict(row._mapping) for row in r.fetchall()])
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"فشل تحميل المناطق: {str(e)[:300]}")
 
 
 @router.post("/zones", status_code=201)
@@ -333,30 +376,52 @@ async def create_zone(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """إنشاء منطقة — defensive schema-aware INSERT."""
     tid = str(user.tenant_id)
-    zid = str(uuid.uuid4())
     if not data.get("warehouse_id") or not data.get("zone_name"):
         raise HTTPException(400, "warehouse_id و zone_name مطلوبان")
-    await db.execute(text("""
-        INSERT INTO inv_zones (
-            id, tenant_id, warehouse_id, zone_code, zone_name, zone_name_en,
-            zone_type, is_active, notes
-        ) VALUES (
-            :id, :tid, :wid, :code, :name, :en,
-            :type, :act, :notes
-        )
-    """), {
-        "id": zid, "tid": tid,
+
+    existing = await _get_columns(db, "inv_zones")
+    zid = str(uuid.uuid4())
+
+    # ─── ابن INSERT ديناميكي ───────────────────────────
+    fields = ["id", "tenant_id", "warehouse_id"]
+    values = [":id", ":tid", ":wid"]
+    params = {
+        "id": zid,
+        "tid": tid,
         "wid": data["warehouse_id"],
-        "code": data.get("zone_code"),
-        "name": data["zone_name"],
-        "en": data.get("zone_name_en"),
-        "type": data.get("zone_type", "storage"),
-        "act": data.get("is_active", True),
+    }
+
+    candidates = {
+        "zone_code": data.get("zone_code"),
+        "zone_name": data["zone_name"],
+        "zone_name_en": data.get("zone_name_en"),
+        "zone_type": data.get("zone_type", "storage"),
+        "parent_zone_id": data.get("parent_zone_id"),
+        "is_active": data.get("is_active", True),
         "notes": data.get("notes"),
-    })
-    await db.commit()
-    return created(data={"id": zid}, message="تم إنشاء المنطقة ✅")
+    }
+
+    for col_name, val in candidates.items():
+        if col_name in existing:
+            fields.append(col_name)
+            values.append(f":{col_name}")
+            params[col_name] = val
+
+    try:
+        await db.execute(text(f"""
+            INSERT INTO inv_zones ({', '.join(fields)})
+            VALUES ({', '.join(values)})
+        """), params)
+        await db.commit()
+        return created(data={"id": zid}, message="تم إنشاء المنطقة ✅")
+    except Exception as e:
+        await db.rollback()
+        err = str(e)[:300]
+        if "duplicate key" in err.lower() or "unique" in err.lower():
+            raise HTTPException(400, f"رمز المنطقة موجود مسبقاً: {data.get('zone_code')}")
+        raise HTTPException(400, f"فشل إنشاء المنطقة: {err}")
 
 
 @router.put("/zones/{zone_id}")
@@ -366,23 +431,36 @@ async def update_zone(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """تحديث منطقة — defensive schema-aware UPDATE."""
     tid = str(user.tenant_id)
+    existing = await _get_columns(db, "inv_zones")
+
     fields = []
     params: dict = {"id": str(zone_id), "tid": tid}
-    for col in ["zone_code", "zone_name", "zone_name_en",
-                "zone_type", "is_active", "notes"]:
-        if col in data:
+
+    for col in ["zone_code", "zone_name", "zone_name_en", "zone_type",
+                "parent_zone_id", "is_active", "notes"]:
+        if col in data and col in existing:
             fields.append(f"{col} = :{col}")
             params[col] = data[col]
+
     if not fields:
         return ok(data={}, message="لا تغييرات")
-    fields.append("updated_at = NOW()")
-    await db.execute(text(f"""
-        UPDATE inv_zones SET {', '.join(fields)}
-        WHERE id=:id AND tenant_id=:tid
-    """), params)
-    await db.commit()
-    return ok(data={"id": str(zone_id)}, message="تم التحديث")
+
+    # تحديث updated_at لو الـ عمود موجود
+    if "updated_at" in existing:
+        fields.append("updated_at = NOW()")
+
+    try:
+        await db.execute(text(f"""
+            UPDATE inv_zones SET {', '.join(fields)}
+            WHERE id=:id AND tenant_id=:tid
+        """), params)
+        await db.commit()
+        return ok(data={"id": str(zone_id)}, message="تم تحديث المنطقة ✅")
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"فشل تحديث المنطقة: {str(e)[:300]}")
 
 
 @router.delete("/zones/{zone_id}", status_code=204)
@@ -391,22 +469,35 @@ async def delete_zone(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """حذف منطقة — يمنع الحذف لو فيه مواقع مرتبطة."""
     tid = str(user.tenant_id)
-    cnt = await db.execute(
-        text("SELECT COUNT(*) FROM inv_locations WHERE zone_id=:zid AND tenant_id=:tid"),
-        {"zid": str(zone_id), "tid": tid},
-    )
-    if cnt.scalar() > 0:
-        raise HTTPException(400, "لا يمكن حذف منطقة تحتوي مواقع")
-    await db.execute(
-        text("DELETE FROM inv_zones WHERE id=:id AND tenant_id=:tid"),
-        {"id": str(zone_id), "tid": tid},
-    )
-    await db.commit()
+
+    # تحقّق من عدم وجود locations مرتبطة
+    cnt_q = await db.execute(text("""
+        SELECT COUNT(*) AS c FROM inv_locations
+        WHERE zone_id=:zid AND tenant_id=:tid
+    """), {"zid": str(zone_id), "tid": tid})
+    cnt = cnt_q.fetchone()._mapping["c"]
+    if cnt > 0:
+        raise HTTPException(
+            400,
+            f"لا يمكن حذف المنطقة: يوجد {cnt} موقع مرتبط بها. احذفها أولاً."
+        )
+
+    try:
+        await db.execute(text("""
+            DELETE FROM inv_zones
+            WHERE id=:id AND tenant_id=:tid
+        """), {"id": str(zone_id), "tid": tid})
+        await db.commit()
+        return ok(data={"id": str(zone_id)}, message="تم حذف المنطقة ✅")
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"فشل حذف المنطقة: {str(e)[:300]}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# LOCATIONS — المواقع (kept under inv_locations after rename from inv_bins)
+# LOCATIONS — المواقع (Schema-Aware — يدعم capacity tracking + WMS)
 # ═══════════════════════════════════════════════════════════════════════════
 @router.get("/locations")
 async def list_locations(
@@ -414,10 +505,20 @@ async def list_locations(
     zone_id: Optional[uuid.UUID] = None,
     location_type: Optional[str] = None,
     is_active: Optional[bool] = None,
+    is_pickable: Optional[bool] = None,
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """قائمة المواقع — defensive schema-aware."""
     tid = str(user.tenant_id)
+    existing = await _get_columns(db, "inv_locations")
+
+    def col(name, alias=None):
+        a = alias or name
+        if name in existing:
+            return f"l.{name}" + (f" AS {a}" if alias else "")
+        return f"NULL AS {a}"
+
     conds = ["l.tenant_id=:tid"]
     params: dict = {"tid": tid}
     if warehouse_id is not None:
@@ -426,29 +527,58 @@ async def list_locations(
     if zone_id is not None:
         conds.append("l.zone_id=:zid")
         params["zid"] = str(zone_id)
-    if location_type:
+    if location_type and "location_type" in existing:
         conds.append("l.location_type=:lt")
         params["lt"] = location_type
-    if is_active is not None:
+    if is_active is not None and "is_active" in existing:
         conds.append("l.is_active=:act")
         params["act"] = is_active
+    if is_pickable is not None and "is_pickable" in existing:
+        conds.append("l.is_pickable=:pick")
+        params["pick"] = is_pickable
+    where = " AND ".join(conds)
 
-    r = await db.execute(text(f"""
-        SELECT
-            l.id, l.warehouse_id, l.zone_id,
-            l.location_code, l.location_name,
-            l.location_type, l.aisle, l.rack, l.shelf, l.bin_position,
-            l.is_active, l.is_pickable, l.notes,
-            w.warehouse_name, w.warehouse_code,
-            z.zone_name, z.zone_code,
-            l.created_at, l.updated_at
-        FROM inv_locations l
-        LEFT JOIN inv_warehouses w ON w.id = l.warehouse_id
-        LEFT JOIN inv_zones z ON z.id = l.zone_id
-        WHERE {' AND '.join(conds)}
-        ORDER BY w.warehouse_name, z.zone_name, l.location_name
-    """), params)
-    return ok(data=[dict(row._mapping) for row in r.fetchall()])
+    # SELECT يشمل كل الأعمدة المعروفة (موجودة أو NULL)
+    select_cols = [
+        "l.id", "l.tenant_id", "l.warehouse_id", "l.zone_id",
+        col("location_code"),
+        col("location_name"),
+        col("location_type"),
+        col("barcode"),
+        col("max_capacity_qty"),
+        col("max_capacity_volume"),
+        col("max_capacity_weight"),
+        col("is_pickable"),
+        col("is_active"),
+        col("notes"),
+        col("created_at"),
+        col("updated_at"),
+        # WMS classic fields (لو موجودة)
+        col("aisle"),
+        col("rack"),
+        col("shelf"),
+        col("bin_position"),
+        col("zone", "zone_legacy"),  # legacy text column
+        # Joined info
+        "w.warehouse_name",
+        "w.warehouse_code",
+        "z.zone_name",
+        "z.zone_code",
+    ]
+
+    try:
+        r = await db.execute(text(f"""
+            SELECT {', '.join(select_cols)}
+            FROM inv_locations l
+            LEFT JOIN inv_warehouses w ON w.id = l.warehouse_id
+            LEFT JOIN inv_zones z ON z.id = l.zone_id
+            WHERE {where}
+            ORDER BY w.warehouse_name, z.zone_name, l.location_code
+        """), params)
+        return ok(data=[dict(row._mapping) for row in r.fetchall()])
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"فشل تحميل المواقع: {str(e)[:300]}")
 
 
 @router.post("/locations", status_code=201)
@@ -457,39 +587,60 @@ async def create_location(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """إنشاء موقع — defensive schema-aware INSERT."""
     tid = str(user.tenant_id)
-    lid = str(uuid.uuid4())
     if not data.get("warehouse_id") or not data.get("location_code"):
         raise HTTPException(400, "warehouse_id و location_code مطلوبان")
-    await db.execute(text("""
-        INSERT INTO inv_locations (
-            id, tenant_id, warehouse_id, zone_id,
-            location_code, location_name,
-            location_type, aisle, rack, shelf, bin_position,
-            is_active, is_pickable, notes
-        ) VALUES (
-            :id, :tid, :wid, :zid,
-            :code, :name,
-            :type, :aisle, :rack, :shelf, :bin,
-            :act, :pick, :notes
-        )
-    """), {
-        "id": lid, "tid": tid,
+
+    existing = await _get_columns(db, "inv_locations")
+    lid = str(uuid.uuid4())
+
+    fields = ["id", "tenant_id", "warehouse_id"]
+    values = [":id", ":tid", ":wid"]
+    params = {
+        "id": lid,
+        "tid": tid,
         "wid": data["warehouse_id"],
-        "zid": data.get("zone_id"),
-        "code": data["location_code"],
-        "name": data.get("location_name") or data["location_code"],
-        "type": data.get("location_type", "storage"),
+    }
+
+    candidates = {
+        "zone_id": data.get("zone_id"),
+        "location_code": data["location_code"],
+        "location_name": data.get("location_name") or data["location_code"],
+        "location_type": data.get("location_type", "storage"),
+        "barcode": data.get("barcode"),
+        "max_capacity_qty": data.get("max_capacity_qty"),
+        "max_capacity_volume": data.get("max_capacity_volume"),
+        "max_capacity_weight": data.get("max_capacity_weight"),
+        "is_pickable": data.get("is_pickable", True),
+        "is_active": data.get("is_active", True),
+        "notes": data.get("notes"),
+        # WMS classic (لو الـ schema مدّعمها)
         "aisle": data.get("aisle"),
         "rack": data.get("rack"),
         "shelf": data.get("shelf"),
-        "bin": data.get("bin_position"),
-        "act": data.get("is_active", True),
-        "pick": data.get("is_pickable", True),
-        "notes": data.get("notes"),
-    })
-    await db.commit()
-    return created(data={"id": lid}, message="تم إنشاء الموقع ✅")
+        "bin_position": data.get("bin_position"),
+    }
+
+    for col_name, val in candidates.items():
+        if col_name in existing:
+            fields.append(col_name)
+            values.append(f":{col_name}")
+            params[col_name] = val
+
+    try:
+        await db.execute(text(f"""
+            INSERT INTO inv_locations ({', '.join(fields)})
+            VALUES ({', '.join(values)})
+        """), params)
+        await db.commit()
+        return created(data={"id": lid}, message="تم إنشاء الموقع ✅")
+    except Exception as e:
+        await db.rollback()
+        err = str(e)[:300]
+        if "duplicate key" in err.lower() or "unique" in err.lower():
+            raise HTTPException(400, f"رمز الموقع موجود مسبقاً: {data.get('location_code')}")
+        raise HTTPException(400, f"فشل إنشاء الموقع: {err}")
 
 
 @router.put("/locations/{location_id}")
@@ -499,26 +650,40 @@ async def update_location(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """تحديث موقع — defensive schema-aware UPDATE."""
     tid = str(user.tenant_id)
+    existing = await _get_columns(db, "inv_locations")
+
     fields = []
     params: dict = {"id": str(location_id), "tid": tid}
-    for col in [
-        "zone_id", "location_code", "location_name",
-        "location_type", "aisle", "rack", "shelf", "bin_position",
-        "is_active", "is_pickable", "notes",
-    ]:
-        if col in data:
+
+    updatable = [
+        "zone_id", "location_code", "location_name", "location_type",
+        "barcode", "max_capacity_qty", "max_capacity_volume", "max_capacity_weight",
+        "is_pickable", "is_active", "notes",
+        "aisle", "rack", "shelf", "bin_position",  # WMS classic
+    ]
+    for col in updatable:
+        if col in data and col in existing:
             fields.append(f"{col} = :{col}")
             params[col] = data[col]
+
     if not fields:
         return ok(data={}, message="لا تغييرات")
-    fields.append("updated_at = NOW()")
-    await db.execute(text(f"""
-        UPDATE inv_locations SET {', '.join(fields)}
-        WHERE id=:id AND tenant_id=:tid
-    """), params)
-    await db.commit()
-    return ok(data={"id": str(location_id)}, message="تم التحديث")
+
+    if "updated_at" in existing:
+        fields.append("updated_at = NOW()")
+
+    try:
+        await db.execute(text(f"""
+            UPDATE inv_locations SET {', '.join(fields)}
+            WHERE id=:id AND tenant_id=:tid
+        """), params)
+        await db.commit()
+        return ok(data={"id": str(location_id)}, message="تم تحديث الموقع ✅")
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"فشل تحديث الموقع: {str(e)[:300]}")
 
 
 @router.delete("/locations/{location_id}", status_code=204)
@@ -527,12 +692,40 @@ async def delete_location(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """حذف موقع — يمنع الحذف لو فيه أرصدة أو حركات."""
     tid = str(user.tenant_id)
-    await db.execute(
-        text("DELETE FROM inv_locations WHERE id=:id AND tenant_id=:tid"),
-        {"id": str(location_id), "tid": tid},
-    )
-    await db.commit()
+
+    # تحقّق من inv_balances (لو الجدول موجود ويحوي location_id)
+    bal_check_q = await db.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='inv_balances'
+          AND column_name='location_id'
+    """))
+    has_loc_balance = bal_check_q.fetchone() is not None
+
+    if has_loc_balance:
+        cnt_q = await db.execute(text("""
+            SELECT COUNT(*) AS c FROM inv_balances
+            WHERE location_id=:lid AND tenant_id=:tid
+              AND COALESCE(qty_on_hand, 0) <> 0
+        """), {"lid": str(location_id), "tid": tid})
+        cnt = cnt_q.fetchone()._mapping["c"]
+        if cnt > 0:
+            raise HTTPException(
+                400,
+                f"لا يمكن حذف الموقع: يوجد {cnt} رصيد غير صفري. حرّكها أولاً."
+            )
+
+    try:
+        await db.execute(text("""
+            DELETE FROM inv_locations
+            WHERE id=:id AND tenant_id=:tid
+        """), {"id": str(location_id), "tid": tid})
+        await db.commit()
+        return ok(data={"id": str(location_id)}, message="تم حذف الموقع ✅")
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"فشل حذف الموقع: {str(e)[:300]}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
