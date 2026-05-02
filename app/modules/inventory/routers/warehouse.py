@@ -29,7 +29,7 @@ router = APIRouter(prefix="/inventory", tags=["inventory-warehouse"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# WAREHOUSES V2 — مع كل الحقول الجديدة
+# WAREHOUSES V2 — مع كل الحقول الجديدة (Defensive Schema-Aware)
 # ═══════════════════════════════════════════════════════════════════════════
 @router.get("/warehouses-v2")
 async def list_warehouses_v2(
@@ -38,34 +38,218 @@ async def list_warehouses_v2(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """قائمة المستودعات — defensive schema-aware (لا يفشل بسبب أعمدة مفقودة)."""
     tid = str(user.tenant_id)
+    
+    # ─── اكتشف الأعمدة الموجودة ──────────────────────
+    cols_q = await db.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='inv_warehouses'
+    """))
+    existing = {row[0] for row in cols_q.fetchall()}
+    
+    def col(name, alias=None):
+        a = alias or name
+        if name in existing:
+            return f"w.{name}" + (f" AS {a}" if alias else "")
+        return f"NULL AS {a}"
+    
+    # ─── WHERE conditions (آمنة) ────────────────────
     conds = ["w.tenant_id=:tid"]
     params: dict = {"tid": tid}
-    if is_active is not None:
+    if is_active is not None and "is_active" in existing:
         conds.append("w.is_active=:act")
         params["act"] = is_active
-    if warehouse_type:
+    if warehouse_type and "warehouse_type" in existing:
         conds.append("w.warehouse_type=:wt")
         params["wt"] = warehouse_type
-
-    r = await db.execute(text(f"""
+    
+    where = " AND ".join(conds)
+    
+    # ─── SELECT ديناميكي ────────────────────────────
+    select_cols = [
+        "w.id", "w.tenant_id",
+        col("warehouse_code"),
+        col("warehouse_name"),
+        col("warehouse_name_en"),
+        col("warehouse_type"),
+        col("parent_warehouse_id"),
+        col("address"),
+        col("city"),
+        col("country"),
+        col("contact_person"),
+        col("contact_phone"),
+        col("contact_email"),
+        col("inventory_account_code"),
+        col("branch_code"),
+        col("cost_center_code"),
+        col("is_active"),
+        col("is_default"),
+        col("allow_negative_stock"),
+        col("notes"),
+        col("created_at"),
+        col("updated_at"),
+    ]
+    
+    # parent join (لو parent_warehouse_id موجود)
+    if "parent_warehouse_id" in existing:
+        select_cols.append("pw.warehouse_name AS parent_name")
+        parent_join = "LEFT JOIN inv_warehouses pw ON pw.id = w.parent_warehouse_id"
+    else:
+        select_cols.append("NULL AS parent_name")
+        parent_join = ""
+    
+    # zones/locations counts (defensive)
+    zones_check = await db.execute(text("""
+        SELECT 1 FROM information_schema.tables 
+        WHERE table_schema='public' AND table_name='inv_zones'
+    """))
+    if zones_check.fetchone():
+        select_cols.append(
+            "(SELECT COUNT(*) FROM inv_zones z WHERE z.warehouse_id=w.id AND z.is_active=true) AS zones_count"
+        )
+    else:
+        select_cols.append("0 AS zones_count")
+    
+    locations_check = await db.execute(text("""
+        SELECT 1 FROM information_schema.tables 
+        WHERE table_schema='public' AND table_name='inv_locations'
+    """))
+    if locations_check.fetchone():
+        select_cols.append(
+            "(SELECT COUNT(*) FROM inv_locations l WHERE l.warehouse_id=w.id AND l.is_active=true) AS locations_count"
+        )
+    else:
+        select_cols.append("0 AS locations_count")
+    
+    select_clause = ",\n            ".join(select_cols)
+    order_col = "w.warehouse_name" if "warehouse_name" in existing else "w.id"
+    order_default = "w.is_default DESC," if "is_default" in existing else ""
+    
+    sql = f"""
         SELECT
-            w.id, w.warehouse_code, w.warehouse_name, w.warehouse_name_en,
-            w.warehouse_type, w.parent_warehouse_id,
-            w.address, w.city, w.country,
-            w.contact_person, w.contact_phone, w.contact_email,
-            w.inventory_account_code, w.branch_code, w.cost_center_code,
-            w.is_active, w.is_default, w.allow_negative_stock,
-            w.notes, w.created_at, w.updated_at,
-            pw.warehouse_name AS parent_name,
-            (SELECT COUNT(*) FROM inv_zones z WHERE z.warehouse_id=w.id AND z.is_active=true) AS zones_count,
-            (SELECT COUNT(*) FROM inv_locations l WHERE l.warehouse_id=w.id AND l.is_active=true) AS locations_count
+            {select_clause}
         FROM inv_warehouses w
-        LEFT JOIN inv_warehouses pw ON pw.id = w.parent_warehouse_id
-        WHERE {' AND '.join(conds)}
-        ORDER BY w.is_default DESC, w.warehouse_name
-    """), params)
-    return ok(data=[dict(row._mapping) for row in r.fetchall()])
+        {parent_join}
+        WHERE {where}
+        ORDER BY {order_default} {order_col}
+    """
+    
+    try:
+        r = await db.execute(text(sql), params)
+        return ok(data=[dict(row._mapping) for row in r.fetchall()])
+    except Exception as e:
+        await db.rollback()
+        return ok(data=[], message=f"Debug: {str(e)[:200]}")
+
+
+@router.post("/warehouses-v2", status_code=201)
+async def create_warehouse_v2(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """إنشاء مستودع جديد — defensive."""
+    tid = str(user.tenant_id)
+    wid = str(uuid.uuid4())
+    
+    if not data.get("warehouse_code") or not data.get("warehouse_name"):
+        raise HTTPException(400, "warehouse_code و warehouse_name مطلوبان")
+    
+    # تحقّق من الأعمدة الموجودة
+    cols_q = await db.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='inv_warehouses'
+    """))
+    existing = {row[0] for row in cols_q.fetchall()}
+    
+    # تحقّق من unique
+    chk = await db.execute(
+        text("SELECT 1 FROM inv_warehouses WHERE tenant_id=:tid AND warehouse_code=:c LIMIT 1"),
+        {"tid": tid, "c": data["warehouse_code"]},
+    )
+    if chk.fetchone():
+        raise HTTPException(400, f"الكود {data['warehouse_code']} موجود مسبقاً")
+    
+    # ابنِ INSERT ديناميكياً
+    fields = ["id", "tenant_id", "warehouse_code", "warehouse_name"]
+    values = [":id", ":tid", ":code", ":name"]
+    params = {
+        "id": wid, "tid": tid,
+        "code": data["warehouse_code"],
+        "name": data["warehouse_name"],
+    }
+    
+    optional_cols = {
+        "warehouse_name_en": "en",
+        "warehouse_type": "wtype",
+        "parent_warehouse_id": "pid",
+        "address": "addr",
+        "city": "city",
+        "country": "country",
+        "contact_person": "person",
+        "contact_phone": "phone",
+        "contact_email": "email",
+        "inventory_account_code": "gl",
+        "branch_code": "branch",
+        "cost_center_code": "cc",
+        "is_active": "act",
+        "is_default": "default_",
+        "allow_negative_stock": "neg",
+        "notes": "notes",
+    }
+    
+    for col_name, param_key in optional_cols.items():
+        if col_name in existing:
+            fields.append(col_name)
+            values.append(f":{param_key}")
+            # default values
+            if col_name == "is_active":
+                params[param_key] = data.get(col_name, True)
+            elif col_name in ("is_default", "allow_negative_stock"):
+                params[param_key] = data.get(col_name, False)
+            elif col_name == "warehouse_type":
+                params[param_key] = data.get(col_name, "main")
+            else:
+                params[param_key] = data.get(col_name)
+    
+    sql = f"INSERT INTO inv_warehouses ({', '.join(fields)}) VALUES ({', '.join(values)})"
+    
+    try:
+        await db.execute(text(sql), params)
+        await db.commit()
+        return created(data={"id": wid}, message="تم إنشاء المستودع ✅")
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(400, f"فشل الإنشاء: {str(e)[:200]}")
+
+
+@router.delete("/warehouses-v2/{warehouse_id}", status_code=204)
+async def delete_warehouse_v2(
+    warehouse_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """حذف مستودع. ممنوع لو فيه أرصدة."""
+    tid = str(user.tenant_id)
+    # تحقّق من الأرصدة
+    bal_check = await db.execute(text("""
+        SELECT 1 FROM information_schema.tables 
+        WHERE table_schema='public' AND table_name='inv_balances'
+    """))
+    if bal_check.fetchone():
+        cnt = await db.execute(text("""
+            SELECT COUNT(*) FROM inv_balances 
+            WHERE warehouse_id=:wid AND tenant_id=:tid AND COALESCE(qty_on_hand,0) > 0
+        """), {"wid": str(warehouse_id), "tid": tid})
+        if cnt.scalar() > 0:
+            raise HTTPException(400, "لا يمكن حذف مستودع به أرصدة")
+    
+    await db.execute(
+        text("DELETE FROM inv_warehouses WHERE id=:id AND tenant_id=:tid"),
+        {"id": str(warehouse_id), "tid": tid},
+    )
+    await db.commit()
 
 
 @router.put("/warehouses-v2/{warehouse_id}")
