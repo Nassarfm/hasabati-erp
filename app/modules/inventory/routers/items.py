@@ -29,6 +29,54 @@ router = APIRouter(prefix="/inventory", tags=["inventory-items"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Helpers — Type-Aware Value Conversion
+# ═══════════════════════════════════════════════════════════════════════════
+def _clean_numeric(value):
+    """يحوّل string فارغ أو whitespace إلى None، ويحفظ القيم الرقمية."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        v = value.strip()
+        if v == "":
+            return None
+        # حاول التحويل لرقم
+        try:
+            if "." in v:
+                return float(v)
+            return int(v)
+        except (ValueError, TypeError):
+            return None
+    return value
+
+
+def _clean_uuid(value):
+    """يحوّل string فارغ إلى None للـ FK fields (UUID)."""
+    if value is None or value == "":
+        return None
+    return value
+
+
+def _clean_text(value):
+    """يحوّل string فارغ إلى None للحقول النصية."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip() == "":
+        return None
+    return value
+
+
+def _clean_bool(value, default=False):
+    """يحوّل أي قيمة إلى boolean صريح."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in ("true", "1", "yes", "on")
+    return bool(value)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # LIST ITEMS V2 — مع pagination + search + filtering
 # ═══════════════════════════════════════════════════════════════════════════
 @router.get("/items-v2")
@@ -354,53 +402,67 @@ async def create_item_v2(
         "code": data["item_code"], "name": data["item_name"],
     }
     
-    # خريطة: column_name → (param_key, default_value)
+    # خريطة: column_name → (param_key, type_class, default_value)
+    # type_class: 'text' | 'numeric' | 'uuid' | 'bool_t' | 'bool_f'
     optional_cols = [
         # text fields
-        ("item_name_en",        "en",       None),
-        ("description",         "desc",     None),
-        ("barcode",             "bar",      None),
-        # FK fields
-        ("category_id",         "cat",      None),
-        ("brand_id",            "brand",    None),
-        ("uom_id",              "uom",      None),
-        ("purchase_uom_id",     "puom",     None),
-        ("sales_uom_id",        "suom",     None),
-        ("parent_item_id",      "pid",      None),
+        ("item_name_en",        "en",       "text",     None),
+        ("description",         "desc",     "text",     None),
+        ("barcode",             "bar",      "text",     None),
+        # FK fields (UUID)
+        ("category_id",         "cat",      "uuid",     None),
+        ("brand_id",            "brand",    "uuid",     None),
+        ("uom_id",              "uom",      "uuid",     None),
+        ("purchase_uom_id",     "puom",     "uuid",     None),
+        ("sales_uom_id",        "suom",     "uuid",     None),
+        ("parent_item_id",      "pid",      "uuid",     None),
         # numeric fields
-        ("purchase_price",      "pp",       0),
-        ("sale_price",          "sp",       0),
-        ("standard_cost",       "sc",       0),
-        ("weight_kg",           "wt",       None),
-        ("volume_m3",           "vol",      None),
-        ("reorder_point",       "rop",      None),
-        ("reorder_qty",         "roq",      None),
-        # accounts
-        ("gl_account_code",     "gl",       None),
-        ("cogs_account_code",   "cogs",     None),
-        ("income_account_code", "inc",      None),
+        ("purchase_price",      "pp",       "numeric",  0),
+        ("sale_price",          "sp",       "numeric",  0),
+        ("standard_cost",       "sc",       "numeric",  0),
+        ("weight_kg",           "wt",       "numeric",  None),
+        ("volume_m3",           "vol",      "numeric",  None),
+        ("reorder_point",       "rop",      "numeric",  None),
+        ("reorder_qty",         "roq",      "numeric",  None),
+        # accounts (text)
+        ("gl_account_code",     "gl",       "text",     None),
+        ("cogs_account_code",   "cogs",     "text",     None),
+        ("income_account_code", "inc",      "text",     None),
         # misc text
-        ("unspsc_code",         "unspsc",   None),
-        ("classification_code", "cls",      None),
-        ("image_url",           "img",      None),
-        ("notes",               "notes",    None),
+        ("unspsc_code",         "unspsc",   "text",     None),
+        ("classification_code", "cls",      "text",     None),
+        ("image_url",           "img",      "text",     None),
+        ("notes",               "notes",    "text",     None),
         # booleans (default True)
-        ("is_active",           "act",      True),
-        ("is_purchasable",      "purch",    True),
-        ("is_sellable",         "sell",     True),
+        ("is_active",           "act",      "bool_t",   True),
+        ("is_purchasable",      "purch",    "bool_t",   True),
+        ("is_sellable",         "sell",     "bool_t",   True),
         # booleans (default False)
-        ("is_serialized",       "ser",      False),
-        ("is_lot_tracked",      "lot",      False),
-        ("is_expiry_tracked",   "exp",      False),
-        ("has_variants",        "hv",       False),
-        ("is_variant",          "iv",       False),
+        ("is_serialized",       "ser",      "bool_f",   False),
+        ("is_lot_tracked",      "lot",      "bool_f",   False),
+        ("is_expiry_tracked",   "exp",      "bool_f",   False),
+        ("has_variants",        "hv",       "bool_f",   False),
+        ("is_variant",          "iv",       "bool_f",   False),
     ]
     
-    for col_name, param_key, default in optional_cols:
+    for col_name, param_key, type_class, default in optional_cols:
         if col_name in existing:
             fields.append(col_name)
             values.append(f":{param_key}")
-            params[param_key] = data.get(col_name, default)
+            raw_value = data.get(col_name, default)
+            
+            # تحويل ذكي حسب النوع
+            if type_class == "numeric":
+                cleaned = _clean_numeric(raw_value)
+                params[param_key] = cleaned if cleaned is not None else default
+            elif type_class == "uuid":
+                params[param_key] = _clean_uuid(raw_value)
+            elif type_class == "text":
+                params[param_key] = _clean_text(raw_value)
+            elif type_class in ("bool_t", "bool_f"):
+                params[param_key] = _clean_bool(raw_value, default)
+            else:
+                params[param_key] = raw_value
     
     # ─── valuation_method / cost_method (الـ bug الأصلي) ──
     # كلاهما أو أحدهما أو لا شيء
