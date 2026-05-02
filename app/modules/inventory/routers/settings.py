@@ -903,62 +903,139 @@ async def health_check(
                    f"الفحص فشل: {type(e).__name__}: {str(e)[:100]}",
                    layer=2)
 
-    # ─── L.2 Account settings → CoA ────────────────────────────
+    # ─── L.2 Account settings → CoA (Defensive) ────────────────
     try:
-        ra = await db.execute(text("""
-            SELECT s.tx_type, s.debit_account, s.credit_account
-            FROM inv_account_settings s
-            WHERE s.tenant_id=:tid
-        """), {"tid": tid})
-        saved_accs = ra.fetchall()
-        invalid_accs: list = []
-        for row in saved_accs:
-            for acc in (row[1], row[2]):
-                if acc:
-                    rv = await db.execute(text("""
-                        SELECT 1 FROM coa_accounts
-                        WHERE tenant_id=:tid AND account_code=:c AND is_active=true
-                    """), {"tid": tid, "c": acc})
-                    if not rv.fetchone():
-                        invalid_accs.append(f"{row[0]}: {acc}")
-
-        if invalid_accs:
-            _add_check("Account Settings → CoA", "fail",
-                       f"حسابات غير صالحة: {', '.join(invalid_accs[:5])}",
+        # اكتشف الأعمدة الفعلية في inv_account_settings
+        cols_q = await db.execute(text("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='inv_account_settings'
+        """))
+        existing_cols = {r[0] for r in cols_q.fetchall()}
+        
+        # اكتشف عمود الكود في coa_accounts
+        coa_cols_q = await db.execute(text("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='coa_accounts'
+        """))
+        coa_cols = {r[0] for r in coa_cols_q.fetchall()}
+        coa_code_col = None
+        for candidate in ["account_code", "code", "acc_code"]:
+            if candidate in coa_cols:
+                coa_code_col = candidate
+                break
+        
+        # ابحث عن أعمدة الحسابات (أيّ متغيّر من الأسماء)
+        debit_col = None
+        credit_col = None
+        for candidate in ["debit_account", "debit_account_code", "dr_account", "dr_account_code"]:
+            if candidate in existing_cols:
+                debit_col = candidate
+                break
+        for candidate in ["credit_account", "credit_account_code", "cr_account", "cr_account_code"]:
+            if candidate in existing_cols:
+                credit_col = candidate
+                break
+        
+        if not debit_col or not credit_col:
+            _add_check("Account Settings → CoA", "warn",
+                       f"أعمدة الحسابات غير معروفة. الموجود: {sorted(existing_cols)}",
                        layer=3,
-                       tip="الحسابات في إعدادات الترحيل غير موجودة في دليل الحسابات")
+                       tip="يحتاج Backend ضبط ليُطابق أعمدة الـ DB")
+        elif not coa_code_col:
+            _add_check("Account Settings → CoA", "warn",
+                       f"عمود كود الحساب غير معروف في coa_accounts",
+                       layer=3,
+                       tip="يحتاج Backend ضبط ليُطابق Schema")
         else:
-            _add_check("Account Settings → CoA", "ok",
-                       f"كل الحسابات المُعدَّة صالحة ({len(saved_accs)} إعداد)",
-                       layer=3)
+            ra = await db.execute(text(f"""
+                SELECT s.tx_type, s.{debit_col}, s.{credit_col}
+                FROM inv_account_settings s
+                WHERE s.tenant_id=:tid
+            """), {"tid": tid})
+            saved_accs = ra.fetchall()
+            invalid_accs: list = []
+            for row in saved_accs:
+                for acc in (row[1], row[2]):
+                    if acc:
+                        rv = await db.execute(text(f"""
+                            SELECT 1 FROM coa_accounts
+                            WHERE tenant_id=:tid AND {coa_code_col}=:c AND is_active=true
+                        """), {"tid": tid, "c": acc})
+                        if not rv.fetchone():
+                            invalid_accs.append(f"{row[0]}: {acc}")
+
+            if invalid_accs:
+                _add_check("Account Settings → CoA", "fail",
+                           f"حسابات غير صالحة: {', '.join(invalid_accs[:5])}",
+                           layer=3,
+                           suggestion=(
+                               "-- اعرض الإعدادات غير الصالحة:\n"
+                               f"SELECT tx_type, {debit_col}, {credit_col}\n"
+                               "FROM inv_account_settings\n"
+                               "WHERE tenant_id=:tid;\n\n"
+                               "-- تأكّد أن الحسابات موجودة في coa_accounts\n"
+                               "-- أو نفّذ migration لإنشائها"
+                           ),
+                           tip="الحسابات في إعدادات الترحيل غير موجودة في دليل الحسابات")
+            else:
+                _add_check("Account Settings → CoA", "ok",
+                           f"كل الحسابات المُعدَّة صالحة ({len(saved_accs)} إعداد)",
+                           layer=3)
     except Exception as e:
         await db.rollback()
-        _add_check("Account Settings → CoA", "fail",
+        _add_check("Account Settings → CoA", "warn",
                    f"الفحص فشل: {type(e).__name__}: {str(e)[:100]}",
-                   layer=3)
+                   layer=3,
+                   tip="قد يحتاج Backend ضبط ليُطابق Schema الفعلي")
 
-    # ─── L.3 Default CoA accounts ──────────────────────────────
+    # ─── L.3 Default CoA accounts (Defensive) ──────────────────
     try:
-        default_codes = set()
-        for d, c, _ in DEFAULT_TX_ACCOUNTS.values():
-            default_codes.add(d)
-            default_codes.add(c)
-        rd = await db.execute(text("""
-            SELECT account_code FROM coa_accounts
-            WHERE tenant_id=:tid AND is_active=true AND account_code = ANY(:codes)
-        """), {"tid": tid, "codes": list(default_codes)})
-        found_defaults = {r[0] for r in rd.fetchall()}
-        missing_defaults = [c for c in default_codes if c not in found_defaults]
-
-        if missing_defaults:
+        # تحقّق من coa_accounts schema
+        coa_cols_q = await db.execute(text("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='coa_accounts'
+        """))
+        coa_cols = {r[0] for r in coa_cols_q.fetchall()}
+        
+        # ابحث عن عمود الكود
+        code_col = None
+        for candidate in ["account_code", "code", "acc_code"]:
+            if candidate in coa_cols:
+                code_col = candidate
+                break
+        
+        if not code_col:
             _add_check("Default CoA Accounts", "warn",
-                       f"حسابات افتراضية ناقصة: {', '.join(missing_defaults[:5])}",
+                       f"عمود الكود غير معروف في coa_accounts. الموجود: {sorted(coa_cols)[:8]}",
                        layer=3,
-                       tip="ستُستخدم القيم الافتراضية كـ fallback")
+                       tip="يحتاج Backend ضبط ليُطابق Schema")
         else:
-            _add_check("Default CoA Accounts", "ok",
-                       f"كل الحسابات الافتراضية الـ {len(default_codes)} موجودة",
-                       layer=3)
+            default_codes = set()
+            for d, c, _ in DEFAULT_TX_ACCOUNTS.values():
+                default_codes.add(d)
+                default_codes.add(c)
+            rd = await db.execute(text(f"""
+                SELECT {code_col} FROM coa_accounts
+                WHERE tenant_id=:tid AND is_active=true AND {code_col} = ANY(:codes)
+            """), {"tid": tid, "codes": list(default_codes)})
+            found_defaults = {r[0] for r in rd.fetchall()}
+            missing_defaults = [c for c in default_codes if c not in found_defaults]
+
+            if missing_defaults:
+                _add_check("Default CoA Accounts", "warn",
+                           f"حسابات افتراضية ناقصة ({len(missing_defaults)}): {', '.join(sorted(missing_defaults)[:5])}",
+                           layer=3,
+                           suggestion=(
+                               "-- أنشئ الحسابات الافتراضية في CoA:\n"
+                               "-- (مثال — عدّل حسب احتياجك)\n"
+                               f"-- SELECT * FROM coa_accounts WHERE {code_col} IN ('1301', '5101');\n\n"
+                               "-- لو ناقصة، أضفها من صفحة دليل الحسابات"
+                           ),
+                           tip="ستُستخدم القيم الافتراضية كـ fallback لو الحسابات مفقودة")
+            else:
+                _add_check("Default CoA Accounts", "ok",
+                           f"كل الحسابات الافتراضية الـ {len(default_codes)} موجودة",
+                           layer=3)
     except Exception as e:
         await db.rollback()
         _add_check("Default CoA Accounts", "warn",
