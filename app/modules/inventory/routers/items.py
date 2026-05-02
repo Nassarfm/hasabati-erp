@@ -549,43 +549,144 @@ async def update_item_v2(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """
+    تحديث صنف — defensive schema-aware.
+    
+    يستخدم نفس type-safe helpers المستخدمة في POST.
+    لا يفشل بسبب أعمدة مفقودة أو قيم فارغة.
+    """
     tid = str(user.tenant_id)
+    
+    # ─── اكتشف الأعمدة الموجودة ──────────────────────
+    cols_q = await db.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='inv_items'
+    """))
+    existing = {row[0] for row in cols_q.fetchall()}
+    
+    # ─── تحقّق من وجود الصنف ─────────────────────────
+    chk = await db.execute(
+        text("SELECT id FROM inv_items WHERE id=:id AND tenant_id=:tid LIMIT 1"),
+        {"id": str(item_id), "tid": tid},
+    )
+    if not chk.fetchone():
+        raise HTTPException(404, "الصنف غير موجود")
+    
+    # ─── خريطة الأعمدة مع أنواعها (مُطابقة للـ POST) ──
+    update_cols = [
+        # text fields
+        ("item_code",           "text"),
+        ("item_name",           "text"),
+        ("item_name_en",        "text"),
+        ("description",         "text"),
+        ("barcode",             "text"),
+        # FK fields (UUID)
+        ("category_id",         "uuid"),
+        ("brand_id",            "uuid"),
+        ("uom_id",              "uuid"),
+        ("purchase_uom_id",     "uuid"),
+        ("sales_uom_id",        "uuid"),
+        ("parent_item_id",      "uuid"),
+        # numeric fields
+        ("purchase_price",      "numeric"),
+        ("sale_price",          "numeric"),
+        ("standard_cost",       "numeric"),
+        ("weight_kg",           "numeric"),
+        ("volume_m3",           "numeric"),
+        ("reorder_point",       "numeric"),
+        ("reorder_qty",         "numeric"),
+        ("min_stock",           "numeric"),
+        ("max_stock",           "numeric"),
+        ("safety_stock",        "numeric"),
+        ("lead_time_days",      "numeric"),
+        # accounts (text)
+        ("gl_account_code",     "text"),
+        ("cogs_account_code",   "text"),
+        ("income_account_code", "text"),
+        # misc text
+        ("unspsc_code",         "text"),
+        ("classification_code", "text"),
+        ("image_url",           "text"),
+        ("notes",               "text"),
+        # booleans
+        ("is_active",           "bool"),
+        ("is_purchasable",      "bool"),
+        ("is_sellable",         "bool"),
+        ("is_serialized",       "bool"),
+        ("is_lot_tracked",      "bool"),
+        ("is_expiry_tracked",   "bool"),
+        ("has_variants",        "bool"),
+        ("is_variant",          "bool"),
+        ("allow_negative_stock", "bool"),
+    ]
+    
+    # ─── ابنِ UPDATE ديناميكياً ──────────────────────
     fields = []
     params: dict = {"id": str(item_id), "tid": tid}
-    for col in [
-        "item_code", "item_name", "item_name_en", "description", "barcode",
-        "category_id", "brand_id", "uom_id",
-        "purchase_uom_id", "sales_uom_id",
-        "purchase_price", "sale_price", "standard_cost",
-        "valuation_method",
-        "gl_account_code", "cogs_account_code", "income_account_code",
-        "unspsc_code", "classification_code",
-        "is_active", "is_purchasable", "is_sellable",
-        "is_serialized", "is_lot_tracked", "is_expiry_tracked",
-        "has_variants",
-        "weight_kg", "volume_m3", "reorder_point", "reorder_qty",
-        "image_url", "notes",
-    ]:
-        if col in data:
-            fields.append(f"{col} = :{col}")
-            params[col] = data[col]
-
-    if "extra_data" in data:
+    
+    for col_name, type_class in update_cols:
+        # حدّث فقط الأعمدة الموجودة في DB والمُرسلة من المستخدم
+        if col_name in data and col_name in existing:
+            raw_value = data[col_name]
+            
+            # تحويل ذكي
+            if type_class == "numeric":
+                cleaned = _clean_numeric(raw_value)
+                # للحقول الرقمية: استخدم 0 لو None
+                value = cleaned if cleaned is not None else 0
+            elif type_class == "uuid":
+                value = _clean_uuid(raw_value)
+            elif type_class == "text":
+                value = _clean_text(raw_value)
+            elif type_class == "bool":
+                value = _clean_bool(raw_value)
+            else:
+                value = raw_value
+            
+            fields.append(f"{col_name} = :{col_name}")
+            params[col_name] = value
+    
+    # ─── valuation_method / cost_method (مهم جداً) ──
+    if "valuation_method" in data:
+        vm_value = data["valuation_method"] or "avg"
+        if "valuation_method" in existing:
+            fields.append("valuation_method = :vm")
+            params["vm"] = vm_value
+        if "cost_method" in existing:
+            fields.append("cost_method = :cm")
+            params["cm"] = vm_value
+    
+    # ─── extra_data (JSONB) ─────────────────────────
+    if "extra_data" in data and "extra_data" in existing:
         import json as _json
         extra = data["extra_data"]
-        params["extra"] = _json.dumps(extra, ensure_ascii=False) if isinstance(extra, dict) else str(extra)
+        if isinstance(extra, dict):
+            extra_json = _json.dumps(extra, ensure_ascii=False)
+        else:
+            extra_json = str(extra)
         fields.append("extra_data = CAST(:extra AS JSONB)")
+        params["extra"] = extra_json
 
     if not fields:
-        return ok(data={}, message="لا تغييرات")
-    fields.append("updated_at = NOW()")
+        return ok(data={"id": str(item_id)}, message="لا تغييرات")
+    
+    # updated_at لو موجود
+    if "updated_at" in existing:
+        fields.append("updated_at = NOW()")
 
-    await db.execute(text(f"""
+    sql = f"""
         UPDATE inv_items SET {', '.join(fields)}
         WHERE id=:id AND tenant_id=:tid
-    """), params)
-    await db.commit()
-    return ok(data={"id": str(item_id)}, message="تم التحديث ✅")
+    """
+    
+    try:
+        await db.execute(text(sql), params)
+        await db.commit()
+        return ok(data={"id": str(item_id)}, message="تم تحديث الصنف ✅")
+    except Exception as e:
+        await db.rollback()
+        # ✅ القاعدة الذهبية #30 — رسالة عربية واضحة
+        raise HTTPException(400, f"فشل تحديث الصنف: {str(e)[:300]}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
