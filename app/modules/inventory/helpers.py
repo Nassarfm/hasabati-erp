@@ -352,21 +352,34 @@ async def adjust_balance(
 ) -> Dict[str, Any]:
     """
     يحدّث inv_balances بـ delta. يحسب avg_cost الجديد تلقائياً.
+    
+    ⚠️ Schema-aware (2026-05-03):
+    inv_balances يطلب item_code و item_name كـ NOT NULL.
+    نجلبها من inv_items عند الإدخال الأوّل.
     """
     bal = await get_balance(db, item_id, warehouse_id, tenant_id)
     new_qty = bal["qty_on_hand"] + qty_delta
     new_val = bal["total_value"] + cost_delta
     new_cost = (new_val / new_qty) if new_qty > 0 else Decimal(0)
 
+    # Fetch item_code & item_name from inv_items (needed for NOT NULL constraint)
+    item_info = await db.execute(
+        text("SELECT item_code, item_name FROM inv_items WHERE id=:iid LIMIT 1"),
+        {"iid": str(item_id)},
+    )
+    item_row = item_info.fetchone()
+    item_code = item_row[0] if item_row else "UNKNOWN"
+    item_name = item_row[1] if item_row else "Unknown Item"
+
     await db.execute(
         text(
             """
             INSERT INTO inv_balances (
-                id, tenant_id, item_id, warehouse_id,
+                id, tenant_id, item_id, item_code, item_name, warehouse_id,
                 qty_on_hand, qty_reserved, avg_cost, total_value,
                 last_movement
             ) VALUES (
-                gen_random_uuid(), :tid, :iid, :wid,
+                gen_random_uuid(), :tid, :iid, :icode, :iname, :wid,
                 :qty, 0, :cost, :val, :dt
             )
             ON CONFLICT (tenant_id, item_id, warehouse_id) DO UPDATE SET
@@ -378,7 +391,9 @@ async def adjust_balance(
             """
         ),
         {
-            "tid": tenant_id, "iid": str(item_id), "wid": str(warehouse_id),
+            "tid": tenant_id, "iid": str(item_id),
+            "icode": item_code, "iname": item_name,
+            "wid": str(warehouse_id),
             "qty": new_qty, "cost": new_cost, "val": new_val, "dt": tx_date,
         },
     )
