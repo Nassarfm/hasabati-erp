@@ -842,6 +842,28 @@ async def post_transaction_v2(
     - JE (مع party + dimensions + reason)
     """
     tid = str(user.tenant_id)
+    
+    # Wrap entire handler in try/except for clear Arabic errors
+    try:
+        return await _post_transaction_v2_impl(tx_id, tid, user, db)
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        import traceback
+        tb_short = traceback.format_exc().splitlines()[-3:]
+        tb_str = ' | '.join(tb_short)
+        # Print full traceback to Railway logs for debugging
+        print(f"[POST /transactions-v2/{tx_id}/post] FAILED:")
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=400,
+            detail=f"فشل الترحيل: {str(e)[:200]}. تفاصيل: {tb_str[:200]}"
+        )
+
+
+async def _post_transaction_v2_impl(tx_id, tid, user, db):
+    """Actual implementation - wrapped by post_transaction_v2 with error handling"""
 
     # Get tx header
     rt = await db.execute(text("""
