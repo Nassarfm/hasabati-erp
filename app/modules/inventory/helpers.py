@@ -815,17 +815,29 @@ async def post_je_v5(
                 if hasattr(line, k):
                     setattr(line, k, v)
 
-        result = await engine.post(PostingRequest(
-            tenant_id=t_id,
-            je_type=tx_type,
-            description=description,
-            entry_date=tx_date,
-            lines=[line_dr, line_cr],
-            created_by_email=user_email,
-            reference=reference,
-            source_module="inventory",
-            source_id=str(source_id) if source_id else None,
-        ))
+        # Build PostingRequest kwargs — only pass what PostingRequest accepts
+        # ⚠️ source_id removed (not accepted by PostingRequest)
+        # If your PostingEngine version supports it, uncomment below
+        pr_kwargs = {
+            "tenant_id": t_id,
+            "je_type": tx_type,
+            "description": description,
+            "entry_date": tx_date,
+            "lines": [line_dr, line_cr],
+            "created_by_email": user_email,
+            "reference": reference,
+            "source_module": "inventory",
+        }
+        # Try to attach source_id if PostingRequest supports it
+        try:
+            import inspect
+            sig = inspect.signature(PostingRequest)
+            if "source_id" in sig.parameters and source_id:
+                pr_kwargs["source_id"] = str(source_id)
+        except Exception:
+            pass
+
+        result = await engine.post(PostingRequest(**pr_kwargs))
         return {
             "je_id": str(result.je_id),
             "je_serial": result.je_serial,
