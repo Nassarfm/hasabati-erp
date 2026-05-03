@@ -849,7 +849,20 @@ async def post_transaction_v2(
         raise HTTPException(400, "لا توجد أسطر للترحيل")
 
     # Resolve accounts
-    debit_acc, credit_acc, _desc = await get_tx_accounts(db, tx_type, tid)
+    try:
+        debit_acc, credit_acc, _desc = await get_tx_accounts(db, tx_type, tid)
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail=f"فشل جلب إعدادات الحسابات لـ {tx_type}: {str(e)[:200]}. اذهب إلى المخزون → الإعدادات → إعدادات الحسابات."
+        )
+
+    if not debit_acc or not credit_acc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"إعدادات الحسابات لـ {tx_type} غير مكتملة (مدين={debit_acc}, دائن={credit_acc}). اذهب إلى المخزون → الإعدادات → إعدادات الحسابات."
+        )
 
     # Resolve reason — may override accounts
     reason_acc, reason_name, reason_is_increase = await resolve_reason_code(
@@ -1127,25 +1140,43 @@ async def post_transaction_v2(
             raise HTTPException(400, f"نوع الحركة غير مدعوم: {tx_type}")
 
     # ─── Post JE ───────────────────────────────────────────────────────────
-    je_result = await post_je_v5(
-        db,
-        user_email=user.email,
-        tx_type=tx_type,
-        tx_date=tx_date,
-        description=tx.get("description") or tx["serial"],
-        debit_account=debit_acc,
-        credit_account=credit_acc,
-        amount=grand_total_cost,
-        reference=tx["serial"],
-        party_id=tx.get("party_id"),
-        party_role=tx.get("party_role"),
-        branch_code=tx.get("branch_code"),
-        cost_center_code=tx.get("cost_center_code"),
-        project_code=tx.get("project_code"),
-        reason_code=tx.get("reason_code"),
-        source_id=tx_id,
-        tenant_id=tid,
-    )
+    try:
+        je_result = await post_je_v5(
+            db,
+            user_email=user.email,
+            tx_type=tx_type,
+            tx_date=tx_date,
+            description=tx.get("description") or tx["serial"],
+            debit_account=debit_acc,
+            credit_account=credit_acc,
+            amount=grand_total_cost,
+            reference=tx["serial"],
+            party_id=tx.get("party_id"),
+            party_role=tx.get("party_role"),
+            branch_code=tx.get("branch_code"),
+            cost_center_code=tx.get("cost_center_code"),
+            project_code=tx.get("project_code"),
+            reason_code=tx.get("reason_code"),
+            source_id=tx_id,
+            tenant_id=tid,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        import traceback
+        tb = traceback.format_exc()[-500:]
+        raise HTTPException(
+            status_code=400,
+            detail=f"فشل توليد القيد المحاسبي: {str(e)[:200]}. الحسابات المُستخدَمة: مدين={debit_acc} دائن={credit_acc}. تأكّد من إعدادات الحسابات."
+        )
+
+    if not je_result or not je_result.get("je_id"):
+        await db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail=f"فشل توليد القيد — الاستجابة فارغة. تحقّق من إعدادات الحسابات لـ {tx_type}"
+        )
 
     # Update tx
     await db.execute(text("""
