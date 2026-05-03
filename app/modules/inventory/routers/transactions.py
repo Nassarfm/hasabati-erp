@@ -668,31 +668,55 @@ async def get_je_preview(
         ] if c in coa_cols), None)
 
         async def get_account_info(code):
-            if not code or not code_col:
+            if not code:
+                return {"account_code": "", "account_name": "—", "account_type": ""}
+            if not code_col:
+                # Fallback: no code column found at all
                 return {"account_code": str(code), "account_name": "حساب " + str(code), "account_type": ""}
-            try:
+            
+            # Try multiple query strategies
+            strategies = []
+            
+            # Strategy 1: with tenant_id filter
+            if 'tenant_id' in coa_cols:
                 cols_select = [f"{code_col} AS account_code"]
                 if name_col:
                     cols_select.append(f"{name_col} AS account_name")
                 if type_col:
                     cols_select.append(f"{type_col} AS account_type")
-                sql = f"""
-                    SELECT {', '.join(cols_select)}
-                    FROM coa_accounts
-                    WHERE {code_col}=:code AND tenant_id=:tid
-                    LIMIT 1
-                """
-                r = await db.execute(text(sql), {"code": str(code), "tid": tid})
-                ar = r.fetchone()
-                if ar:
-                    d = dict(ar._mapping)
-                    return {
-                        "account_code": d.get("account_code", code),
-                        "account_name": d.get("account_name") or "حساب " + str(code),
-                        "account_type": d.get("account_type", ""),
-                    }
-            except Exception as e:
-                pass
+                strategies.append((
+                    f"SELECT {', '.join(cols_select)} FROM coa_accounts WHERE {code_col}=:code AND tenant_id=:tid LIMIT 1",
+                    {"code": str(code), "tid": tid}
+                ))
+            
+            # Strategy 2: without tenant_id (in case it's not on coa_accounts)
+            cols_select = [f"{code_col} AS account_code"]
+            if name_col:
+                cols_select.append(f"{name_col} AS account_name")
+            if type_col:
+                cols_select.append(f"{type_col} AS account_type")
+            strategies.append((
+                f"SELECT {', '.join(cols_select)} FROM coa_accounts WHERE {code_col}=:code LIMIT 1",
+                {"code": str(code)}
+            ))
+            
+            for sql, params in strategies:
+                try:
+                    r = await db.execute(text(sql), params)
+                    ar = r.fetchone()
+                    if ar:
+                        d = dict(ar._mapping)
+                        return {
+                            "account_code": d.get("account_code") or str(code),
+                            "account_name": d.get("account_name") or "حساب " + str(code),
+                            "account_type": d.get("account_type", ""),
+                        }
+                except Exception as e:
+                    # Log but continue to next strategy
+                    print(f"[JE Preview] Account lookup failed: {sql[:80]}... | {e}")
+                    continue
+            
+            # All strategies failed — return code only
             return {"account_code": str(code), "account_name": "حساب " + str(code), "account_type": ""}
 
         debit_info = await get_account_info(debit_acc) if debit_acc else None
