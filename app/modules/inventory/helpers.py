@@ -266,20 +266,22 @@ async def add_ledger_v5(
             """
             INSERT INTO inv_ledger (
                 id, tenant_id, item_id, warehouse_id, location_id,
+                tx_id,
                 tx_type, tx_date,
                 qty_in, qty_out, unit_cost, total_cost,
+                qty_balance, wac_after,
                 balance_qty, balance_cost,
-                reference_id, reference_type,
-                lot_id, lot_number, serial_id, serial_number,
+                lot_id, lot_number, serial_id,
                 party_id, party_role, party_name_snapshot,
                 branch_code, cost_center_code, project_code, reason_code
             ) VALUES (
                 :id, :tid, :iid, :wid, :loc,
+                :ref_id,
                 :tx_type, :tx_date,
                 :qi, :qo, :uc, :tc,
+                :bq, :wac,
                 :bq, :bc,
-                :ref_id, :ref_type,
-                :lot_id, :lot, :ser_id, :ser,
+                :lot_id, :lot, :ser_id,
                 :pid, :prole, :pname,
                 :br, :cc, :prj, :rc
             )
@@ -289,14 +291,14 @@ async def add_ledger_v5(
             "id": str(led_id), "tid": tenant_id,
             "iid": str(item_id), "wid": str(warehouse_id),
             "loc": str(location_id) if location_id else None,
+            "ref_id": str(reference_id),
             "tx_type": tx_type, "tx_date": tx_date,
             "qi": qty_in, "qo": qty_out, "uc": unit_cost, "tc": total_cost,
-            "bq": bal_qty, "bc": bal_cost,
-            "ref_id": str(reference_id), "ref_type": reference_type,
+            "bq": bal_qty, "wac": (bal_cost / bal_qty) if bal_qty > 0 else Decimal(0),
+            "bc": bal_cost,
             "lot_id": str(lot_id) if lot_id else None,
             "lot": lot_number,
             "ser_id": str(serial_id) if serial_id else None,
-            "ser": serial_number,
             "pid": str(party_id) if party_id else None,
             "prole": party_role, "pname": party_name_snapshot,
             "br": branch_code, "cc": cost_center_code,
@@ -354,15 +356,17 @@ async def adjust_balance(
     يحدّث inv_balances بـ delta. يحسب avg_cost الجديد تلقائياً.
     
     ⚠️ Schema-aware (2026-05-03):
-    inv_balances يطلب item_code و item_name كـ NOT NULL.
-    نجلبها من inv_items عند الإدخال الأوّل.
+    inv_balances يطلب أعمدة NOT NULL:
+      - item_code, item_name (من inv_items)
+      - warehouse_code, warehouse_name (من inv_warehouses)
+      - qty_available, qty_incoming, min_qty, reorder_point (default 0)
     """
     bal = await get_balance(db, item_id, warehouse_id, tenant_id)
     new_qty = bal["qty_on_hand"] + qty_delta
     new_val = bal["total_value"] + cost_delta
     new_cost = (new_val / new_qty) if new_qty > 0 else Decimal(0)
 
-    # Fetch item_code & item_name from inv_items (needed for NOT NULL constraint)
+    # Fetch item info (needed for NOT NULL constraints)
     item_info = await db.execute(
         text("SELECT item_code, item_name FROM inv_items WHERE id=:iid LIMIT 1"),
         {"iid": str(item_id)},
@@ -371,19 +375,45 @@ async def adjust_balance(
     item_code = item_row[0] if item_row else "UNKNOWN"
     item_name = item_row[1] if item_row else "Unknown Item"
 
+    # Fetch warehouse info (needed for NOT NULL constraints)
+    wh_info = await db.execute(
+        text("""
+            SELECT
+                COALESCE(warehouse_code, code, '') AS wh_code,
+                COALESCE(warehouse_name, name, '') AS wh_name
+            FROM inv_warehouses WHERE id=:wid LIMIT 1
+        """),
+        {"wid": str(warehouse_id)},
+    )
+    wh_row = wh_info.fetchone()
+    warehouse_code = wh_row[0] if wh_row else "UNKNOWN"
+    warehouse_name = wh_row[1] if wh_row else "Unknown Warehouse"
+
+    qty_available = new_qty  # available = on_hand - reserved (we use 0 reserved)
+
     await db.execute(
         text(
             """
             INSERT INTO inv_balances (
-                id, tenant_id, item_id, item_code, item_name, warehouse_id,
-                qty_on_hand, qty_reserved, avg_cost, total_value,
+                id, tenant_id,
+                item_id, item_code, item_name,
+                warehouse_id, warehouse_code, warehouse_name,
+                qty_on_hand, qty_reserved, qty_available, qty_incoming,
+                avg_cost, total_value,
+                min_qty, reorder_point,
                 last_movement
             ) VALUES (
-                gen_random_uuid(), :tid, :iid, :icode, :iname, :wid,
-                :qty, 0, :cost, :val, :dt
+                gen_random_uuid(), :tid,
+                :iid, :icode, :iname,
+                :wid, :wcode, :wname,
+                :qty, 0, :qavail, 0,
+                :cost, :val,
+                0, 0,
+                :dt
             )
             ON CONFLICT (tenant_id, item_id, warehouse_id) DO UPDATE SET
                 qty_on_hand   = :qty,
+                qty_available = :qavail,
                 avg_cost      = :cost,
                 total_value   = :val,
                 last_movement = :dt,
@@ -394,7 +424,9 @@ async def adjust_balance(
             "tid": tenant_id, "iid": str(item_id),
             "icode": item_code, "iname": item_name,
             "wid": str(warehouse_id),
-            "qty": new_qty, "cost": new_cost, "val": new_val, "dt": tx_date,
+            "wcode": warehouse_code, "wname": warehouse_name,
+            "qty": new_qty, "qavail": qty_available,
+            "cost": new_cost, "val": new_val, "dt": tx_date,
         },
     )
     return {"qty_on_hand": new_qty, "avg_cost": new_cost, "total_value": new_val}
