@@ -637,20 +637,67 @@ async def get_je_preview(
             for l in lines_data
         )
 
-        # Resolve account names from coa_accounts
-        async def get_account_info(code):
-            if not code:
-                return None
+        # Resolve account names from coa_accounts (schema-aware)
+        # ⚠️ Different installations may use different column names:
+        # - account_code OR code OR account_no
+        # - account_name OR name OR account_title
+        # We detect the actual schema first, then query
+        async def get_coa_columns():
             r = await db.execute(text("""
-                SELECT account_code, account_name, account_type
-                FROM coa_accounts
-                WHERE account_code=:code AND tenant_id=:tid
-                LIMIT 1
-            """), {"code": code, "tid": tid})
-            ar = r.fetchone()
-            if ar:
-                return dict(ar._mapping)
-            return {"account_code": code, "account_name": "حساب غير معروف", "account_type": ""}
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='coa_accounts'
+            """))
+            return {row[0] for row in r.fetchall()}
+
+        coa_cols = await get_coa_columns()
+        # Determine actual column names
+        code_col = (
+            'account_code' if 'account_code' in coa_cols
+            else 'code' if 'code' in coa_cols
+            else 'account_no' if 'account_no' in coa_cols
+            else None
+        )
+        name_col = (
+            'account_name' if 'account_name' in coa_cols
+            else 'name' if 'name' in coa_cols
+            else 'account_title' if 'account_title' in coa_cols
+            else None
+        )
+        type_col = (
+            'account_type' if 'account_type' in coa_cols
+            else 'type' if 'type' in coa_cols
+            else None
+        )
+
+        async def get_account_info(code):
+            if not code or not code_col:
+                return None
+            try:
+                cols_select = []
+                cols_select.append(f"{code_col} AS account_code")
+                if name_col:
+                    cols_select.append(f"{name_col} AS account_name")
+                if type_col:
+                    cols_select.append(f"{type_col} AS account_type")
+                sql = f"""
+                    SELECT {', '.join(cols_select)}
+                    FROM coa_accounts
+                    WHERE {code_col}=:code AND tenant_id=:tid
+                    LIMIT 1
+                """
+                r = await db.execute(text(sql), {"code": str(code), "tid": tid})
+                ar = r.fetchone()
+                if ar:
+                    d = dict(ar._mapping)
+                    return {
+                        "account_code": d.get("account_code", code),
+                        "account_name": d.get("account_name", "حساب " + str(code)),
+                        "account_type": d.get("account_type", ""),
+                    }
+            except Exception as e:
+                # Fail gracefully — return code only
+                pass
+            return {"account_code": str(code), "account_name": "حساب " + str(code), "account_type": ""}
 
         debit_info = await get_account_info(debit_acc) if debit_acc else None
         credit_info = await get_account_info(credit_acc) if credit_acc else None
