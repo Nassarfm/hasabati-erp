@@ -400,26 +400,35 @@ async def fifo_add_layer(
     lot_id: Optional[uuid.UUID] = None,
     tenant_id: str = TENANT_ID,
 ) -> uuid.UUID:
+    """
+    إضافة طبقة FIFO جديدة عند استلام بضاعة.
+    
+    ⚠️ Schema-aware (2026-05-03):
+    DB الفعلي يستخدم: tx_id, qty_received, qty_remaining
+    (وليس: reference_id, original_qty, remaining_qty)
+    """
     layer_id = uuid.uuid4()
     await db.execute(
         text(
             """
             INSERT INTO inv_fifo_layers (
                 id, tenant_id, item_id, warehouse_id,
-                receipt_date, original_qty, remaining_qty, unit_cost,
-                reference_id, lot_id
+                tx_id, receipt_date,
+                qty_received, qty_remaining,
+                unit_cost
             ) VALUES (
                 :id, :tid, :iid, :wid,
-                :dt, :qty, :qty, :uc, :ref, :lid
+                :ref, :dt,
+                :qty, :qty,
+                :uc
             )
             """
         ),
         {
             "id": str(layer_id), "tid": tenant_id,
             "iid": str(item_id), "wid": str(warehouse_id),
-            "dt": receipt_date, "qty": qty, "uc": unit_cost,
             "ref": str(reference_id),
-            "lid": str(lot_id) if lot_id else None,
+            "dt": receipt_date, "qty": qty, "uc": unit_cost,
         },
     )
     return layer_id
@@ -438,10 +447,10 @@ async def fifo_consume(
     r = await db.execute(
         text(
             """
-            SELECT id, remaining_qty, unit_cost, lot_id
+            SELECT id, qty_remaining, unit_cost
             FROM inv_fifo_layers
             WHERE tenant_id=:tid AND item_id=:iid AND warehouse_id=:wid
-              AND remaining_qty > 0
+              AND qty_remaining > 0
             ORDER BY receipt_date, created_at
             """
         ),
@@ -465,11 +474,10 @@ async def fifo_consume(
             "qty_consumed": float(consume),
             "unit_cost": float(layer[2]),
             "cost": float(cost),
-            "lot_id": str(layer[3]) if layer[3] else None,
         })
         await db.execute(
             text(
-                "UPDATE inv_fifo_layers SET remaining_qty = remaining_qty - :c WHERE id=:lid"
+                "UPDATE inv_fifo_layers SET qty_remaining = qty_remaining - :c WHERE id=:lid"
             ),
             {"c": consume, "lid": str(layer[0])},
         )
