@@ -172,8 +172,8 @@ async def get_transaction_v2(
         LEFT JOIN parties p ON p.id = l.party_id
         LEFT JOIN inv_lots lot ON lot.id = l.lot_id
         LEFT JOIN inv_serials ser ON ser.id = l.serial_id
-        WHERE l.transaction_id=:tid_id
-        ORDER BY l.line_order
+        WHERE l.tx_id=:tid_id
+        ORDER BY l.created_at
     """), {"tid_id": str(tx_id)})
     tx["lines"] = [dict(row._mapping) for row in rl.fetchall()]
     return ok(data=tx)
@@ -268,48 +268,229 @@ async def create_transaction_v2(
     })
 
     # Insert lines
+    # ⚠️ Schema fix (2026-05-03): inv_transaction_lines uses tx_id (not transaction_id),
+    # has no line_order column, and uses from_location_id/to_location_id (not location_id).
     for i, line in enumerate(lines):
         line_id = str(uuid.uuid4())
-        await db.execute(text("""
-            INSERT INTO inv_transaction_lines (
-                id, tenant_id, transaction_id, line_order,
-                item_id, uom_id, qty, unit_cost, total_cost,
-                lot_id, lot_number, expiry_date,
-                serial_id, serial_number,
-                location_id,
-                party_id, party_role,
-                notes
-            ) VALUES (
-                :id, :tid, :tx_id, :ord,
-                :iid, :uom, :qty, :uc, :tc,
-                :lot_id, :lot, :exp,
-                :ser_id, :ser,
-                :loc,
-                :pid, :prole,
-                :notes
+        # Determine location based on tx_type direction
+        from_loc = line.get("from_location_id") or (
+            line.get("location_id") if tx_type in ("GIN", "GDN", "IT", "IJ", "SCRAP", "RETURN_IN") else None
+        )
+        to_loc = line.get("to_location_id") or (
+            line.get("location_id") if tx_type in ("GRN", "RETURN_OUT") else None
+        )
+        try:
+            await db.execute(text("""
+                INSERT INTO inv_transaction_lines (
+                    id, tenant_id, tx_id,
+                    item_id, item_code, item_name,
+                    uom_id, uom_name,
+                    qty, unit_cost, total_cost,
+                    lot_id, lot_number, expiry_date,
+                    serial_id, serial_number,
+                    from_location_id, to_location_id,
+                    party_id, party_role,
+                    notes
+                ) VALUES (
+                    :id, :tid, :tx_id,
+                    :iid, :icode, :iname,
+                    :uom, :uname,
+                    :qty, :uc, :tc,
+                    :lot_id, :lot, :exp,
+                    :ser_id, :ser,
+                    :from_loc, :to_loc,
+                    :pid, :prole,
+                    :notes
+                )
+            """), {
+                "id": line_id, "tid": tid, "tx_id": tx_id,
+                "iid": line["item_id"],
+                "icode": line.get("item_code", ""),
+                "iname": line.get("item_name", ""),
+                "uom": line.get("uom_id"),
+                "uname": line.get("uom_name"),
+                "qty": Decimal(str(line["qty"])),
+                "uc": Decimal(str(line.get("unit_cost", 0))),
+                "tc": Decimal(str(line["qty"])) * Decimal(str(line.get("unit_cost", 0))),
+                "lot_id": line.get("lot_id"),
+                "lot": line.get("lot_number"),
+                "exp": line.get("expiry_date"),
+                "ser_id": line.get("serial_id"),
+                "ser": line.get("serial_number"),
+                "from_loc": from_loc,
+                "to_loc": to_loc,
+                "pid": line.get("party_id"),
+                "prole": line.get("party_role"),
+                "notes": line.get("notes"),
+            })
+        except Exception as e:
+            await db.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail=f"فشل إنشاء سطر {i+1}: {str(e)[:300]}"
             )
-        """), {
-            "id": line_id, "tid": tid, "tx_id": tx_id, "ord": i + 1,
-            "iid": line["item_id"], "uom": line.get("uom_id"),
-            "qty": Decimal(str(line["qty"])),
-            "uc": Decimal(str(line.get("unit_cost", 0))),
-            "tc": Decimal(str(line["qty"])) * Decimal(str(line.get("unit_cost", 0))),
-            "lot_id": line.get("lot_id"),
-            "lot": line.get("lot_number"),
-            "exp": line.get("expiry_date"),
-            "ser_id": line.get("serial_id"),
-            "ser": line.get("serial_number"),
-            "loc": line.get("location_id"),
-            "pid": line.get("party_id"),
-            "prole": line.get("party_role"),
-            "notes": line.get("notes"),
-        })
+
+    # If item_code/item_name missing, fill them from inv_items
+    await db.execute(text("""
+        UPDATE inv_transaction_lines l
+        SET item_code = COALESCE(NULLIF(l.item_code, ''), i.item_code),
+            item_name = COALESCE(NULLIF(l.item_name, ''), i.item_name)
+        FROM inv_items i
+        WHERE l.tx_id = :tx_id AND l.item_id = i.id
+    """), {"tx_id": tx_id})
 
     await db.commit()
     return created(
         data={"id": tx_id, "serial": serial},
         message=f"تم إنشاء {serial} ✅ — يحتاج ترحيل",
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# UPDATE TRANSACTION V2 — تعديل المسودات فقط (added 2026-05-03)
+# ═══════════════════════════════════════════════════════════════════════════
+@router.put("/transactions-v2/{tx_id}")
+async def update_transaction_v2(
+    tx_id: uuid.UUID,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """تعديل حركة مسودة فقط (لا يمكن تعديل المُرحَّل)"""
+    tid = str(user.tenant_id)
+
+    # Check status
+    r = await db.execute(text("""
+        SELECT status FROM inv_transactions
+        WHERE id=:id AND tenant_id=:tid
+    """), {"id": str(tx_id), "tid": tid})
+    row = r.fetchone()
+    if not row:
+        raise HTTPException(404, f"الحركة غير موجودة")
+    if row[0] != "draft":
+        raise HTTPException(400, f"لا يمكن تعديل حركة بحالة '{row[0]}' — فقط المسودات قابلة للتعديل")
+
+    try:
+        # Update header
+        update_fields = []
+        params = {"id": str(tx_id), "tid": tid}
+        allowed = [
+            "tx_date", "from_warehouse_id", "to_warehouse_id",
+            "party_id", "party_role", "branch_code", "cost_center_code",
+            "project_code", "reason_code", "reference", "description", "notes",
+        ]
+        for f in allowed:
+            if f in data:
+                update_fields.append(f"{f} = :{f}")
+                params[f] = data.get(f)
+
+        if update_fields:
+            sql = f"UPDATE inv_transactions SET {', '.join(update_fields)}, updated_at = NOW() WHERE id = :id AND tenant_id = :tid"
+            await db.execute(text(sql), params)
+
+        # Replace lines if provided
+        lines = data.get("lines")
+        if lines is not None:
+            # Delete old lines
+            await db.execute(text("""
+                DELETE FROM inv_transaction_lines WHERE tx_id=:id
+            """), {"id": str(tx_id)})
+
+            tx_type = data.get("tx_type", "GRN")
+            for i, line in enumerate(lines):
+                from_loc = line.get("from_location_id") or (
+                    line.get("location_id") if tx_type in ("GIN", "GDN", "IT", "IJ", "SCRAP", "RETURN_IN") else None
+                )
+                to_loc = line.get("to_location_id") or (
+                    line.get("location_id") if tx_type in ("GRN", "RETURN_OUT") else None
+                )
+                await db.execute(text("""
+                    INSERT INTO inv_transaction_lines (
+                        id, tenant_id, tx_id,
+                        item_id, item_code, item_name,
+                        uom_id, uom_name,
+                        qty, unit_cost, total_cost,
+                        lot_id, lot_number, expiry_date,
+                        serial_id, serial_number,
+                        from_location_id, to_location_id,
+                        party_id, party_role,
+                        notes
+                    ) VALUES (
+                        gen_random_uuid(), :tid, :tx_id,
+                        :iid, :icode, :iname,
+                        :uom, :uname,
+                        :qty, :uc, :tc,
+                        :lot_id, :lot, :exp,
+                        :ser_id, :ser,
+                        :from_loc, :to_loc,
+                        :pid, :prole,
+                        :notes
+                    )
+                """), {
+                    "tid": tid, "tx_id": str(tx_id),
+                    "iid": line["item_id"],
+                    "icode": line.get("item_code", ""),
+                    "iname": line.get("item_name", ""),
+                    "uom": line.get("uom_id"),
+                    "uname": line.get("uom_name"),
+                    "qty": Decimal(str(line["qty"])),
+                    "uc": Decimal(str(line.get("unit_cost", 0))),
+                    "tc": Decimal(str(line["qty"])) * Decimal(str(line.get("unit_cost", 0))),
+                    "lot_id": line.get("lot_id"),
+                    "lot": line.get("lot_number"),
+                    "exp": line.get("expiry_date"),
+                    "ser_id": line.get("serial_id"),
+                    "ser": line.get("serial_number"),
+                    "from_loc": from_loc,
+                    "to_loc": to_loc,
+                    "pid": line.get("party_id"),
+                    "prole": line.get("party_role"),
+                    "notes": line.get("notes"),
+                })
+
+            # Recalculate totals
+            await db.execute(text("""
+                UPDATE inv_transactions
+                SET total_qty = COALESCE((SELECT SUM(qty) FROM inv_transaction_lines WHERE tx_id=:id), 0),
+                    total_cost = COALESCE((SELECT SUM(total_cost) FROM inv_transaction_lines WHERE tx_id=:id), 0)
+                WHERE id=:id
+            """), {"id": str(tx_id)})
+
+            # Fill item_code/item_name from inv_items
+            await db.execute(text("""
+                UPDATE inv_transaction_lines l
+                SET item_code = COALESCE(NULLIF(l.item_code, ''), i.item_code),
+                    item_name = COALESCE(NULLIF(l.item_name, ''), i.item_name)
+                FROM inv_items i
+                WHERE l.tx_id = :id AND l.item_id = i.id
+            """), {"id": str(tx_id)})
+
+        # If auto_post requested
+        if data.get("auto_post"):
+            await db.commit()
+            return await post_transaction_v2(tx_id, db, user)
+
+        await db.commit()
+
+        # Get serial for response
+        r2 = await db.execute(text("""
+            SELECT serial FROM inv_transactions WHERE id=:id
+        """), {"id": str(tx_id)})
+        serial_row = r2.fetchone()
+        serial = serial_row[0] if serial_row else ""
+
+        return ok(
+            data={"id": str(tx_id), "serial": serial},
+            message=f"تم تحديث {serial} ✅",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail=f"فشل التحديث: {str(e)[:300]}"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -380,8 +561,8 @@ async def post_transaction_v2(
                COALESCE(i.valuation_method, i.cost_method, 'avg') AS valuation_method
         FROM inv_transaction_lines l
         LEFT JOIN inv_items i ON i.id = l.item_id
-        WHERE l.transaction_id=:tx_id
-        ORDER BY l.line_order
+        WHERE l.tx_id=:tx_id
+        ORDER BY l.created_at
     """), {"tx_id": str(tx_id)})
     lines = [dict(r._mapping) for r in rl.fetchall()]
 
@@ -736,7 +917,7 @@ async def reverse_transaction_v2(
         raise HTTPException(400, "يمكن عكس المستندات المرحّلة فقط")
 
     rl = await db.execute(text("""
-        SELECT * FROM inv_transaction_lines WHERE transaction_id=:tid_id ORDER BY line_order
+        SELECT * FROM inv_transaction_lines WHERE tx_id=:tid_id ORDER BY created_at
     """), {"tid_id": str(tx_id)})
     lines = [dict(r._mapping) for r in rl.fetchall()]
 
@@ -803,34 +984,51 @@ async def reverse_transaction_v2(
     })
 
     for i, line in enumerate(lines):
+        # Schema-aware: convert old line_order/transaction_id/location_id to new column names
+        line_dict = dict(line) if hasattr(line, 'keys') else line
+        line_no = line_dict.get('line_order', i + 1) if isinstance(line_dict, dict) else (i + 1)
         await db.execute(text("""
             INSERT INTO inv_transaction_lines (
-                id, tenant_id, transaction_id, line_order,
-                item_id, uom_id, qty, unit_cost,
+                id, tenant_id, tx_id,
+                item_id, item_code, item_name,
+                uom_id, uom_name,
+                qty, unit_cost, total_cost,
                 lot_id, lot_number, expiry_date,
                 serial_id, serial_number,
+                from_location_id, to_location_id,
                 party_id, party_role,
                 notes
             ) VALUES (
-                gen_random_uuid(), :tid, :tx_id, :ord,
-                :iid, :uom, :qty, :uc,
+                gen_random_uuid(), :tid, :tx_id,
+                :iid, :icode, :iname,
+                :uom, :uname,
+                :qty, :uc, :tc,
                 :lot_id, :lot, :exp,
                 :ser_id, :ser,
+                :from_loc, :to_loc,
                 :pid, :prole,
                 :notes
             )
         """), {
-            "tid": tid, "tx_id": rev_id, "ord": i + 1,
-            "iid": line["item_id"], "uom": line.get("uom_id"),
-            "qty": line["qty"], "uc": line.get("unit_cost", 0),
+            "tid": tid, "tx_id": rev_id,
+            "iid": line["item_id"],
+            "icode": line.get("item_code", "") if isinstance(line, dict) else "",
+            "iname": line.get("item_name", "") if isinstance(line, dict) else "",
+            "uom": line.get("uom_id"),
+            "uname": line.get("uom_name") if isinstance(line, dict) else None,
+            "qty": line["qty"],
+            "uc": line.get("unit_cost", 0),
+            "tc": Decimal(str(line["qty"])) * Decimal(str(line.get("unit_cost", 0))),
             "lot_id": line.get("lot_id"),
             "lot": line.get("lot_number"),
             "exp": line.get("expiry_date"),
             "ser_id": line.get("serial_id"),
             "ser": line.get("serial_number"),
+            "from_loc": line.get("to_location_id"),  # Reversed!
+            "to_loc": line.get("from_location_id"),  # Reversed!
             "pid": line.get("party_id"),
             "prole": line.get("party_role"),
-            "notes": f"عكس سطر {line['line_order']}",
+            "notes": f"عكس سطر {line_no}",
         })
 
     await db.commit()
