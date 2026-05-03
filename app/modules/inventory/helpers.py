@@ -873,8 +873,56 @@ async def post_je_v5(
             pass
 
         result = await engine.post(PostingRequest(**pr_kwargs))
+        je_id = str(result.je_id)
+
+        # ⚠️ Workaround: PostingEngine may not support party_id/party_role in lines
+        # Manually update je_lines to set party where it should be
+        # (according to Smart Party Assignment logic above)
+        if party_id and (party_on_debit or party_on_credit):
+            # Get party name for snapshot
+            party_name_result = await db.execute(
+                text("SELECT name FROM parties WHERE id=:pid LIMIT 1"),
+                {"pid": str(party_id)},
+            )
+            party_row = party_name_result.fetchone()
+            party_name = party_row[0] if party_row else None
+
+            # Update appropriate side
+            if party_on_debit:
+                await db.execute(
+                    text("""
+                        UPDATE je_lines
+                        SET party_id = :pid,
+                            party_role = :prole,
+                            party_name = :pname
+                        WHERE journal_entry_id = :jid AND debit > 0
+                    """),
+                    {
+                        "pid": str(party_id),
+                        "prole": party_role or "vendor",
+                        "pname": party_name,
+                        "jid": je_id,
+                    },
+                )
+            if party_on_credit:
+                await db.execute(
+                    text("""
+                        UPDATE je_lines
+                        SET party_id = :pid,
+                            party_role = :prole,
+                            party_name = :pname
+                        WHERE journal_entry_id = :jid AND credit > 0
+                    """),
+                    {
+                        "pid": str(party_id),
+                        "prole": party_role or "vendor",
+                        "pname": party_name,
+                        "jid": je_id,
+                    },
+                )
+
         return {
-            "je_id": str(result.je_id),
+            "je_id": je_id,
             "je_serial": result.je_serial,
         }
     except Exception as e:
