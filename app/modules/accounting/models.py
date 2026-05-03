@@ -187,6 +187,11 @@ class JournalEntry(ERPModel, Base):
 # ══════════════════════════════════════════════════════════
 # 3. Journal Entry Line
 # ══════════════════════════════════════════════════════════
+# ملاحظة معماريّة (2026-05-04):
+#   هذا الـ ORM model مُحاذٍ تماماً مع جدول je_lines في DB.
+#   كل عمود في DB له mapped_column هنا. إذا أضفت عموداً جديداً
+#   لـ je_lines، أضِفه هنا أيضاً + حدّث PostingLine في engine.py.
+# ══════════════════════════════════════════════════════════
 class JournalEntryLine(ERPModel, Base):
     __tablename__ = "je_lines"
 
@@ -194,32 +199,46 @@ class JournalEntryLine(ERPModel, Base):
         UUID(as_uuid=True), ForeignKey("journal_entries.id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
-    line_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    account_code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
-    account_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    description: Mapped[str] = mapped_column(String(500), nullable=False)
-    debit: Mapped[Decimal] = mapped_column(Numeric(18, 3), default=0, nullable=False)
-    credit: Mapped[Decimal] = mapped_column(Numeric(18, 3), default=0, nullable=False)
+    # ── ترتيب السطر ──
+    # line_number: NOT NULL في DB — قيمة إلزاميّة (1, 2, 3, ...)
+    # line_order : للتوافق مع الكود القديم — تُكتب نفس قيمة line_number
+    line_number: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    line_order:  Mapped[Optional[int]] = mapped_column(Integer, default=0, nullable=True)
 
-    # الأبعاد
+    account_code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    account_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    description:  Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    reference:    Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    debit:  Mapped[Decimal] = mapped_column(Numeric(18, 3), default=0, nullable=True)
+    credit: Mapped[Decimal] = mapped_column(Numeric(18, 3), default=0, nullable=True)
+
+    # ── الأبعاد (Dimensions) ──
     branch_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     branch_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    cost_center: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    # cost_center و cost_center_code: كلاهما موجود في DB (legacy + new)
+    # نملؤهما بنفس القيمة للتوافق
+    cost_center:      Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    cost_center_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     cost_center_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     project_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     project_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     expense_classification_code: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
     expense_classification_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
-    # أبعاد اختيارية
-    department: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    # ── أبعاد اختيارية / مستقبليّة ──
+    department:    Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     profit_center: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    region: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    future_1: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    future_2: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    region:        Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    future_1:      Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    future_2:      Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
-    # ── ضريبة القيمة المضافة ──
-    tax_type_code: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # ── سبب الحركة (Reason / Adjustment cause) ──
+    # يُستخدم في AP/AR adjustments, returns, write-offs, reporting filters
+    reason_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    # ── ضريبة القيمة المضافة (VAT) ──
+    tax_type_code: Mapped[Optional[str]]     = mapped_column(String(20), nullable=True)
+    tax_rate:      Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2),  nullable=True)
     vat_amount:    Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 3), nullable=True)
     net_amount:    Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 3), nullable=True)
 
@@ -229,9 +248,18 @@ class JournalEntryLine(ERPModel, Base):
     # amount_foreign : المبلغ بالعملة الأجنبية قبل التحويل
     # debit/credit   : تبقى دائماً بالعملة الأساسية (amount_foreign × exchange_rate)
     currency_code:   Mapped[Optional[str]]     = mapped_column(String(10),     nullable=True,  default="SAR")
-    exchange_rate:   Mapped[Optional[Decimal]]  = mapped_column(Numeric(18, 6), nullable=True,  default=Decimal("1.0"))
-    amount_foreign:  Mapped[Optional[Decimal]]  = mapped_column(Numeric(18, 3), nullable=True,  default=Decimal("0"))
+    exchange_rate:   Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True,  default=Decimal("1.0"))
+    amount_foreign:  Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 3), nullable=True,  default=Decimal("0"))
 
+    # ── المتعامل / الأستاذ المساعد (Subsidiary Ledger) ──
+    # party_id   : UUID للمتعامل في جدول parties
+    # party_role : دور المتعامل ('vendor', 'customer', 'employee_loan', 'fund_keeper', ...)
+    # party_name : اسم المتعامل (denormalized snapshot — للتقارير بدون JOIN)
+    party_id:   Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    party_role: Mapped[Optional[str]]       = mapped_column(String(50), nullable=True)
+    party_name: Mapped[Optional[str]]       = mapped_column(Text, nullable=True)
+
+    # ── العلاقات ──
     journal_entry: Mapped["JournalEntry"] = relationship("JournalEntry", back_populates="lines")
 
     __table_args__ = (

@@ -3,6 +3,18 @@ app/services/posting/engine.py
 ══════════════════════════════════════════════════════════
 PostingEngine — The most critical service in the system.
 Every journal entry in the entire ERP passes through here.
+
+Refactored: 2026-05-04
+What changed:
+  1. PostingLine dataclass now exposes ALL je_lines columns:
+     - Party (party_id/party_role/party_name)
+     - VAT (tax_type_code/tax_rate/vat_amount/net_amount)
+     - Names (branch_name/cost_center_name/project_name/...)
+     - reason_code
+  2. post() writes every field directly via ORM — no more
+     raw SQL UPDATE workaround for party_id.
+  3. reverse() now copies ALL fields (was partial).
+  4. Bug fix: undefined `entry_date_str` in error message.
 ══════════════════════════════════════════════════════════
 """
 from __future__ import annotations
@@ -48,23 +60,62 @@ _BALANCE_TOLERANCE = Decimal("0.005")
 # ══════════════════════════════════════════════════════════
 @dataclass
 class PostingLine:
+    """
+    سطر القيد — يحوي كل الحقول التي يدعمها جدول je_lines.
+
+    استخدام:
+      - الحقول الأساسيّة (account_code, description, debit, credit) إلزاميّة.
+      - باقي الحقول اختياريّة — مرّر فقط ما يلزم لحالتك.
+      - party_role يُحدَّد تلقائياً إلى 'other' لو party_id موجود وparty_role فارغ.
+
+    ملاحظة: PostingLine يجب أن يبقى متطابقاً مع JournalEntryLine ORM
+    وجدول je_lines في DB. أي حقل جديد في DB يجب إضافته في الثلاثة.
+    """
+    # ── Core (إلزامي) ──
     account_code: str
-    description: str
-    debit: Decimal = Decimal("0")
+    description:  str
+    debit:  Decimal = Decimal("0")
     credit: Decimal = Decimal("0")
+
+    # ── Reference (اختياري) ──
+    reference: Optional[str] = None
+
+    # ── Dimensions (codes + denormalized names) ──
     branch_code: Optional[str] = None
-    cost_center: Optional[str] = None
+    branch_name: Optional[str] = None
+    cost_center: Optional[str] = None              # legacy column
+    cost_center_code: Optional[str] = None         # new column (سيُملأ من cost_center تلقائياً لو فارغ)
+    cost_center_name: Optional[str] = None
     project_code: Optional[str] = None
+    project_name: Optional[str] = None
     expense_classification_code: Optional[str] = None
-    # ── حقول العملة الأجنبية ──
+    expense_classification_name: Optional[str] = None
+
+    # ── Optional / future dimensions ──
+    department:    Optional[str] = None
+    profit_center: Optional[str] = None
+    region:        Optional[str] = None
+    future_1:      Optional[str] = None
+    future_2:      Optional[str] = None
+
+    # ── Reason code (AP/AR adjustments, returns, write-offs) ──
+    reason_code: Optional[str] = None
+
+    # ── Currency ──
     currency_code:  Optional[str]     = "SAR"
     exchange_rate:  Optional[Decimal] = Decimal("1.0")
     amount_foreign: Optional[Decimal] = Decimal("0")
-    # ── حقول المتعامل (Party / Subledger) ──
-    # party_id   → UUID للمتعامل (موظف، أمين صندوق، عميل، مورد...)
-    # party_role → دور المتعامل في هذا السطر
-    party_id:   Optional[str] = None   # UUID as string
-    party_role: Optional[str] = None   # 'employee_loan' | 'petty_cash_keeper' | 'customer' | 'vendor' | 'fund_keeper'
+
+    # ── VAT ──
+    tax_type_code: Optional[str]     = None
+    tax_rate:      Optional[Decimal] = None
+    vat_amount:    Optional[Decimal] = None
+    net_amount:    Optional[Decimal] = None
+
+    # ── Party / Subsidiary Ledger ──
+    party_id:   Optional[str] = None  # UUID as string
+    party_role: Optional[str] = None  # 'vendor' | 'customer' | 'employee_loan' | 'fund_keeper' | 'petty_cash_keeper' | 'other'
+    party_name: Optional[str] = None  # denormalized snapshot
 
 
 @dataclass
@@ -117,6 +168,30 @@ class PostingResult:
 
 
 # ══════════════════════════════════════════════════════════
+# Helpers
+# ══════════════════════════════════════════════════════════
+def _coerce_uuid(v) -> Optional[uuid.UUID]:
+    """تحويل UUID/str إلى UUID. None إن كانت القيمة فارغة."""
+    if not v:
+        return None
+    if isinstance(v, uuid.UUID):
+        return v
+    try:
+        return uuid.UUID(str(v))
+    except (ValueError, TypeError):
+        return None
+
+
+def _resolve_cost_center(line: PostingLine) -> tuple[Optional[str], Optional[str]]:
+    """
+    يُرجع (cost_center, cost_center_code) — كلاهما بنفس القيمة.
+    DB يحوي عمودين قديم/جديد — نملؤهما معاً للتوافق.
+    """
+    cc = line.cost_center or line.cost_center_code
+    return cc, cc
+
+
+# ══════════════════════════════════════════════════════════
 # PostingEngine
 # ══════════════════════════════════════════════════════════
 class PostingEngine:
@@ -144,7 +219,7 @@ class PostingEngine:
         لا يتجاهل الأخطاء — أي فشل يوقف الترحيل.
         """
         from sqlalchemy import text as _txt
-        from datetime import date as _date, datetime as _datetime
+        from datetime import date as _date
         # تحويل التاريخ إلى date object — asyncpg لا يقبل string
         if isinstance(entry_date, str):
             entry_date_obj = _date.fromisoformat(entry_date[:10])
@@ -173,8 +248,9 @@ class PostingEngine:
         row = result.fetchone()
 
         if not row:
+            # ── BUG FIX: كان يستخدم متغير غير معرّف entry_date_str ──
             raise ValidationError(
-                f"لا توجد سنة/فترة مالية للتاريخ {entry_date_str}. "
+                f"لا توجد سنة/فترة مالية للتاريخ {entry_date_obj}. "
                 "أنشئ السنة المالية من صفحة الفترات المالية أولاً."
             )
 
@@ -229,7 +305,9 @@ class PostingEngine:
             )
         return None
 
-    # ── Main entry point ──────────────────────────────────
+    # ══════════════════════════════════════════════════════
+    # Main entry point — post()
+    # ══════════════════════════════════════════════════════
     async def post(self, request: PostingRequest) -> PostingResult:
         logger.info(
             "posting_start",
@@ -258,10 +336,7 @@ class PostingEngine:
             # فقط إذا فشل الاتصال بقاعدة البيانات — نكمل في وضع demo
             logger.warning("posting_coa_validation_skipped")
 
-        # ── 4. Period check (NEW SYSTEM) ──────────────────
-        # هذا هو التحقق الرسمي من الفترة المالية
-        # يستخدم accounting_periods + fiscal_years
-        # لا يُتجاهل أي خطأ — أي فشل يوقف الترحيل
+        # ── 4. Period check ───────────────────────────────
         await self._check_accounting_period(request.entry_date)
 
         # ── 5. Generate serial ────────────────────────────
@@ -275,6 +350,7 @@ class PostingEngine:
         # ── 7. Atomic transaction ─────────────────────────
         async with atomic_transaction(self.db, label=f"post_{serial}"):
 
+            # ── 7a. Create header ────────────────────────
             je = JournalEntry(
                 tenant_id=self.tenant_id,
                 serial=serial,
@@ -303,67 +379,70 @@ class PostingEngine:
             self.db.add(je)
             await self.db.flush()
 
+            # ── 7b. Create lines (ORM full coverage — NO raw UPDATE) ──
             for idx, line in enumerate(request.lines):
+                # Resolve account_name from account_map
+                acc_obj = account_map.get(line.account_code)
+                acc_name = acc_obj.name_ar if acc_obj else line.account_code
+
+                # Resolve cost_center / cost_center_code (DB يحوي كليهما)
+                cc, cc_code = _resolve_cost_center(line)
+
+                # Resolve party_role default إذا party_id موجود
+                p_role = line.party_role
+                if line.party_id and not p_role:
+                    p_role = "other"
+
                 je_line = JournalEntryLine(
                     tenant_id=self.tenant_id,
                     journal_entry_id=je.id,
-                    line_order=idx + 1,
+                    line_number=idx + 1,            # NOT NULL في DB
+                    line_order=idx + 1,             # للتوافق مع الكود القديم
                     account_code=line.account_code,
-                    account_name=account_map.get(
-                        line.account_code,
-                        type("_", (), {"name_ar": line.account_code})()
-                    ).name_ar if account_map else line.account_code,
+                    account_name=acc_name,
                     description=line.description,
+                    reference=line.reference,
                     debit=line.debit,
                     credit=line.credit,
+                    # Dimensions
                     branch_code=line.branch_code,
-                    cost_center=line.cost_center,
+                    branch_name=line.branch_name,
+                    cost_center=cc,
+                    cost_center_code=cc_code,
+                    cost_center_name=line.cost_center_name,
                     project_code=line.project_code,
-                    expense_classification_code=getattr(line, "expense_classification_code", None),
-                    currency_code=getattr(line, "currency_code",  None) or "SAR",
-                    exchange_rate=getattr(line, "exchange_rate",  None) or Decimal("1.0"),
-                    amount_foreign=getattr(line, "amount_foreign", None) or (line.debit + line.credit),
+                    project_name=line.project_name,
+                    expense_classification_code=line.expense_classification_code,
+                    expense_classification_name=line.expense_classification_name,
+                    # Optional dimensions
+                    department=line.department,
+                    profit_center=line.profit_center,
+                    region=line.region,
+                    future_1=line.future_1,
+                    future_2=line.future_2,
+                    # Reason
+                    reason_code=line.reason_code,
+                    # Currency
+                    currency_code=line.currency_code or "SAR",
+                    exchange_rate=line.exchange_rate or Decimal("1.0"),
+                    amount_foreign=line.amount_foreign or (line.debit + line.credit),
+                    # VAT
+                    tax_type_code=line.tax_type_code,
+                    tax_rate=line.tax_rate,
+                    vat_amount=line.vat_amount,
+                    net_amount=line.net_amount,
+                    # Party (Subsidiary Ledger)
+                    party_id=_coerce_uuid(line.party_id),
+                    party_role=p_role,
+                    party_name=line.party_name,
                     created_by=request.created_by_email,
                 )
                 self.db.add(je_line)
-                await self.db.flush()  # نحتاج flush هنا للحصول على je_line.id
 
-                # ── Party (المتعامل) — Raw SQL ──
-                _party_id   = getattr(line, "party_id",   None)
-                _party_role = getattr(line, "party_role", None)
-                _party_name = getattr(line, "party_name", None)
-                if _party_id:
-                    try:
-                        from sqlalchemy import text as _txt
-                        _pid_str = str(_party_id)
-                        try:
-                            # محاولة مع party_name
-                            await self.db.execute(_txt(f"""
-                                UPDATE je_lines
-                                SET party_id   = '{_pid_str}'::uuid,
-                                    party_role = :prole,
-                                    party_name = :pname
-                                WHERE id = :line_id
-                            """), {
-                                "prole":   _party_role or "other",
-                                "pname":   _party_name or None,
-                                "line_id": str(je_line.id),
-                            })
-                        except Exception:
-                            # fallback بدون party_name إذا لم يكن العمود موجوداً
-                            await self.db.execute(_txt(f"""
-                                UPDATE je_lines
-                                SET party_id   = '{_pid_str}'::uuid,
-                                    party_role = :prole
-                                WHERE id = :line_id
-                            """), {
-                                "prole":   _party_role or "other",
-                                "line_id": str(je_line.id),
-                            })
-                    except Exception as _pe:
-                        logger.warning("party_update_skipped",
-                                       reason=str(_pe), line_id=str(je_line.id))
+            # نُفلش الكل دفعة واحدة (أكفأ من flush per-line)
+            await self.db.flush()
 
+            # ── 7c. Update account balances ──────────────
             for line in request.lines:
                 acc = account_map.get(line.account_code)
                 nature = acc.account_nature if acc else "debit"
@@ -376,6 +455,7 @@ class PostingEngine:
                     account_nature=nature,
                 )
 
+            # ── 7d. Audit log ────────────────────────────
             await self._audit_repo.log(
                 action="JE_POSTED",
                 user_id=request.created_by_id,
@@ -416,7 +496,9 @@ class PostingEngine:
                     total_dr=float(total_dr), total_cr=float(total_cr))
         return result
 
-    # ── Reversal ──────────────────────────────────────────
+    # ══════════════════════════════════════════════════════
+    # Reversal — full field copy
+    # ══════════════════════════════════════════════════════
     async def reverse(
         self,
         je_id: uuid.UUID,
@@ -426,6 +508,11 @@ class PostingEngine:
         reversed_by_email: Optional[str],
         user_role: str = "viewer",
     ) -> PostingResult:
+        """
+        عكس قيد. القيد العكسي يحتفظ بكل الحقول من الأصلي
+        (party, dimensions, currency, VAT, reason) لتتبع الأستاذ
+        المساعد بشكل صحيح حتى بعد العكس.
+        """
         original = await self._je_repo.get_with_lines(je_id)
         if original is None:
             raise NotFoundError("القيد", je_id)
@@ -436,27 +523,49 @@ class PostingEngine:
             from app.core.exceptions import ReversalError
             raise ReversalError(f"القيد {original.serial} معكوس مسبقاً")
 
-        reversed_lines = [
-            PostingLine(
+        # ── نسخ شامل لكل الحقول ──
+        reversed_lines: List[PostingLine] = []
+        for line in original.lines:
+            reversed_lines.append(PostingLine(
+                # Core (مع تبديل debit/credit)
                 account_code=line.account_code,
-                description=f"عكس: {line.description}",
+                description=f"عكس: {line.description or ''}".strip(),
                 debit=line.credit,
                 credit=line.debit,
+                reference=line.reference,
+                # Dimensions
                 branch_code=line.branch_code,
+                branch_name=line.branch_name,
                 cost_center=line.cost_center,
-                project_code=getattr(line, "project_code", None),
-                # ── نسخ حقول العملة من القيد الأصلي ──
-                currency_code=getattr(line, "currency_code",  None) or "SAR",
-                exchange_rate=getattr(line, "exchange_rate",  None) or Decimal("1.0"),
-                amount_foreign=getattr(line, "amount_foreign", None) or Decimal("0"),
-                # ── نسخ المتعامل / Party من القيد الأصلي ──
-                # هذا حرج محاسبياً: لو القيد الأصلي "سلفة لأحمد"، القيد العكسي
-                # (تسوية السلفة) يجب أن يبقى مرتبطاً بأحمد لتتبع الأستاذ المساعد
-                party_id=str(getattr(line, "party_id", None)) if getattr(line, "party_id", None) else None,
-                party_role=getattr(line, "party_role", None),
-            )
-            for line in original.lines
-        ]
+                cost_center_code=getattr(line, "cost_center_code", None),
+                cost_center_name=line.cost_center_name,
+                project_code=line.project_code,
+                project_name=line.project_name,
+                expense_classification_code=line.expense_classification_code,
+                expense_classification_name=line.expense_classification_name,
+                # Optional dimensions
+                department=line.department,
+                profit_center=line.profit_center,
+                region=line.region,
+                future_1=line.future_1,
+                future_2=line.future_2,
+                # Reason
+                reason_code=getattr(line, "reason_code", None),
+                # Currency
+                currency_code=line.currency_code or "SAR",
+                exchange_rate=line.exchange_rate or Decimal("1.0"),
+                amount_foreign=line.amount_foreign or Decimal("0"),
+                # VAT
+                tax_type_code=line.tax_type_code,
+                tax_rate=getattr(line, "tax_rate", None),
+                vat_amount=line.vat_amount,
+                net_amount=line.net_amount,
+                # Party (حرج محاسبياً: لو القيد الأصلي "سلفة لأحمد"، القيد العكسي
+                # يجب أن يبقى مرتبطاً بأحمد لتتبع الأستاذ المساعد)
+                party_id=str(line.party_id) if line.party_id else None,
+                party_role=line.party_role,
+                party_name=line.party_name,
+            ))
 
         rev_request = PostingRequest(
             tenant_id=self.tenant_id,
