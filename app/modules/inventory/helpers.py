@@ -376,11 +376,10 @@ async def adjust_balance(
     item_name = item_row[1] if item_row else "Unknown Item"
 
     # Fetch warehouse info (needed for NOT NULL constraints)
+    # ⚠️ inv_warehouses uses warehouse_code/warehouse_name (no 'code'/'name' columns)
     wh_info = await db.execute(
         text("""
-            SELECT
-                COALESCE(warehouse_code, code, '') AS wh_code,
-                COALESCE(warehouse_name, name, '') AS wh_name
+            SELECT warehouse_code, warehouse_name
             FROM inv_warehouses WHERE id=:wid LIMIT 1
         """),
         {"wid": str(warehouse_id)},
