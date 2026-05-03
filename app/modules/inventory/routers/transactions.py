@@ -523,6 +523,220 @@ async def cancel_transaction_v2(
 # ═══════════════════════════════════════════════════════════════════════════
 # POST TRANSACTION V2 — العمل الحقيقي
 # ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# JE PREVIEW — معاينة التوجيه المحاسبي للحركة (قبل الترحيل)
+# Added: 2026-05-03
+# ═══════════════════════════════════════════════════════════════════════════
+@router.get("/transactions-v2/{tx_id}/je-preview")
+async def get_je_preview(
+    tx_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """
+    يحسب التوجيه المحاسبي المتوقّع للحركة (بدون ترحيل/commit).
+    يستخدم نفس logic الـ /post لضمان الدقّة.
+    
+    يُرجع:
+    {
+        "lines": [
+            {
+                "line_no": 1,
+                "account_code": "110201",
+                "account_name": "المخزون",
+                "account_type": "asset",
+                "debit": 1000.00,
+                "credit": 0,
+                "currency_code": "SAR",
+                "description": "...",
+                "party_id": "...", "party_name": "...", "party_role": "vendor",
+                "branch_code": "...", "cost_center_code": "...", "project_code": "...",
+            },
+            ...
+        ],
+        "total_debit": 1000.00,
+        "total_credit": 1000.00,
+        "is_balanced": true,
+        "tx_type": "GRN",
+        "tx_serial": "GRN-2026-0000001",
+        "warnings": [],  // مثلاً: حساب غير مُعرَّف
+    }
+    """
+    tid = str(user.tenant_id)
+    warnings = []
+
+    try:
+        # Get tx header
+        rt = await db.execute(text("""
+            SELECT t.*, p.name AS party_name_resolved
+            FROM inv_transactions t
+            LEFT JOIN parties p ON p.id = t.party_id
+            WHERE t.id=:id AND t.tenant_id=:tid
+        """), {"id": str(tx_id), "tid": tid})
+        row = rt.fetchone()
+        if not row:
+            raise HTTPException(404, "المستند غير موجود")
+        tx = dict(row._mapping)
+
+        tx_type = tx["tx_type"]
+
+        # Get lines
+        rl = await db.execute(text("""
+            SELECT l.*, i.item_code AS item_code_master, i.item_name AS item_name_master
+            FROM inv_transaction_lines l
+            LEFT JOIN inv_items i ON i.id = l.item_id
+            WHERE l.tx_id=:tx_id
+            ORDER BY l.created_at
+        """), {"tx_id": str(tx_id)})
+        lines_data = [dict(r._mapping) for r in rl.fetchall()]
+
+        if not lines_data:
+            return ok(data={
+                "lines": [],
+                "total_debit": 0,
+                "total_credit": 0,
+                "is_balanced": True,
+                "tx_type": tx_type,
+                "tx_serial": tx.get("serial"),
+                "warnings": ["لا توجد أسطر في هذه الحركة"],
+            })
+
+        # Resolve accounts (same logic as /post)
+        try:
+            debit_acc, credit_acc, _desc = await get_tx_accounts(db, tx_type, tid)
+        except Exception as e:
+            warnings.append(f"تعذّر جلب الحسابات: {str(e)[:100]}")
+            debit_acc, credit_acc = None, None
+
+        # Resolve reason
+        reason_acc, reason_name, reason_is_increase = None, None, False
+        if tx.get("reason_code"):
+            try:
+                reason_acc, reason_name, reason_is_increase = await resolve_reason_code(
+                    db, tx["reason_code"], tid
+                )
+            except Exception as e:
+                warnings.append(f"تعذّر جلب رمز السبب: {str(e)[:100]}")
+
+        # Apply reason override (IJ/SCRAP — same logic as /post)
+        if tx_type == "IJ" and reason_acc:
+            if reason_is_increase:
+                try:
+                    debit_acc, credit_acc, _ = await get_tx_accounts(db, "IJ+", tid)
+                except Exception:
+                    pass
+                credit_acc = reason_acc
+            else:
+                debit_acc = reason_acc
+        if tx_type == "SCRAP" and reason_acc:
+            debit_acc = reason_acc
+
+        # Calculate total cost
+        total_cost = sum(
+            Decimal(str(l["qty"])) * Decimal(str(l.get("unit_cost") or 0))
+            for l in lines_data
+        )
+
+        # Resolve account names from coa_accounts
+        async def get_account_info(code):
+            if not code:
+                return None
+            r = await db.execute(text("""
+                SELECT account_code, account_name, account_type
+                FROM coa_accounts
+                WHERE account_code=:code AND tenant_id=:tid
+                LIMIT 1
+            """), {"code": code, "tid": tid})
+            ar = r.fetchone()
+            if ar:
+                return dict(ar._mapping)
+            return {"account_code": code, "account_name": "حساب غير معروف", "account_type": ""}
+
+        debit_info = await get_account_info(debit_acc) if debit_acc else None
+        credit_info = await get_account_info(credit_acc) if credit_acc else None
+
+        if not debit_info:
+            warnings.append(f"لم يتم تعريف حساب المدين لـ {tx_type}. أعد إعدادات الحسابات.")
+        if not credit_info:
+            warnings.append(f"لم يتم تعريف حساب الدائن لـ {tx_type}. أعد إعدادات الحسابات.")
+
+        # Build JE preview lines (simple 2-line preview at the header level)
+        # For more detail, we'd loop through each tx line, but most ERPs aggregate
+        je_lines = []
+        line_no = 1
+
+        # Determine description
+        desc = tx.get("description") or f"{tx_type} - {tx.get('serial', '')}"
+
+        # Common dimensions
+        common_dims = {
+            "branch_code": tx.get("branch_code"),
+            "cost_center_code": tx.get("cost_center_code"),
+            "project_code": tx.get("project_code"),
+        }
+
+        # DEBIT line
+        if debit_info:
+            je_lines.append({
+                "line_no": line_no,
+                "account_code": debit_info["account_code"],
+                "account_name": debit_info["account_name"],
+                "account_type": debit_info.get("account_type", ""),
+                "debit": float(total_cost),
+                "credit": 0,
+                "currency_code": "SAR",
+                "description": desc,
+                "party_id": str(tx["party_id"]) if tx.get("party_id") else None,
+                "party_name": tx.get("party_name_resolved") or tx.get("party_name_snapshot"),
+                "party_role": tx.get("party_role"),
+                **common_dims,
+            })
+            line_no += 1
+
+        # CREDIT line
+        if credit_info:
+            je_lines.append({
+                "line_no": line_no,
+                "account_code": credit_info["account_code"],
+                "account_name": credit_info["account_name"],
+                "account_type": credit_info.get("account_type", ""),
+                "debit": 0,
+                "credit": float(total_cost),
+                "currency_code": "SAR",
+                "description": desc,
+                "party_id": str(tx["party_id"]) if tx.get("party_id") else None,
+                "party_name": tx.get("party_name_resolved") or tx.get("party_name_snapshot"),
+                "party_role": tx.get("party_role"),
+                **common_dims,
+            })
+
+        total_debit = sum(l["debit"] for l in je_lines)
+        total_credit = sum(l["credit"] for l in je_lines)
+
+        return ok(data={
+            "lines": je_lines,
+            "total_debit": total_debit,
+            "total_credit": total_credit,
+            "is_balanced": abs(total_debit - total_credit) < 0.01,
+            "tx_type": tx_type,
+            "tx_serial": tx.get("serial"),
+            "tx_status": tx.get("status"),
+            "tx_date": tx["tx_date"].isoformat() if tx.get("tx_date") else None,
+            "reason_name": reason_name,
+            "warnings": warnings,
+            "is_preview": tx.get("status") == "draft",
+            "actual_je_id": str(tx["je_id"]) if tx.get("je_id") else None,
+            "actual_je_serial": tx.get("je_serial"),
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"فشل توليد التوجيه المحاسبي: {str(e)[:300]}"
+        )
+
+
 @router.post("/transactions-v2/{tx_id}/post")
 async def post_transaction_v2(
     tx_id: uuid.UUID,
