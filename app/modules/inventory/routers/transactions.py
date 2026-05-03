@@ -639,8 +639,8 @@ async def get_je_preview(
 
         # Resolve account names from coa_accounts (schema-aware)
         # ⚠️ Different installations may use different column names:
-        # - account_code OR code OR account_no
-        # - account_name OR name OR account_title
+        # - account_code OR code OR account_no OR id_code
+        # - account_name OR name OR name_ar OR account_title OR description
         # We detect the actual schema first, then query
         async def get_coa_columns():
             r = await db.execute(text("""
@@ -650,31 +650,28 @@ async def get_je_preview(
             return {row[0] for row in r.fetchall()}
 
         coa_cols = await get_coa_columns()
-        # Determine actual column names
-        code_col = (
-            'account_code' if 'account_code' in coa_cols
-            else 'code' if 'code' in coa_cols
-            else 'account_no' if 'account_no' in coa_cols
-            else None
-        )
-        name_col = (
-            'account_name' if 'account_name' in coa_cols
-            else 'name' if 'name' in coa_cols
-            else 'account_title' if 'account_title' in coa_cols
-            else None
-        )
-        type_col = (
-            'account_type' if 'account_type' in coa_cols
-            else 'type' if 'type' in coa_cols
-            else None
-        )
+
+        # Pick code column (priority order)
+        code_col = next((c for c in [
+            'account_code', 'code', 'account_no', 'no', 'id_code'
+        ] if c in coa_cols), None)
+
+        # Pick name column (priority: Arabic first since ZATCA)
+        name_col = next((c for c in [
+            'name_ar', 'account_name_ar', 'account_name',
+            'name', 'account_title', 'title', 'description', 'account_description'
+        ] if c in coa_cols), None)
+
+        # Pick type column
+        type_col = next((c for c in [
+            'account_type', 'type', 'category', 'account_category'
+        ] if c in coa_cols), None)
 
         async def get_account_info(code):
             if not code or not code_col:
-                return None
+                return {"account_code": str(code), "account_name": "حساب " + str(code), "account_type": ""}
             try:
-                cols_select = []
-                cols_select.append(f"{code_col} AS account_code")
+                cols_select = [f"{code_col} AS account_code"]
                 if name_col:
                     cols_select.append(f"{name_col} AS account_name")
                 if type_col:
@@ -691,11 +688,10 @@ async def get_je_preview(
                     d = dict(ar._mapping)
                     return {
                         "account_code": d.get("account_code", code),
-                        "account_name": d.get("account_name", "حساب " + str(code)),
+                        "account_name": d.get("account_name") or "حساب " + str(code),
                         "account_type": d.get("account_type", ""),
                     }
             except Exception as e:
-                # Fail gracefully — return code only
                 pass
             return {"account_code": str(code), "account_name": "حساب " + str(code), "account_type": ""}
 
@@ -708,19 +704,45 @@ async def get_je_preview(
             warnings.append(f"لم يتم تعريف حساب الدائن لـ {tx_type}. أعد إعدادات الحسابات.")
 
         # Build JE preview lines (simple 2-line preview at the header level)
-        # For more detail, we'd loop through each tx line, but most ERPs aggregate
         je_lines = []
         line_no = 1
 
         # Determine description
         desc = tx.get("description") or f"{tx_type} - {tx.get('serial', '')}"
 
-        # Common dimensions
+        # Common dimensions (apply to all lines)
         common_dims = {
             "branch_code": tx.get("branch_code"),
             "cost_center_code": tx.get("cost_center_code"),
             "project_code": tx.get("project_code"),
         }
+
+        # ⭐ Smart party assignment — party only on the receivable/payable account
+        # NOT on both lines (would cause balance to show 0 in party statement!)
+        # Logic per tx_type:
+        #   GRN, RETURN_OUT (in)   → Party on CREDIT side  (Payable to vendor / Sales credit)
+        #   GIN, GDN, RETURN_IN, SCRAP (out) → Party on DEBIT side (Receivable / COGS)
+        #   IT, IJ, IJ+ → No party at all (internal movement)
+        party_data = {
+            "party_id": str(tx["party_id"]) if tx.get("party_id") else None,
+            "party_name": tx.get("party_name_resolved") or tx.get("party_name_snapshot"),
+            "party_role": tx.get("party_role"),
+        }
+
+        # Determine which side gets the party
+        party_on_debit = False
+        party_on_credit = False
+        if tx.get("party_id"):
+            if tx_type in ("GRN", "RETURN_OUT"):
+                party_on_credit = True   # Vendor payable / customer return
+            elif tx_type in ("GDN", "RETURN_IN"):
+                party_on_debit = True    # Customer receivable / vendor return
+            elif tx_type in ("GIN", "SCRAP"):
+                # Direct issue/scrap to party (rare but possible)
+                party_on_debit = True
+            # IT, IJ, IJ+ → no party
+
+        empty_party = {"party_id": None, "party_name": None, "party_role": None}
 
         # DEBIT line
         if debit_info:
@@ -733,9 +755,7 @@ async def get_je_preview(
                 "credit": 0,
                 "currency_code": "SAR",
                 "description": desc,
-                "party_id": str(tx["party_id"]) if tx.get("party_id") else None,
-                "party_name": tx.get("party_name_resolved") or tx.get("party_name_snapshot"),
-                "party_role": tx.get("party_role"),
+                **(party_data if party_on_debit else empty_party),
                 **common_dims,
             })
             line_no += 1
@@ -751,9 +771,7 @@ async def get_je_preview(
                 "credit": float(total_cost),
                 "currency_code": "SAR",
                 "description": desc,
-                "party_id": str(tx["party_id"]) if tx.get("party_id") else None,
-                "party_name": tx.get("party_name_resolved") or tx.get("party_name_snapshot"),
-                "party_role": tx.get("party_role"),
+                **(party_data if party_on_credit else empty_party),
                 **common_dims,
             })
 
