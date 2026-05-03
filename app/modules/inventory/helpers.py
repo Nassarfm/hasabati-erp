@@ -789,13 +789,37 @@ async def post_je_v5(
         t_id = uuid.UUID(tenant_id)
         engine = PostingEngine(db, t_id)
 
-        # Build dimension dict for lines (يدعمه PostingEngine حالياً)
-        dims: Dict[str, Any] = {}
-        if party_id:           dims["party_id"] = str(party_id)
-        if party_role:         dims["party_role"] = party_role
-        if branch_code:        dims["branch_code"] = branch_code
-        if cost_center_code:   dims["cost_center_code"] = cost_center_code
-        if project_code:       dims["project_code"] = project_code
+        # Build dimension dict — common dims (apply to all lines)
+        common_dims: Dict[str, Any] = {}
+        if branch_code:        common_dims["branch_code"] = branch_code
+        if cost_center_code:   common_dims["cost_center_code"] = cost_center_code
+        if project_code:       common_dims["project_code"] = project_code
+
+        # ⭐ Smart party assignment (2026-05-04) — accounting best practice
+        # Party should appear ONLY on the payable/receivable side, NOT both
+        # Otherwise Subsidiary Ledger shows dr+cr canceling to zero balance
+        #
+        # Logic by tx_type:
+        #   GRN, RETURN_OUT  → party on CREDIT line  (vendor payable)
+        #   GDN, RETURN_IN   → party on DEBIT line   (customer receivable)
+        #   GIN, SCRAP       → party on DEBIT line   (cost charged to party)
+        #   IT, IJ, IJ+      → no party (internal movement)
+        party_dims: Dict[str, Any] = {}
+        if party_id:
+            party_dims["party_id"] = str(party_id)
+        if party_role:
+            party_dims["party_role"] = party_role
+
+        party_on_debit = False
+        party_on_credit = False
+        if party_dims:
+            if tx_type in ("GRN", "RETURN_OUT"):
+                party_on_credit = True
+            elif tx_type in ("GDN", "RETURN_IN"):
+                party_on_debit = True
+            elif tx_type in ("GIN", "SCRAP"):
+                party_on_debit = True
+            # IT, IJ, IJ+ → no party
 
         line_dr = PostingLine(
             account_code=debit_account,
@@ -809,11 +833,22 @@ async def post_je_v5(
             debit=Decimal(0),
             credit=amount,
         )
-        # Attach dimensions if PostingLine supports them
+
+        # Attach common dimensions (branch, cost_center, project) to BOTH lines
         for line in (line_dr, line_cr):
-            for k, v in dims.items():
+            for k, v in common_dims.items():
                 if hasattr(line, k):
                     setattr(line, k, v)
+
+        # Attach party ONLY to the correct side
+        if party_on_debit:
+            for k, v in party_dims.items():
+                if hasattr(line_dr, k):
+                    setattr(line_dr, k, v)
+        if party_on_credit:
+            for k, v in party_dims.items():
+                if hasattr(line_cr, k):
+                    setattr(line_cr, k, v)
 
         # Build PostingRequest kwargs — only pass what PostingRequest accepts
         # ⚠️ source_id removed (not accepted by PostingRequest)

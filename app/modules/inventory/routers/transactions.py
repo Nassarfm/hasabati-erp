@@ -735,10 +735,49 @@ async def get_je_preview(
         desc = tx.get("description") or f"{tx_type} - {tx.get('serial', '')}"
 
         # Common dimensions (apply to all lines)
+        # Fetch dimension names for display
+        async def get_dim_name(dim_type, dim_code):
+            if not dim_code:
+                return None
+            try:
+                # dimensions table has: type (branch/cost_center/project), code, name_ar
+                r = await db.execute(text("""
+                    SELECT name_ar, name_en, name FROM dimensions
+                    WHERE tenant_id=:tid AND type=:type AND code=:code
+                    LIMIT 1
+                """), {"tid": tid, "type": dim_type, "code": str(dim_code)})
+                row = r.fetchone()
+                if row:
+                    d = dict(row._mapping)
+                    return d.get("name_ar") or d.get("name_en") or d.get("name")
+            except Exception:
+                # Try alternative table name
+                try:
+                    r = await db.execute(text("""
+                        SELECT value_name, value_name_ar FROM dimension_values dv
+                        JOIN dimensions d ON d.id = dv.dimension_id
+                        WHERE d.tenant_id=:tid AND d.dimension_type=:type AND dv.value_code=:code
+                        LIMIT 1
+                    """), {"tid": tid, "type": dim_type, "code": str(dim_code)})
+                    row = r.fetchone()
+                    if row:
+                        d = dict(row._mapping)
+                        return d.get("value_name_ar") or d.get("value_name")
+                except Exception:
+                    pass
+            return None
+
+        branch_name = await get_dim_name("branch", tx.get("branch_code")) if tx.get("branch_code") else None
+        cc_name = await get_dim_name("cost_center", tx.get("cost_center_code")) if tx.get("cost_center_code") else None
+        prj_name = await get_dim_name("project", tx.get("project_code")) if tx.get("project_code") else None
+
         common_dims = {
             "branch_code": tx.get("branch_code"),
+            "branch_name": branch_name,
             "cost_center_code": tx.get("cost_center_code"),
+            "cost_center_name": cc_name,
             "project_code": tx.get("project_code"),
+            "project_name": prj_name,
         }
 
         # ⭐ Smart party assignment — party only on the receivable/payable account
