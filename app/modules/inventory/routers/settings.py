@@ -82,47 +82,87 @@ async def update_account_setting(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    tid = str(user.tenant_id)
-    if tx_type not in TX_TYPES_ALL:
-        raise HTTPException(400, f"نوع الحركة '{tx_type}' غير معروف")
+    """
+    إنشاء/تعديل إعدادات حسابات tx_type معيّن.
+    يتحقّق من وجود الحسابات في دليل الحسابات coa_accounts،
+    وأنّها مفعّلة وقابلة للترحيل قبل الحفظ.
+    """
+    try:
+        tid = str(user.tenant_id)
+        if tx_type not in TX_TYPES_ALL:
+            raise HTTPException(400, f"نوع الحركة '{tx_type}' غير معروف")
 
-    debit = data.get("debit_account")
-    credit = data.get("credit_account")
+        debit = (data.get("debit_account") or "").strip() or None
+        credit = (data.get("credit_account") or "").strip() or None
+        desc = data.get("description")
 
-    # Validate accounts exist in CoA (skip if both empty)
-    for label, code in [("Debit", debit), ("Credit", credit)]:
-        if code:
+        # ── Validate accounts in CoA (skip if both empty) ──
+        # ⚠️ coa_accounts uses 'code' and 'name_ar' (NOT account_code/account_name)
+        for label_ar, label_en, code in [
+            ("الحساب المدين", "Debit", debit),
+            ("الحساب الدائن", "Credit", credit),
+        ]:
+            if not code:
+                continue
             rc = await db.execute(text("""
-                SELECT account_code, account_name, is_active
+                SELECT code, name_ar, is_active, postable
                 FROM coa_accounts
-                WHERE tenant_id=:tid AND account_code=:c
+                WHERE tenant_id = :tid AND code = :c
+                LIMIT 1
             """), {"tid": tid, "c": code})
             row = rc.fetchone()
             if not row:
-                raise HTTPException(400, f"{label} account '{code}' غير موجود في دليل الحسابات")
-            if not row[2]:
-                raise HTTPException(400, f"{label} account '{code}' غير مفعّل")
+                raise HTTPException(
+                    400,
+                    f"{label_ar} '{code}' غير موجود في دليل الحسابات"
+                )
+            if not row.is_active:
+                raise HTTPException(
+                    400,
+                    f"{label_ar} '{code} - {row.name_ar}' غير مفعّل"
+                )
+            if not row.postable:
+                raise HTTPException(
+                    400,
+                    f"{label_ar} '{code} - {row.name_ar}' غير قابل للترحيل (مجموعة وليس حساباً تفصيلياً)"
+                )
 
-    await db.execute(text("""
-        INSERT INTO inv_account_settings (
-            id, tenant_id, tx_type, debit_account, credit_account, description
-        ) VALUES (
-            gen_random_uuid(), :tid, :tt, :dr, :cr, :desc
+        # ── Upsert ──
+        await db.execute(text("""
+            INSERT INTO inv_account_settings (
+                id, tenant_id, tx_type, debit_account, credit_account, description, updated_at
+            ) VALUES (
+                gen_random_uuid(), :tid, :tt, :dr, :cr, :desc, NOW()
+            )
+            ON CONFLICT (tenant_id, tx_type) DO UPDATE SET
+                debit_account  = EXCLUDED.debit_account,
+                credit_account = EXCLUDED.credit_account,
+                description    = EXCLUDED.description,
+                updated_at     = NOW()
+        """), {
+            "tid": tid, "tt": tx_type,
+            "dr": debit, "cr": credit, "desc": desc,
+        })
+        await db.commit()
+
+        return ok(
+            data={
+                "tx_type": tx_type,
+                "debit_account": debit,
+                "credit_account": credit,
+                "description": desc,
+            },
+            message="✅ تم حفظ الإعدادات",
         )
-        ON CONFLICT (tenant_id, tx_type) DO UPDATE SET
-            debit_account  = EXCLUDED.debit_account,
-            credit_account = EXCLUDED.credit_account,
-            description    = EXCLUDED.description
-    """), {
-        "tid": tid, "tt": tx_type,
-        "dr": debit, "cr": credit,
-        "desc": data.get("description"),
-    })
-    await db.commit()
-    return ok(
-        data={"tx_type": tx_type, "debit_account": debit, "credit_account": credit},
-        message="✅ تم حفظ الإعدادات",
-    )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            400,
+            f"فشل حفظ إعدادات حسابات '{tx_type}': {str(e)[:300]}"
+        )
 
 
 @router.delete("/accounts/{tx_type}", status_code=204)
