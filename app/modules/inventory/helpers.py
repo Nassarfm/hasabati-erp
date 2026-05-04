@@ -757,6 +757,13 @@ async def next_inv_serial(
 # ═══════════════════════════════════════════════════════════════════════════
 # 11. POST_JE_V5 — Posting with party + dimensions + reason
 # ═══════════════════════════════════════════════════════════════════════════
+# Refactored 2026-05-04:
+#   - PostingEngine الآن يدعم كل الحقول مباشرة (party_id, party_role,
+#     party_name, branch_code, cost_center, cost_center_code, project_code,
+#     reason_code) — لا حاجة لـ setattr/hasattr أو UPDATE workaround.
+#   - source_id → source_doc_id (الاسم الصحيح في PostingRequest).
+#   - party_name يُحلّ مرّة واحدة قبل بناء PostingLine.
+# ═══════════════════════════════════════════════════════════════════════════
 async def post_je_v5(
     db: AsyncSession,
     *,
@@ -781,6 +788,14 @@ async def post_je_v5(
     """
     يرحّل قيد محاسبي مع كل أبعاد المخزون.
     يستخدم نفس AsyncSession ⇒ atomicity كاملة مع باقي العمليات.
+
+    Smart Party Assignment (best practice محاسبيّاً):
+      - GRN, RETURN_OUT  → party على CREDIT (المورّد دائن)
+      - GDN, RETURN_IN   → party على DEBIT  (العميل مدين)
+      - GIN, SCRAP       → party على DEBIT  (تكلفة على المتعامل)
+      - IT, IJ, IJ+      → بدون party (حركة داخليّة)
+
+    Party يظهر فقط على جانب واحد، لتجنّب إلغاء الرصيد في الأستاذ المساعد.
     """
     try:
         from app.services.posting.engine import (
@@ -789,71 +804,66 @@ async def post_je_v5(
         t_id = uuid.UUID(tenant_id)
         engine = PostingEngine(db, t_id)
 
-        # Build dimension dict — common dims (apply to all lines)
-        common_dims: Dict[str, Any] = {}
-        if branch_code:        common_dims["branch_code"] = branch_code
-        if cost_center_code:   common_dims["cost_center_code"] = cost_center_code
-        if project_code:       common_dims["project_code"] = project_code
-
-        # ⭐ Smart party assignment (2026-05-04) — accounting best practice
-        # Party should appear ONLY on the payable/receivable side, NOT both
-        # Otherwise Subsidiary Ledger shows dr+cr canceling to zero balance
-        #
-        # Logic by tx_type:
-        #   GRN, RETURN_OUT  → party on CREDIT line  (vendor payable)
-        #   GDN, RETURN_IN   → party on DEBIT line   (customer receivable)
-        #   GIN, SCRAP       → party on DEBIT line   (cost charged to party)
-        #   IT, IJ, IJ+      → no party (internal movement)
-        party_dims: Dict[str, Any] = {}
-        if party_id:
-            party_dims["party_id"] = str(party_id)
-        if party_role:
-            party_dims["party_role"] = party_role
-
-        party_on_debit = False
+        # ── 1. Smart Party Assignment — تحديد الجانب ──
+        party_on_debit  = False
         party_on_credit = False
-        if party_dims:
+        if party_id:
             if tx_type in ("GRN", "RETURN_OUT"):
                 party_on_credit = True
-            elif tx_type in ("GDN", "RETURN_IN"):
-                party_on_debit = True
-            elif tx_type in ("GIN", "SCRAP"):
+            elif tx_type in ("GDN", "RETURN_IN", "GIN", "SCRAP"):
                 party_on_debit = True
             # IT, IJ, IJ+ → no party
 
+        # ── 2. Resolve party_name once (snapshot للأستاذ المساعد) ──
+        party_name: Optional[str] = None
+        if party_id and (party_on_debit or party_on_credit):
+            r = await db.execute(
+                text("SELECT name FROM parties WHERE id = :pid LIMIT 1"),
+                {"pid": str(party_id)},
+            )
+            row = r.fetchone()
+            party_name = row[0] if row else None
+
+        # ── 3. Common dimensions — تطبَّق على كلا السطرين ──
+        # cost_center و cost_center_code: DB يحوي كليهما — نملؤهما معاً
+        cc_value = cost_center_code  # نفس القيمة لكلا العمودين
+
+        # ── 4. Build the two lines ──
         line_dr = PostingLine(
             account_code=debit_account,
             description=description,
             debit=amount,
             credit=Decimal(0),
+            # Common dimensions
+            branch_code=branch_code,
+            cost_center=cc_value,
+            cost_center_code=cc_value,
+            project_code=project_code,
+            reason_code=reason_code,
+            # Party — only if assigned to debit side
+            party_id=str(party_id) if (party_id and party_on_debit) else None,
+            party_role=party_role if party_on_debit else None,
+            party_name=party_name if party_on_debit else None,
         )
         line_cr = PostingLine(
             account_code=credit_account,
             description=description,
             debit=Decimal(0),
             credit=amount,
+            # Common dimensions
+            branch_code=branch_code,
+            cost_center=cc_value,
+            cost_center_code=cc_value,
+            project_code=project_code,
+            reason_code=reason_code,
+            # Party — only if assigned to credit side
+            party_id=str(party_id) if (party_id and party_on_credit) else None,
+            party_role=party_role if party_on_credit else None,
+            party_name=party_name if party_on_credit else None,
         )
 
-        # Attach common dimensions (branch, cost_center, project) to BOTH lines
-        for line in (line_dr, line_cr):
-            for k, v in common_dims.items():
-                if hasattr(line, k):
-                    setattr(line, k, v)
-
-        # Attach party ONLY to the correct side
-        if party_on_debit:
-            for k, v in party_dims.items():
-                if hasattr(line_dr, k):
-                    setattr(line_dr, k, v)
-        if party_on_credit:
-            for k, v in party_dims.items():
-                if hasattr(line_cr, k):
-                    setattr(line_cr, k, v)
-
-        # Build PostingRequest kwargs — only pass what PostingRequest accepts
-        # ⚠️ source_id removed (not accepted by PostingRequest)
-        # If your PostingEngine version supports it, uncomment below
-        pr_kwargs = {
+        # ── 5. Build PostingRequest ──
+        pr_kwargs: Dict[str, Any] = {
             "tenant_id": t_id,
             "je_type": tx_type,
             "description": description,
@@ -863,73 +873,27 @@ async def post_je_v5(
             "reference": reference,
             "source_module": "inventory",
         }
-        # Try to attach source_id if PostingRequest supports it
-        try:
-            import inspect
-            sig = inspect.signature(PostingRequest)
-            if "source_id" in sig.parameters and source_id:
-                pr_kwargs["source_id"] = str(source_id)
-        except Exception:
-            pass
+        # ربط القيد بالـ source document (GRN/GIN/IT/IJ ID)
+        if source_id:
+            pr_kwargs["source_doc_id"] = source_id
+            pr_kwargs["source_doc_type"] = tx_type
 
+        # ── 6. Post via engine — ORM يكتب كل الحقول مباشرة ──
         result = await engine.post(PostingRequest(**pr_kwargs))
-        je_id = str(result.je_id)
 
-        # ⚠️ Workaround: PostingEngine may not support party_id/party_role in lines
-        # Manually update je_lines to set party where it should be
-        # (according to Smart Party Assignment logic above)
-        if party_id and (party_on_debit or party_on_credit):
-            # Get party name for snapshot
-            party_name_result = await db.execute(
-                text("SELECT name FROM parties WHERE id=:pid LIMIT 1"),
-                {"pid": str(party_id)},
-            )
-            party_row = party_name_result.fetchone()
-            party_name = party_row[0] if party_row else None
-
-            # Update appropriate side
-            if party_on_debit:
-                await db.execute(
-                    text("""
-                        UPDATE je_lines
-                        SET party_id = :pid,
-                            party_role = :prole,
-                            party_name = :pname
-                        WHERE journal_entry_id = :jid AND debit > 0
-                    """),
-                    {
-                        "pid": str(party_id),
-                        "prole": party_role or "vendor",
-                        "pname": party_name,
-                        "jid": je_id,
-                    },
-                )
-            if party_on_credit:
-                await db.execute(
-                    text("""
-                        UPDATE je_lines
-                        SET party_id = :pid,
-                            party_role = :prole,
-                            party_name = :pname
-                        WHERE journal_entry_id = :jid AND credit > 0
-                    """),
-                    {
-                        "pid": str(party_id),
-                        "prole": party_role or "vendor",
-                        "pname": party_name,
-                        "jid": je_id,
-                    },
-                )
-
+        # ── 7. Return — لا حاجة لأيّ UPDATE workaround بعد الـ refactor ──
         return {
-            "je_id": je_id,
+            "je_id":     str(result.je_id),
             "je_serial": result.je_serial,
         }
+
+    except HTTPException:
+        raise
     except Exception as e:
-        # Posting failure is a critical error — bubble it up
+        # Posting failure is a critical error — bubble it up with context
         raise HTTPException(
             status_code=500,
-            detail=f"فشل ترحيل القيد المحاسبي: {str(e)}",
+            detail=f"فشل ترحيل القيد المحاسبي: {str(e)[:300]}",
         )
 
 
